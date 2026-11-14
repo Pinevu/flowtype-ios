@@ -15,12 +15,6 @@ static void SwizzleMethod(Class cls, SEL origSel, SEL newSel) {
     }
 }
 
-@interface GKBVoiceInputLauncher : NSObject
-@property (nonatomic, weak) id delegate;
-@property (nonatomic, strong) id textDocumentProxy;
-- (void)launchVoiceInput;
-@end
-
 @interface UIInputViewController (LintypeHooks)
 - (void)lintype_viewDidAppear:(BOOL)animated;
 - (void)lintype_startVoiceInput;
@@ -46,7 +40,6 @@ static void SwizzleMethod(Class cls, SEL origSel, SEL newSel) {
         micBtn.layer.cornerRadius = 17;
         micBtn.layer.masksToBounds = YES;
         
-        // Microphone glyph
         UILabel *iconLabel = [[UILabel alloc] initWithFrame:micBtn.bounds];
         iconLabel.text = @"🎙";
         iconLabel.font = [UIFont systemFontOfSize:17];
@@ -76,23 +69,21 @@ static void SwizzleMethod(Class cls, SEL origSel, SEL newSel) {
 
 @end
 
-@interface GKBVoiceInputLauncher (LintypeLauncherHooks)
-- (void)lintype_launchVoiceInput;
-@end
+// C function IMP to avoid compile-time undefined symbol for GKBVoiceInputLauncher
+static void Lintype_VoiceInputLauncher_launchVoiceInput(id self, SEL _cmd) {
+    id delegate = nil;
+    @try {
+        delegate = [self valueForKey:@"delegate"];
+    } @catch (NSException *e) {}
 
-@implementation GKBVoiceInputLauncher (LintypeLauncherHooks)
-
-- (void)lintype_launchVoiceInput {
     UIInputViewController *vc = nil;
-    if ([self.delegate isKindOfClass:[UIInputViewController class]]) {
-        vc = (UIInputViewController *)self.delegate;
+    if ([delegate isKindOfClass:[UIInputViewController class]]) {
+        vc = (UIInputViewController *)delegate;
     } else {
         vc = [LintypeVoiceManager sharedManager].activeInputViewController;
     }
     [[LintypeVoiceManager sharedManager] presentVoiceOverlayInViewController:vc];
 }
-
-@end
 
 __attribute__((constructor)) static void init_lintype_gboard(void) {
     NSLog(@"[LintypeGboard] Initializing Lintype Gboard Mod...");
@@ -100,7 +91,7 @@ __attribute__((constructor)) static void init_lintype_gboard(void) {
     // Install iOS Native Theme hooks for 9-key layout & clean candidates
     [GboardNativeTheme installThemeHooks];
 
-    // Install Voice Input Hooks
+    // Install Voice Input Hooks on GKBUIInputViewController
     Class inputVcCls = objc_getClass("GKBUIInputViewController");
     if (inputVcCls) {
         SwizzleMethod(inputVcCls, @selector(viewDidAppear:), @selector(lintype_viewDidAppear:));
@@ -108,9 +99,11 @@ __attribute__((constructor)) static void init_lintype_gboard(void) {
         SwizzleMethod(inputVcCls, @selector(handleVoiceInput), @selector(lintype_handleVoiceInput));
     }
 
+    // Install Voice Input Hook on GKBVoiceInputLauncher
     Class voiceLauncherCls = objc_getClass("GKBVoiceInputLauncher");
     if (voiceLauncherCls) {
-        SwizzleMethod(voiceLauncherCls, @selector(launchVoiceInput), @selector(lintype_launchVoiceInput));
+        SEL launchSel = @selector(launchVoiceInput);
+        class_replaceMethod(voiceLauncherCls, launchSel, (IMP)Lintype_VoiceInputLauncher_launchVoiceInput, "v@:");
     }
 
     NSLog(@"[LintypeGboard] Successfully hooked voice input and native iOS theme!");

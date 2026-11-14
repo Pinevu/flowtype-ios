@@ -36,6 +36,7 @@ jobs:
             -fobjc-arc \
             -O2 \
             -I GboardMod \
+            -Wl,-undefined,dynamic_lookup \
             -framework Foundation \
             -framework UIKit \
             -framework CoreGraphics \
