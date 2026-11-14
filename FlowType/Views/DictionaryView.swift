@@ -116,7 +116,7 @@ struct DictionaryView: View {
                 NavigationStack {
                     Form {
                         Section("词条信息") {
-                            TextField("词条内容（如：张伟、FlowType）", text: $newTerm)
+                            TextField("词条内容（如：张伟、Lintype）", text: $newTerm)
                             TextField("可选拼音提示（如：zhangwei）", text: $newPinyinHint)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()

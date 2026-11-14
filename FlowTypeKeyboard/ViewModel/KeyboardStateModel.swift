@@ -38,6 +38,7 @@ public final class KeyboardStateModel: ObservableObject {
     @Published public var manualLanguage: ManualLanguage = .chinesePinyin
     @Published public var layoutPage: ManualLayoutPage = .letters
     @Published public var shiftState: ShiftState = .off
+    @Published public var pinyinLayoutMode: PinyinLayoutMode = .t9
 
     @Published public var config: AIConfiguration
     @Published public var personalWords: [PersonalWord]
@@ -58,6 +59,11 @@ public final class KeyboardStateModel: ObservableObject {
     @Published public var pinyinCandidates: [PinyinCandidate] = []
     @Published public var isCandidateDrawerExpanded: Bool = false
     @Published public var englishSuggestions: [String] = []
+
+    // MARK: - T9 (九宫格) Input State
+    @Published public var t9ComposingDigits: String = ""
+    @Published public var t9SyllableOptions: [String] = []
+    @Published public var selectedT9SyllableFilter: String? = nil
 
     // MARK: - Undo State
     @Published public var canUndoLastAIInsert: Bool = false
@@ -94,6 +100,7 @@ public final class KeyboardStateModel: ObservableObject {
         self.personalWords = store.loadDictionary()
         self.hostStatus = store.loadStatus()
         self.selectedTargetLanguage = cfg.selectedTargetLanguage
+        self.pinyinLayoutMode = cfg.defaultPinyinLayout
         switch cfg.defaultKeyboardTab {
         case .voice:
             self.activePanel = .voice
@@ -290,18 +297,43 @@ public final class KeyboardStateModel: ObservableObject {
 
     public func switchToPanel(_ panel: KeyboardPanel) {
         triggerHaptic()
-        if panel == .voice && !composingPinyin.isEmpty {
-            commitComposingAsRawLetters()
+        if panel == .voice {
+            if !composingPinyin.isEmpty {
+                commitComposingAsRawLetters()
+            }
+            if !t9ComposingDigits.isEmpty {
+                commitT9AsRawDigits()
+            }
+        } else if panel == .manual {
+            // 切换手打默认使用九宫格拼音输入
+            manualLanguage = .chinesePinyin
+            pinyinLayoutMode = .t9
+            layoutPage = .letters
         }
         activePanel = panel
         isCandidateDrawerExpanded = false
         refreshContextFromProxy()
     }
 
+    public func togglePinyinLayoutMode() {
+        triggerHaptic()
+        if !composingPinyin.isEmpty {
+            commitComposingAsRawLetters()
+        }
+        if !t9ComposingDigits.isEmpty {
+            commitT9AsRawDigits()
+        }
+        pinyinLayoutMode = (pinyinLayoutMode == .t9 ? .qwerty : .t9)
+        isCandidateDrawerExpanded = false
+    }
+
     public func toggleManualLanguage() {
         triggerHaptic()
         if !composingPinyin.isEmpty {
             commitComposingAsRawLetters()
+        }
+        if !t9ComposingDigits.isEmpty {
+            commitT9AsRawDigits()
         }
         manualLanguage = (manualLanguage == .chinesePinyin) ? .english : .chinesePinyin
         layoutPage = .letters
@@ -373,6 +405,10 @@ public final class KeyboardStateModel: ObservableObject {
 
     public func handleSpaceTap() {
         triggerHaptic()
+        if manualLanguage == .chinesePinyin && pinyinLayoutMode == .t9 && (!t9ComposingDigits.isEmpty || !pinyinCandidates.isEmpty) {
+            handleT9SpaceTap()
+            return
+        }
         if manualLanguage == .chinesePinyin && !composingPinyin.isEmpty {
             commitTopPinyinCandidate()
             return
@@ -405,6 +441,10 @@ public final class KeyboardStateModel: ObservableObject {
 
     public func handleReturnTap() {
         triggerHaptic()
+        if manualLanguage == .chinesePinyin && pinyinLayoutMode == .t9 && !t9ComposingDigits.isEmpty {
+            commitT9AsRawDigits()
+            return
+        }
         if manualLanguage == .chinesePinyin && !composingPinyin.isEmpty {
             commitComposingAsRawLetters()
             return
@@ -418,6 +458,10 @@ public final class KeyboardStateModel: ObservableObject {
 
     public func handleBackspaceTap() {
         triggerHaptic()
+        if manualLanguage == .chinesePinyin && pinyinLayoutMode == .t9 && (!t9ComposingDigits.isEmpty || selectedT9SyllableFilter != nil) {
+            handleT9BackspaceTap()
+            return
+        }
         if manualLanguage == .chinesePinyin && !composingPinyin.isEmpty {
             composingPinyin.removeLast()
             if composingPinyin.isEmpty {
@@ -439,7 +483,9 @@ public final class KeyboardStateModel: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.backspaceStepCount += 1
-                if self.manualLanguage == .chinesePinyin && !self.composingPinyin.isEmpty {
+                if self.manualLanguage == .chinesePinyin && self.pinyinLayoutMode == .t9 && !self.t9ComposingDigits.isEmpty {
+                    self.handleT9BackspaceTap()
+                } else if self.manualLanguage == .chinesePinyin && !self.composingPinyin.isEmpty {
                     self.composingPinyin.removeLast()
                     if self.composingPinyin.isEmpty {
                         self.clearComposing()
@@ -507,6 +553,29 @@ public final class KeyboardStateModel: ObservableObject {
         guard let proxy = proxyProvider?() else { return }
         proxy.insertText(candidate.text)
 
+        if pinyinLayoutMode == .t9 && !t9ComposingDigits.isEmpty {
+            if !candidate.displayPinyin.isEmpty {
+                lexicon.recordChineseSelection(pinyin: candidate.displayPinyin, word: candidate.text)
+            }
+            maybeAutoLearnCorrection(term: candidate.text, pinyinHint: candidate.displayPinyin)
+
+            let pureDigits = t9ComposingDigits.replacingOccurrences(of: "'", with: "")
+            if candidate.consumedChars >= pureDigits.count || candidate.isFullMatch {
+                clearT9Composing()
+            } else {
+                let remaining = String(pureDigits.dropFirst(candidate.consumedChars))
+                if remaining.isEmpty {
+                    clearT9Composing()
+                } else {
+                    t9ComposingDigits = remaining
+                    selectedT9SyllableFilter = nil
+                    updateT9Candidates()
+                }
+            }
+            refreshContextFromProxy()
+            return
+        }
+
         let clean = composingPinyin.lowercased().filter { $0 >= "a" && $0 <= "z" }
         let usedPinyin = String(clean.prefix(candidate.consumedChars))
         lexicon.recordChineseSelection(pinyin: usedPinyin, word: candidate.text)
@@ -547,6 +616,131 @@ public final class KeyboardStateModel: ObservableObject {
         displayPinyin = ""
         pinyinCandidates = []
         isCandidateDrawerExpanded = false
+        clearT9Composing()
+    }
+
+    // MARK: - T9 (九宫格) Input Handlers
+
+    public func handleT9KeyTap(_ key: String) {
+        triggerHaptic()
+        statusBannerMessage = nil
+
+        switch key {
+        case "1":
+            // Key 1: If composing, acts as syllable divider / apostrophe "'"; otherwise inserts comma
+            if !t9ComposingDigits.isEmpty {
+                if !t9ComposingDigits.hasSuffix("'") {
+                    t9ComposingDigits.append("'")
+                    updateT9Candidates()
+                }
+            } else {
+                proxyProvider?()?.insertText("，")
+                refreshContextFromProxy()
+            }
+        case "2", "3", "4", "5", "6", "7", "8", "9":
+            t9ComposingDigits.append(key)
+            updateT9Candidates()
+        default:
+            proxyProvider?()?.insertText(key)
+            refreshContextFromProxy()
+        }
+    }
+
+    public func updateT9Candidates() {
+        let digits = t9ComposingDigits
+        guard !digits.isEmpty else {
+            clearT9Composing()
+            return
+        }
+
+        let words = personalWords
+        let filter = selectedT9SyllableFilter
+        queryQueue.async { [weak self] in
+            guard let self else { return }
+            let (sylls, cands) = self.lexicon.queryT9Candidates(
+                digits: digits,
+                pinyinFilter: filter,
+                personalWords: words,
+                limit: 40
+            )
+            Task { @MainActor [weak self] in
+                guard let self, self.t9ComposingDigits == digits else { return }
+                self.t9SyllableOptions = sylls
+                self.pinyinCandidates = cands
+                self.displayPinyin = filter ?? digits
+            }
+        }
+    }
+
+    public func selectT9SyllableFilter(_ syll: String?) {
+        triggerHaptic()
+        if selectedT9SyllableFilter == syll {
+            selectedT9SyllableFilter = nil
+        } else {
+            selectedT9SyllableFilter = syll
+        }
+        updateT9Candidates()
+    }
+
+    public func commitT9AsRawDigits() {
+        let raw = t9ComposingDigits
+        guard !raw.isEmpty else { return }
+        proxyProvider?()?.insertText(raw)
+        clearT9Composing()
+        refreshContextFromProxy()
+    }
+
+    public func clearT9Composing() {
+        t9ComposingDigits = ""
+        t9SyllableOptions = []
+        selectedT9SyllableFilter = nil
+        pinyinCandidates = []
+        displayPinyin = ""
+        isCandidateDrawerExpanded = false
+    }
+
+    public func handleT9SpaceTap() {
+        triggerHaptic()
+        if let first = pinyinCandidates.first {
+            selectPinyinCandidate(first)
+            return
+        }
+        if !t9ComposingDigits.isEmpty {
+            commitT9AsRawDigits()
+            return
+        }
+        proxyProvider?()?.insertText(" ")
+        refreshContextFromProxy()
+    }
+
+    public func handleT9ReturnTap() {
+        triggerHaptic()
+        if !t9ComposingDigits.isEmpty {
+            commitT9AsRawDigits()
+            return
+        }
+        proxyProvider?()?.insertText("\n")
+        refreshContextFromProxy()
+    }
+
+    public func handleT9BackspaceTap() {
+        triggerHaptic()
+        if selectedT9SyllableFilter != nil {
+            selectedT9SyllableFilter = nil
+            updateT9Candidates()
+            return
+        }
+        if !t9ComposingDigits.isEmpty {
+            t9ComposingDigits.removeLast()
+            if t9ComposingDigits.isEmpty {
+                clearT9Composing()
+            } else {
+                updateT9Candidates()
+            }
+            return
+        }
+        proxyProvider?()?.deleteBackward()
+        refreshContextFromProxy()
     }
 
     // MARK: - English Completions

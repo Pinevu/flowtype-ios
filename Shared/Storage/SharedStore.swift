@@ -178,6 +178,32 @@ public final class SharedStore {
         writeJSON(config, to: "config.json")
     }
 
+    // MARK: - Custom Keyboard Background
+
+    public var customBackgroundImageURL: URL {
+        fileURL("custom_keyboard_bg.jpg")
+    }
+
+    public func saveCustomBackgroundImage(_ data: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        let url = customBackgroundImageURL
+        try? data.write(to: url, options: [.atomic])
+    }
+
+    public func loadCustomBackgroundImageData() -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        let url = customBackgroundImageURL
+        return try? Data(contentsOf: url)
+    }
+
+    public func removeCustomBackgroundImage() {
+        lock.lock()
+        defer { lock.unlock() }
+        try? FileManager.default.removeItem(at: customBackgroundImageURL)
+    }
+
     // MARK: - Personal Dictionary
 
     public func loadDictionary() -> [PersonalWord] {

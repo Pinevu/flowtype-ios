@@ -151,4 +151,31 @@ final class FlowTypeTests: XCTestCase {
         XCTAssertEqual(Array(candidates.prefix(3)), ["group.com.flowtype.voice", "group.com.example.one", "group.com.example.two"])
         XCTAssertTrue(candidates.contains("group.com.demo.flowtype"))
     }
+
+    func testT9PinyinDecodingAndCandidates() {
+        let db = LexiconDatabase(bundleDBURL: Bundle(for: LexiconDatabase.self).url(forResource: "lexicon", withExtension: "sqlite"))
+
+        // 1. T9 mapping
+        XCTAssertEqual(LexiconDatabase.pinyinToT9Digits("nihao"), "64426")
+        XCTAssertEqual(LexiconDatabase.pinyinToT9Digits("women"), "96636")
+
+        // 2. Syllables for digits
+        let sylls64 = LexiconDatabase.syllablesForT9Digits("64")
+        XCTAssertTrue(sylls64.contains("ni"))
+        XCTAssertTrue(sylls64.contains("mi"))
+
+        // 3. Exact phrases by T9 digits
+        let (_, cands64426) = db.queryT9Candidates(digits: "64426")
+        XCTAssertTrue(cands64426.contains(where: { $0.text == "你好" }))
+
+        // 4. Exact chars & initials by T9 digits
+        let (_, cands64) = db.queryT9Candidates(digits: "64")
+        XCTAssertTrue(cands64.contains(where: { $0.text == "你" }))
+        XCTAssertTrue(cands64.contains(where: { $0.text == "米" }))
+        XCTAssertTrue(cands64.contains(where: { $0.text == "你好" }))
+
+        // 5. Filtered by syllable
+        let (_, candsFiltered) = db.queryT9Candidates(digits: "64", pinyinFilter: "ni")
+        XCTAssertTrue(candsFiltered.contains(where: { $0.text == "你" }))
+    }
 }

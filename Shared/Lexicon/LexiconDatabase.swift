@@ -334,6 +334,147 @@ public final class LexiconDatabase: @unchecked Sendable {
         }
     }
 
+    // MARK: - T9 (九宫格) Pinyin Decoding
+
+    public static func letterToT9Digit(_ ch: Character) -> Character? {
+        switch ch.lowercased().first ?? " " {
+        case "a", "b", "c": return "2"
+        case "d", "e", "f": return "3"
+        case "g", "h", "i": return "4"
+        case "j", "k", "l": return "5"
+        case "m", "n", "o": return "6"
+        case "p", "q", "r", "s": return "7"
+        case "t", "u", "v": return "8"
+        case "w", "x", "y", "z": return "9"
+        default: return nil
+        }
+    }
+
+    public static func pinyinToT9Digits(_ pinyin: String) -> String {
+        var digits = ""
+        for ch in pinyin.lowercased() {
+            if let d = letterToT9Digit(ch) {
+                digits.append(d)
+            }
+        }
+        return digits
+    }
+
+    public static func syllablesForT9Digits(_ digits: String) -> [String] {
+        let clean = digits.filter { $0 >= "2" && $0 <= "9" }
+        guard !clean.isEmpty else { return [] }
+        var matches: [String] = []
+        for s in PinyinSyllableParser.validSyllables {
+            let d = pinyinToT9Digits(s)
+            if d == clean {
+                matches.append(s)
+            }
+        }
+        return matches.sorted()
+    }
+
+    public func queryT9Candidates(
+        digits: String,
+        pinyinFilter: String? = nil,
+        personalWords: [PersonalWord] = [],
+        limit: Int = 40
+    ) -> (syllableOptions: [String], candidates: [PinyinCandidate]) {
+        let cleanDigits = digits.filter { ($0 >= "2" && $0 <= "9") || $0 == "'" }
+        guard !cleanDigits.isEmpty else { return ([], []) }
+
+        // If user tapped a specific pinyin syllable filter (e.g. "ni" for "64"), query standard pinyin directly
+        if let filter = pinyinFilter, !filter.isEmpty {
+            let (_, pinyinCands) = queryPinyinCandidates(rawInput: filter, fuzzy: false, personalWords: personalWords, limit: limit)
+            let syllables = Self.syllablesForT9Digits(cleanDigits)
+            return (syllables, pinyinCands)
+        }
+
+        return queue.sync {
+            var results: [PinyinCandidate] = []
+            var seenTexts = Set<String>()
+
+            func appendCandidate(_ cand: PinyinCandidate) {
+                guard results.count < limit else { return }
+                let key = "\(cand.text)#\(cand.consumedChars)"
+                if !seenTexts.contains(key) {
+                    seenTexts.insert(key)
+                    results.append(cand)
+                }
+            }
+
+            let pureDigits = cleanDigits.replacingOccurrences(of: "'", with: "")
+            let syllableOptions = Self.syllablesForT9Digits(pureDigits)
+
+            // 1. Personal Dictionary matching T9 digits
+            for entry in personalWords where !entry.pinyinHint.isEmpty {
+                let hintDigits = Self.pinyinToT9Digits(entry.pinyinHint)
+                if hintDigits == pureDigits || (pureDigits.count >= 2 && hintDigits.hasPrefix(pureDigits)) {
+                    appendCandidate(PinyinCandidate(
+                        text: entry.term,
+                        consumedChars: pureDigits.count,
+                        displayPinyin: entry.pinyinHint,
+                        isFullMatch: true,
+                        source: .personalDictionary
+                    ))
+                }
+            }
+
+            // 2. Exact phrases from bundle matching T9
+            let exactPhrases = fetchBundlePhrasesByT9(t9: pureDigits, limit: 16)
+            for item in exactPhrases {
+                appendCandidate(PinyinCandidate(
+                    text: item.word,
+                    consumedChars: pureDigits.count,
+                    displayPinyin: item.pinyin,
+                    isFullMatch: true,
+                    source: .exactPhrase
+                ))
+            }
+
+            // 3. Exact single characters matching T9
+            let exactChars = fetchBundleCharsByT9(t9: pureDigits, limit: 20)
+            for item in exactChars {
+                appendCandidate(PinyinCandidate(
+                    text: item.hanzi,
+                    consumedChars: pureDigits.count,
+                    displayPinyin: item.pinyin,
+                    isFullMatch: true,
+                    source: .singleChar
+                ))
+            }
+
+            // 4. Initials (简拼) phrases matching T9 (e.g. "64" -> "你好", "96" -> "我们")
+            if pureDigits.count >= 2 && pureDigits.count <= 6 {
+                let initialsPhrases = fetchBundlePhrasesByT9Initials(t9: pureDigits, limit: 14)
+                for item in initialsPhrases {
+                    appendCandidate(PinyinCandidate(
+                        text: item.word,
+                        consumedChars: pureDigits.count,
+                        displayPinyin: item.pinyin,
+                        isFullMatch: true,
+                        source: .prefixOrInitial
+                    ))
+                }
+            }
+
+            // 5. Prefix phrases matching T9 prefix
+            if results.count < limit && pureDigits.count >= 2 {
+                let prefixPhrases = fetchBundlePhrasesByT9Prefix(prefix: pureDigits, limit: 10)
+                for item in prefixPhrases {
+                    appendCandidate(PinyinCandidate(
+                        text: item.word,
+                        consumedChars: pureDigits.count,
+                        displayPinyin: item.pinyin,
+                        isFullMatch: false,
+                        source: .prefixOrInitial
+                    ))
+                }
+            }
+
+            return (syllableOptions, results)
+        }
+    }
+
     // MARK: - English Prefix Completions
 
     public func queryEnglishCompletions(
@@ -667,6 +808,75 @@ public final class LexiconDatabase: @unchecked Sendable {
         while sqlite3_step(stmt) == SQLITE_ROW {
             if let cStr = sqlite3_column_text(stmt, 0) {
                 rows.append((String(cString: cStr), Int(sqlite3_column_int64(stmt, 1))))
+            }
+        }
+        return rows
+    }
+
+    private func fetchBundlePhrasesByT9(t9: String, limit: Int) -> [(word: String, freq: Int, pinyin: String)] {
+        guard let db = bundleDB else { return [] }
+        let sql = "SELECT word, freq, pinyin FROM phrases WHERE t9 = ? ORDER BY freq DESC LIMIT ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, t9, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(limit))
+        var rows: [(word: String, freq: Int, pinyin: String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let wStr = sqlite3_column_text(stmt, 0), let pyStr = sqlite3_column_text(stmt, 2) {
+                rows.append((String(cString: wStr), Int(sqlite3_column_int64(stmt, 1)), String(cString: pyStr)))
+            }
+        }
+        return rows
+    }
+
+    private func fetchBundleCharsByT9(t9: String, limit: Int) -> [(hanzi: String, freq: Int, pinyin: String)] {
+        guard let db = bundleDB else { return [] }
+        let sql = "SELECT hanzi, freq, pinyin FROM chars WHERE t9 = ? ORDER BY freq DESC LIMIT ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, t9, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(limit))
+        var rows: [(hanzi: String, freq: Int, pinyin: String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let hStr = sqlite3_column_text(stmt, 0), let pyStr = sqlite3_column_text(stmt, 2) {
+                rows.append((String(cString: hStr), Int(sqlite3_column_int64(stmt, 1)), String(cString: pyStr)))
+            }
+        }
+        return rows
+    }
+
+    private func fetchBundlePhrasesByT9Initials(t9: String, limit: Int) -> [(word: String, freq: Int, pinyin: String)] {
+        guard let db = bundleDB else { return [] }
+        let sql = "SELECT word, freq, pinyin FROM phrases WHERE t9_initials = ? ORDER BY freq DESC LIMIT ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, t9, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(limit))
+        var rows: [(word: String, freq: Int, pinyin: String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let wStr = sqlite3_column_text(stmt, 0), let pyStr = sqlite3_column_text(stmt, 2) {
+                rows.append((String(cString: wStr), Int(sqlite3_column_int64(stmt, 1)), String(cString: pyStr)))
+            }
+        }
+        return rows
+    }
+
+    private func fetchBundlePhrasesByT9Prefix(prefix: String, limit: Int) -> [(word: String, freq: Int, pinyin: String)] {
+        guard let db = bundleDB else { return [] }
+        let sql = "SELECT word, freq, pinyin FROM phrases WHERE t9 >= ? AND t9 < ? ORDER BY freq DESC LIMIT ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, prefix, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, nextPrefixBound(prefix), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 3, Int32(limit))
+        var rows: [(word: String, freq: Int, pinyin: String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let wStr = sqlite3_column_text(stmt, 0), let pyStr = sqlite3_column_text(stmt, 2) {
+                rows.append((String(cString: wStr), Int(sqlite3_column_int64(stmt, 1)), String(cString: pyStr)))
             }
         }
         return rows

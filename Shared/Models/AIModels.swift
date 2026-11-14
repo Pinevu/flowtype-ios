@@ -77,6 +77,48 @@ public enum KeyboardDefaultTab: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+public enum PinyinLayoutMode: String, Codable, CaseIterable, Identifiable {
+    case t9 = "t9"         // 九宫格
+    case qwerty = "qwerty" // 26键全拼
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .t9: return "九宫格拼音"
+        case .qwerty: return "26键全拼"
+        }
+    }
+}
+
+public enum KeyboardBackgroundStyle: String, Codable, CaseIterable, Identifiable {
+    case system = "system"             // 跟随系统自适应
+    case pureDark = "pure_dark"         // 极夜黑
+    case cleanLight = "clean_light"     // 纯净白
+    case oceanBlue = "ocean_blue"       // 暮色蓝
+    case neonPurple = "neon_purple"     // 极光霓虹紫
+    case morandiGrey = "morandi_grey"   // 莫兰迪灰
+    case cherryPink = "cherry_pink"     // 晨曦粉
+    case customColor = "custom_color"   // 自定义纯色
+    case customImage = "custom_image"   // 自定义图片壁纸
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .system: return "跟随系统"
+        case .pureDark: return "极夜黑"
+        case .cleanLight: return "纯净白"
+        case .oceanBlue: return "暮色蓝"
+        case .neonPurple: return "极光紫"
+        case .morandiGrey: return "莫兰迪灰"
+        case .cherryPink: return "晨曦粉"
+        case .customColor: return "自定义纯色"
+        case .customImage: return "自定义图片壁纸"
+        }
+    }
+}
+
 public enum AppearancePreference: String, Codable, CaseIterable, Identifiable {
     case system
     case light
@@ -123,11 +165,18 @@ public struct AIConfiguration: Codable, Equatable {
     public var autoKeepAlivePiP: Bool
     public var enableAudioBackgroundKeepAlive: Bool
     public var defaultKeyboardTab: KeyboardDefaultTab
+    public var defaultPinyinLayout: PinyinLayoutMode
     public var enableSwipeToType: Bool
     public var hapticFeedback: Bool
     public var doubleSpacePeriod: Bool
     public var enablePinyinFuzzy: Bool
     public var appearance: AppearancePreference
+
+    // MARK: - Custom Background & Opacity Preferences
+    public var backgroundStyle: KeyboardBackgroundStyle
+    public var backgroundOpacity: Double
+    public var customBackgroundHex: String
+    public var customBackgroundImageName: String
 
     public init(
         asrProvider: ASRProviderKind = .openAIWhisperCompatible,
@@ -150,11 +199,16 @@ public struct AIConfiguration: Codable, Equatable {
         autoKeepAlivePiP: Bool = true,
         enableAudioBackgroundKeepAlive: Bool = false,
         defaultKeyboardTab: KeyboardDefaultTab = .voice,
+        defaultPinyinLayout: PinyinLayoutMode = .t9,
         enableSwipeToType: Bool = true,
         hapticFeedback: Bool = true,
         doubleSpacePeriod: Bool = true,
         enablePinyinFuzzy: Bool = false,
-        appearance: AppearancePreference = .system
+        appearance: AppearancePreference = .system,
+        backgroundStyle: KeyboardBackgroundStyle = .system,
+        backgroundOpacity: Double = 1.0,
+        customBackgroundHex: String = "#1E1E2E",
+        customBackgroundImageName: String = "custom_keyboard_bg.jpg"
     ) {
         self.asrProvider = asrProvider
         self.asrBaseURL = asrBaseURL
@@ -176,11 +230,50 @@ public struct AIConfiguration: Codable, Equatable {
         self.autoKeepAlivePiP = autoKeepAlivePiP
         self.enableAudioBackgroundKeepAlive = enableAudioBackgroundKeepAlive
         self.defaultKeyboardTab = defaultKeyboardTab
+        self.defaultPinyinLayout = defaultPinyinLayout
         self.enableSwipeToType = enableSwipeToType
         self.hapticFeedback = hapticFeedback
         self.doubleSpacePeriod = doubleSpacePeriod
         self.enablePinyinFuzzy = enablePinyinFuzzy
         self.appearance = appearance
+        self.backgroundStyle = backgroundStyle
+        self.backgroundOpacity = backgroundOpacity
+        self.customBackgroundHex = customBackgroundHex
+        self.customBackgroundImageName = customBackgroundImageName
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.asrProvider = try container.decodeIfPresent(ASRProviderKind.self, forKey: .asrProvider) ?? .openAIWhisperCompatible
+        self.asrBaseURL = try container.decodeIfPresent(String.self, forKey: .asrBaseURL) ?? "https://api.openai.com/v1"
+        self.asrAPIKey = try container.decodeIfPresent(String.self, forKey: .asrAPIKey) ?? ""
+        self.asrModel = try container.decodeIfPresent(String.self, forKey: .asrModel) ?? "whisper-1"
+        self.asrLanguage = try container.decodeIfPresent(String.self, forKey: .asrLanguage) ?? "auto"
+        self.llmProvider = try container.decodeIfPresent(LLMProviderKind.self, forKey: .llmProvider) ?? .openAICompatible
+        self.llmBaseURL = try container.decodeIfPresent(String.self, forKey: .llmBaseURL) ?? "https://api.openai.com/v1"
+        self.llmAPIKey = try container.decodeIfPresent(String.self, forKey: .llmAPIKey) ?? ""
+        self.llmModel = try container.decodeIfPresent(String.self, forKey: .llmModel) ?? "gpt-4o-mini"
+        self.llmTemperature = try container.decodeIfPresent(Double.self, forKey: .llmTemperature) ?? 0.2
+        self.enableSmartCleanup = try container.decodeIfPresent(Bool.self, forKey: .enableSmartCleanup) ?? true
+        self.customDictationPrompt = try container.decodeIfPresent(String.self, forKey: .customDictationPrompt) ?? Self.defaultDictationPrompt
+        self.customEditPrompt = try container.decodeIfPresent(String.self, forKey: .customEditPrompt) ?? Self.defaultEditPrompt
+        self.customTranslatePrompt = try container.decodeIfPresent(String.self, forKey: .customTranslatePrompt) ?? Self.defaultTranslatePrompt
+        self.customHelpWritePrompt = try container.decodeIfPresent(String.self, forKey: .customHelpWritePrompt) ?? Self.defaultHelpWritePrompt
+        self.targetLanguages = try container.decodeIfPresent([String].self, forKey: .targetLanguages) ?? ["English", "简体中文", "日本語", "한국어", "Español", "Français"]
+        self.selectedTargetLanguage = try container.decodeIfPresent(String.self, forKey: .selectedTargetLanguage) ?? "English"
+        self.autoKeepAlivePiP = try container.decodeIfPresent(Bool.self, forKey: .autoKeepAlivePiP) ?? true
+        self.enableAudioBackgroundKeepAlive = try container.decodeIfPresent(Bool.self, forKey: .enableAudioBackgroundKeepAlive) ?? false
+        self.defaultKeyboardTab = try container.decodeIfPresent(KeyboardDefaultTab.self, forKey: .defaultKeyboardTab) ?? .voice
+        self.defaultPinyinLayout = try container.decodeIfPresent(PinyinLayoutMode.self, forKey: .defaultPinyinLayout) ?? .t9
+        self.enableSwipeToType = try container.decodeIfPresent(Bool.self, forKey: .enableSwipeToType) ?? true
+        self.hapticFeedback = try container.decodeIfPresent(Bool.self, forKey: .hapticFeedback) ?? true
+        self.doubleSpacePeriod = try container.decodeIfPresent(Bool.self, forKey: .doubleSpacePeriod) ?? true
+        self.enablePinyinFuzzy = try container.decodeIfPresent(Bool.self, forKey: .enablePinyinFuzzy) ?? false
+        self.appearance = try container.decodeIfPresent(AppearancePreference.self, forKey: .appearance) ?? .system
+        self.backgroundStyle = try container.decodeIfPresent(KeyboardBackgroundStyle.self, forKey: .backgroundStyle) ?? .system
+        self.backgroundOpacity = try container.decodeIfPresent(Double.self, forKey: .backgroundOpacity) ?? 1.0
+        self.customBackgroundHex = try container.decodeIfPresent(String.self, forKey: .customBackgroundHex) ?? "#1E1E2E"
+        self.customBackgroundImageName = try container.decodeIfPresent(String.self, forKey: .customBackgroundImageName) ?? "custom_keyboard_bg.jpg"
     }
 
     public static let defaultDictationPrompt = """

@@ -39,7 +39,7 @@ public struct VoiceKeyboardPanel: View {
         HStack(spacing: 8) {
             Image(systemName: "lock.shield")
                 .foregroundStyle(.orange)
-            Text("请前往「系统设置 → 键盘 → FlowType」开启「允许完全访问」以启用语音联动与个人词典")
+            Text("请前往「系统设置 → 键盘 → Lintype语音输入」开启「允许完全访问」以启用语音联动与个人词典")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Spacer()

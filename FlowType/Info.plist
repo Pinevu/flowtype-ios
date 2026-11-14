@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh_CN</string>
 	<key>CFBundleDisplayName</key>
-	<string>FlowType</string>
+	<string>Lintype语音输入</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -45,9 +45,9 @@
 		<true/>
 	</dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>FlowType 需要访问麦克风以提供语音听写、语音改写与实时翻译功能。</string>
+	<string>Lintype语音输入 需要访问麦克风以提供语音听写、语音改写与实时翻译功能。</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>FlowType 支持可选的系统语音识别引擎将您的口述转换为文字。</string>
+	<string>Lintype语音输入 支持可选的系统语音识别引擎将您的口述转换为文字。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

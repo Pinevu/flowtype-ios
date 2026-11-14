@@ -27,7 +27,7 @@ struct HomeView: View {
                 .padding(.vertical, 12)
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("FlowType 语音输入法")
+            .navigationTitle("Lintype语音输入")
             .onAppear {
                 refreshKeyboardEnabledState()
             }
@@ -111,7 +111,7 @@ struct HomeView: View {
                     .clipShape(Capsule())
             }
 
-            Text("1. 前往「系统设置 → 键盘 → 键盘 → 添加新键盘」选择 FlowType 语音键盘。\n2. 点进该键盘开启「允许完全访问」（用于读取 App Group 配置、AI 语音结果同步与词典）。")
+            Text("1. 前往「系统设置 → 键盘 → 键盘 → 添加新键盘」选择 Lintype语音输入。\n2. 点进该键盘开启「允许完全访问」（用于读取 App Group 配置、AI 语音结果同步与词典）。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -320,6 +320,6 @@ struct HomeView: View {
                 }
             }
         }
-        isKeyboardEnabled = keyboards.contains { $0.contains("FlowType") || candidateExtIDs.contains($0) }
+        isKeyboardEnabled = keyboards.contains { $0.contains("FlowType") || $0.contains("Lintype") || candidateExtIDs.contains($0) }
     }
 }
