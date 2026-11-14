@@ -5,24 +5,33 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FlowType iOS — IPA 下载</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; max-width: 640px; margin: 40px auto; padding: 0 20px; color: #111827; line-height: 1.6; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; max-width: 680px; margin: 40px auto; padding: 0 20px; color: #111827; line-height: 1.6; }
     .card { border: 1px solid #e5e7eb; border-radius: 16px; padding: 24px; background: #f9fafb; }
     .btn { display: inline-block; background: #2563eb; color: #fff; text-decoration: none; padding: 12px 20px; border-radius: 10px; font-weight: 600; margin: 8px 8px 8px 0; }
     .btn-sec { background: #111827; }
     code { background: #e5e7eb; padding: 2px 6px; border-radius: 6px; font-size: 0.85em; word-break: break-all; }
+    ul { padding-left: 20px; }
   </style>
 </head>
 <body>
   <div class="card">
-    <h1>FlowType iOS (MVP)</h1>
-    <p>AI 语音 + 全拼/英文手打输入法（CI Run #3，提交 <code>e18f447</code>，5/5 单元测试通过）</p>
+    <h1>FlowType iOS (v0.1.1-mvp)</h1>
+    <p>AI 语音 + 全拼/英文手打输入法（CI Run #7，提交 <code>f0a6ffb</code>，6/6 单元测试通过）</p>
     <p>
-      <a class="btn" href="./FlowType-unsigned.ipa" download="FlowType-unsigned.ipa">直接下载 FlowType-unsigned.ipa (5.1 MB)</a>
+      <a class="btn" href="./FlowType-unsigned.ipa" download="FlowType-unsigned.ipa">直接下载 FlowType-unsigned.ipa (5.13 MB)</a>
       <a class="btn btn-sec" href="apple-magnifier://install?url=https://pinevu.github.io/flowtype-ios/FlowType-unsigned.ipa">TrollStore 一键安装</a>
     </p>
-    <p><strong>文件大小：</strong>5,300,557 字节</p>
-    <p><strong>SHA-256：</strong><code>e0570c9ced465a165d109ae28d4c7bf401f88dcee0e8a943ca133ed04d51b09f</code></p>
-    <p>提示：本包为未签名版，适用于 TrollStore 或轻松签/AltStore/Sideloadly/zsign 重签（重签时请保留主 App 与键盘扩展的同组 App Group 权限）。</p>
+    <p><strong>文件大小：</strong>5,377,418 字节</p>
+    <p><strong>SHA-256：</strong><code>580d6c97e01f76ef23fa6cfc5adcf82b3474e5007d53d9ba531f2cb2e8dd504d</code></p>
+    <h3>v0.1.1 更新说明（全能签 / 第三方证书兼容）</h3>
+    <ul>
+      <li>打包时预写入 <code>com.apple.security.application-groups</code> 权限声明，避免重签工具跳过 App Group 权限</li>
+      <li>自动读取主 App 与键盘扩展签名文件中的授权 App Group（不再硬编码 <code>group.com.flowtype.voice</code>）</li>
+      <li>新增 <code>Keychain Access Group</code>（钥匙串访问组）自动降级同步通道</li>
+      <li>优化画中画（PiP）KVO 启动与 <code>OSStatus 561017449</code> 音频会话冲突提示</li>
+      <li>首页直接展示签名文件中的授权 App Group ID 与一键复制按钮</li>
+    </ul>
+    <p>提示：本包为未签名版，适用于全能签、轻松签、巨魔、AltStore、Sideloadly、zsign 重签（全能签重签时主 App 与键盘扩展需开启相同的 App Group 权限与「允许完全访问」）。</p>
   </div>
 </body>
 </html>
