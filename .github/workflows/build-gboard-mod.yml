@@ -82,20 +82,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG_NAME="v1.0.3-gboard"
+          TAG_NAME="v1.0.4-gboard"
           gh release delete "$TAG_NAME" -y 2>/dev/null || true
           git tag -d "$TAG_NAME" 2>/dev/null || true
           git push origin :refs/tags/"$TAG_NAME" 2>/dev/null || true
 
           gh release create "$TAG_NAME" build/Gboard-Lintype-unsigned.ipa \
-            --title "Gboard + Typeless 自定义大模型 AI 语音输入版 (原生九宫格与键盘布局完全保留)" \
-            --notes "本版本（v1.0.3）重点按要求实现：
-          1. 【100%保留 Gboard 原生键盘布局与九宫格】：不再改动任何原版按键视图、九宫格结构、滑行输入与原生候选栏，保留 Gboard 原汁原味的极速打字体验。
-          2. 【参考 Typeless iOS 悬浮语音交互】：轻量半透明圆角卡片、5 段动态麦克风音量跳动声波、实时流式识别与一键上屏。
-          3. 【直录听写 vs AI 智能润色/帮我写】：支持在浮层上随时切换「🎙 直录听写」与「✨ AI 润色」，消除口误标点，结构化整理。
-          4. 【大模型全面自定义 (Custom Models)】：点击右上角 ⚙ 即可自定义 Base URL、API Key（提供剪贴板一键粘贴）、ASR 模型（Whisper/SenseVoice 等）、LLM 润色模型（GPT-4o/DeepSeek 等）及自定义 Prompt。内置 OpenAI、Groq、DeepSeek、SiliconFlow 预设。
-          5. 【免配置降级】：未填写 Key 时自动使用 iOS 原生语音听写引擎，即装即用。
-          6. 【iOS 18 + 全能签防闪退优化】：内置底层 AppGroup 与 Suite 动态安全兜底，Mach-O 严格保持 LC_CODE_SIGNATURE 尾部规范。"
+            --title "Gboard + Typeless AI 语音面板 UI 升级版 (v1.0.4)" \
+            --notes "本版本（v1.0.4）全面重构语音交互界面并保持 Gboard 原生布局：
+          1. 【全屏键盘式语音面板布局】：采用顶部「手打 + 听写/改写/翻译/帮写 + 模型」工具栏、居中大圆形麦克风按钮、底部「拼音 | 空格 | ⌫ | 换行」原生质感快捷键。
+          2. 【四大 Typeless 语音模式】：支持「听写（智能清理口癖与标点）」、「改写（支持读取选中文字按指令重写）」、「翻译（多目标语言一键切换）」、「帮写（简短口述生成完整正文）」。
+          3. 【自定义模型与 DeepSeek 兼容】：支持 Whisper 云端 ASR + Apple 本地听写双轨切换（一键适配 OpenAI / Groq / DeepSeek / SiliconFlow 等纯对话或全能接口），支持上屏后一键撤销。
+          4. 【100% 保留 Gboard 原生手打布局】：原版九宫格、全键盘、滑行输入与候选词完全不侵入。
+          5. 【iOS 18 + 全能签防闪退】：AppGroup/Suite 安全兜底 + 严格 Mach-O LC_CODE_SIGNATURE 规范。"
 
       - name: Deploy to GitHub Pages
         run: |

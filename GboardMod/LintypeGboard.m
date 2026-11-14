@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "TypelessVoiceManager.h"
+#import "TypelessOverlayView.h"
 #import "TypelessConfig.h"
 
 #pragma mark - AppGroup & Suite Safety Fallbacks for ESign / TrollStore
@@ -18,8 +19,6 @@ static NSURL *safe_containerURL(id self, SEL _cmd, NSString *groupId) {
         return url;
     }
 
-    // When signed with third-party certs (ESign), containerURL returns nil for Google groups.
-    // Return a safe persistent directory inside the sandbox so Gboard doesn't crash on nil.
     @try {
         NSString *base = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
         if (!base) base = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -47,30 +46,79 @@ static id safe_initWithSuiteName(id self, SEL _cmd, NSString *suiteName) {
         return res;
     }
 
-    // In third-party certs, initWithSuiteName returns nil for group.com.google.keyboard.
-    // Return standardUserDefaults so callers never get a nil instance and do not crash.
     return [NSUserDefaults standardUserDefaults];
+}
+
+static void SafeHookInstanceMethod(Class cls, SEL sel, IMP replacementIMP, IMP *outOrigIMP) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    const char *types = method_getTypeEncoding(m);
+    IMP orig = method_getImplementation(m);
+    if (class_addMethod(cls, sel, replacementIMP, types)) {
+        if (outOrigIMP) *outOrigIMP = orig;
+    } else {
+        IMP swapped = method_setImplementation(m, replacementIMP);
+        if (outOrigIMP) *outOrigIMP = swapped;
+    }
 }
 
 static void install_sandbox_guards(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         NSLog(@"[LintypeGboard] Installing AppGroup & NSUserDefaults safety guards...");
-
-        // 1. Hook NSFileManager containerURLForSecurityApplicationGroupIdentifier:
-        Method mContainer = class_getInstanceMethod([NSFileManager class], @selector(containerURLForSecurityApplicationGroupIdentifier:));
-        if (mContainer) {
-            orig_containerURL = (void *)method_getImplementation(mContainer);
-            method_setImplementation(mContainer, (IMP)safe_containerURL);
-        }
-
-        // 2. Hook NSUserDefaults initWithSuiteName:
-        Method mSuite = class_getInstanceMethod([NSUserDefaults class], @selector(initWithSuiteName:));
-        if (mSuite) {
-            orig_initWithSuiteName = (void *)method_getImplementation(mSuite);
-            method_setImplementation(mSuite, (IMP)safe_initWithSuiteName);
-        }
+        SafeHookInstanceMethod([NSFileManager class],
+                               @selector(containerURLForSecurityApplicationGroupIdentifier:),
+                               (IMP)safe_containerURL,
+                               (IMP *)&orig_containerURL);
+        SafeHookInstanceMethod([NSUserDefaults class],
+                               @selector(initWithSuiteName:),
+                               (IMP)safe_initWithSuiteName,
+                               (IMP *)&orig_initWithSuiteName);
     });
+}
+
+#pragma mark - Quick Voice Pill Helper
+
+static const NSInteger kTypelessMicButtonTag = 987654;
+
+static void EnsureQuickVoicePillInController(UIInputViewController *vc) {
+    if (!vc || !vc.view) return;
+    UIView *container = vc.view;
+    UIButton *pillBtn = (UIButton *)[container viewWithTag:kTypelessMicButtonTag];
+    if (!pillBtn) {
+        pillBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+        pillBtn.tag = kTypelessMicButtonTag;
+        pillBtn.backgroundColor = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:0.15];
+        pillBtn.layer.cornerRadius = 14.0;
+        pillBtn.layer.masksToBounds = YES;
+        pillBtn.layer.borderWidth = 0.5;
+        pillBtn.layer.borderColor = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:0.25].CGColor;
+        pillBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleBottomMargin;
+
+        UIColor *blueAccent = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1.0];
+        [pillBtn setTitle:@"语音" forState:UIControlStateNormal];
+        [pillBtn setTitleColor:blueAccent forState:UIControlStateNormal];
+        pillBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+        pillBtn.tintColor = blueAccent;
+
+        if (@available(iOS 13.0, *)) {
+            UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:11.5 weight:UIImageSymbolWeightSemibold];
+            [pillBtn setImage:[UIImage systemImageNamed:@"mic.fill" withConfiguration:cfg] forState:UIControlStateNormal];
+            pillBtn.imageEdgeInsets = UIEdgeInsetsMake(0, -2, 0, 2);
+            pillBtn.titleEdgeInsets = UIEdgeInsetsMake(0, 2, 0, -2);
+        }
+
+        [pillBtn addTarget:[TypelessVoiceManager sharedManager]
+                    action:@selector(quickMicTapped:)
+          forControlEvents:UIControlEventTouchUpInside];
+        [container addSubview:pillBtn];
+    }
+
+    CGFloat w = container.bounds.size.width;
+    if (w > 80) {
+        pillBtn.frame = CGRectMake(w - 70, 5, 62, 28);
+    }
+    [container bringSubviewToFront:pillBtn];
 }
 
 #pragma mark - Gboard UIInputViewController Hooks
@@ -83,36 +131,55 @@ static void my_inputVc_viewDidAppear(UIInputViewController *self, SEL _cmd, BOOL
 
     @try {
         [TypelessVoiceManager sharedManager].activeInputViewController = self;
-
-        static const NSInteger kTypelessMicButtonTag = 987654;
-        if (![self.view viewWithTag:kTypelessMicButtonTag]) {
-            UIButton *micBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-            micBtn.tag = kTypelessMicButtonTag;
-            micBtn.frame = CGRectMake(self.view.bounds.size.width - 44, 4, 38, 34);
-            micBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleBottomMargin;
-            micBtn.backgroundColor = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:0.12];
-            micBtn.layer.cornerRadius = 17;
-            micBtn.layer.masksToBounds = YES;
-
-            UILabel *iconLabel = [[UILabel alloc] initWithFrame:micBtn.bounds];
-            iconLabel.text = @"🎙";
-            iconLabel.font = [UIFont systemFontOfSize:17];
-            iconLabel.textAlignment = NSTextAlignmentCenter;
-            iconLabel.userInteractionEnabled = NO;
-            [micBtn addSubview:iconLabel];
-
-            [micBtn addTarget:[TypelessVoiceManager sharedManager] action:@selector(quickMicTapped:) forControlEvents:UIControlEventTouchUpInside];
-            [self.view addSubview:micBtn];
-            [self.view bringSubviewToFront:micBtn];
-        }
+        EnsureQuickVoicePillInController(self);
     } @catch (NSException *e) {
         NSLog(@"[LintypeGboard] Exception in viewDidAppear: %@", e);
     }
 }
 
+static void (*orig_inputVc_viewDidLayoutSubviews)(id self, SEL _cmd) = NULL;
+static void my_inputVc_viewDidLayoutSubviews(UIInputViewController *self, SEL _cmd) {
+    if (orig_inputVc_viewDidLayoutSubviews) {
+        orig_inputVc_viewDidLayoutSubviews(self, _cmd);
+    }
+
+    @try {
+        EnsureQuickVoicePillInController(self);
+        TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
+        if (mgr.isOverlayVisible) {
+            for (UIView *sub in self.view.subviews) {
+                if ([sub isKindOfClass:[TypelessOverlayView class]]) {
+                    sub.frame = self.view.bounds;
+                    [self.view bringSubviewToFront:sub];
+                    break;
+                }
+            }
+        }
+    } @catch (NSException *e) {}
+}
+
+static void (*orig_inputVc_selectionDidChange)(id self, SEL _cmd, id<UITextInput> textInput) = NULL;
+static void my_inputVc_selectionDidChange(UIInputViewController *self, SEL _cmd, id<UITextInput> textInput) {
+    if (orig_inputVc_selectionDidChange) {
+        orig_inputVc_selectionDidChange(self, _cmd, textInput);
+    }
+
+    @try {
+        TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
+        if (mgr.isOverlayVisible && mgr.state == TypelessSessionStateIdle) {
+            for (UIView *sub in self.view.subviews) {
+                if ([sub isKindOfClass:[TypelessOverlayView class]]) {
+                    [(TypelessOverlayView *)sub refreshStateUI];
+                    break;
+                }
+            }
+        }
+    } @catch (NSException *e) {}
+}
+
 static void my_inputVc_startVoiceInput(UIInputViewController *self, SEL _cmd) {
     @try {
-        [[TypelessVoiceManager sharedManager] presentVoiceOverlayInViewController:self];
+        [[TypelessVoiceManager sharedManager] presentVoiceOverlayInViewController:self autoStart:YES];
     } @catch (NSException *e) {
         NSLog(@"[LintypeGboard] Exception in startVoiceInput: %@", e);
     }
@@ -120,7 +187,7 @@ static void my_inputVc_startVoiceInput(UIInputViewController *self, SEL _cmd) {
 
 static void my_inputVc_handleVoiceInput(UIInputViewController *self, SEL _cmd) {
     @try {
-        [[TypelessVoiceManager sharedManager] presentVoiceOverlayInViewController:self];
+        [[TypelessVoiceManager sharedManager] presentVoiceOverlayInViewController:self autoStart:YES];
     } @catch (NSException *e) {
         NSLog(@"[LintypeGboard] Exception in handleVoiceInput: %@", e);
     }
@@ -139,7 +206,7 @@ static void my_voiceLauncher_launchVoiceInput(id self, SEL _cmd) {
         } else {
             vc = [TypelessVoiceManager sharedManager].activeInputViewController;
         }
-        [[TypelessVoiceManager sharedManager] presentVoiceOverlayInViewController:vc];
+        [[TypelessVoiceManager sharedManager] presentVoiceOverlayInViewController:vc autoStart:YES];
     } @catch (NSException *e) {
         NSLog(@"[LintypeGboard] Exception in launchVoiceInput: %@", e);
     }
@@ -158,15 +225,12 @@ __attribute__((constructor)) static void init_lintype_gboard(void) {
         return;
     }
 
-    // 3. Hook GKBUIInputViewController for Typeless voice input
-    // NOTE: Gboard's native keyboard layouts, 9-key, 26-key, themes, candidates are 100% untouched and preserved!
+    // 3. Hook GKBUIInputViewController safely while leaving 100% of Gboard's native layout untouched
     Class inputVcCls = objc_getClass("GKBUIInputViewController");
     if (inputVcCls) {
-        Method mAppear = class_getInstanceMethod(inputVcCls, @selector(viewDidAppear:));
-        if (mAppear) {
-            orig_inputVc_viewDidAppear = (void *)method_getImplementation(mAppear);
-            method_setImplementation(mAppear, (IMP)my_inputVc_viewDidAppear);
-        }
+        SafeHookInstanceMethod(inputVcCls, @selector(viewDidAppear:), (IMP)my_inputVc_viewDidAppear, (IMP *)&orig_inputVc_viewDidAppear);
+        SafeHookInstanceMethod(inputVcCls, @selector(viewDidLayoutSubviews), (IMP)my_inputVc_viewDidLayoutSubviews, (IMP *)&orig_inputVc_viewDidLayoutSubviews);
+        SafeHookInstanceMethod(inputVcCls, @selector(selectionDidChange:), (IMP)my_inputVc_selectionDidChange, (IMP *)&orig_inputVc_selectionDidChange);
 
         Method mStart = class_getInstanceMethod(inputVcCls, @selector(startVoiceInput));
         if (mStart) {
@@ -188,5 +252,5 @@ __attribute__((constructor)) static void init_lintype_gboard(void) {
         }
     }
 
-    NSLog(@"[LintypeGboard] Gboard Typeless AI Voice Mod initialized successfully (Native Layout 100%% Preserved)!");
+    NSLog(@"[LintypeGboard] Gboard Typeless AI Voice Mod initialized successfully (UI Aligned & Native Layout 100%% Preserved)!");
 }
