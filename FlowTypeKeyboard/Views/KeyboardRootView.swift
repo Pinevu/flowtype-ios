@@ -38,76 +38,76 @@ public struct KeyboardRootView: View {
     @ViewBuilder
     private var customBackgroundView: some View {
         ZStack {
-            // Base backdrop layer
-            backgroundSurface
-
-            // Custom styled background with user-configured opacity
             switch model.config.backgroundStyle {
             case .system:
-                EmptyView()
+                backgroundSurface
+                    .opacity(model.config.backgroundOpacity)
             case .pureDark:
-                Color.black.opacity(model.config.backgroundOpacity)
+                Color.black
+                    .opacity(model.config.backgroundOpacity)
             case .cleanLight:
-                Color.white.opacity(model.config.backgroundOpacity)
+                Color.white
+                    .opacity(model.config.backgroundOpacity)
             case .oceanBlue:
                 LinearGradient(
                     colors: [Color(red: 0.08, green: 0.18, blue: 0.36), Color(red: 0.05, green: 0.10, blue: 0.22)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
-                ).opacity(model.config.backgroundOpacity)
+                )
+                .opacity(model.config.backgroundOpacity)
             case .neonPurple:
                 LinearGradient(
                     colors: [Color(red: 0.28, green: 0.08, blue: 0.42), Color(red: 0.12, green: 0.04, blue: 0.28)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
-                ).opacity(model.config.backgroundOpacity)
+                )
+                .opacity(model.config.backgroundOpacity)
             case .morandiGrey:
-                Color(red: 0.45, green: 0.48, blue: 0.50).opacity(model.config.backgroundOpacity)
+                Color(red: 0.45, green: 0.48, blue: 0.50)
+                    .opacity(model.config.backgroundOpacity)
             case .cherryPink:
                 LinearGradient(
                     colors: [Color(red: 0.98, green: 0.88, blue: 0.90), Color(red: 0.92, green: 0.76, blue: 0.82)],
                     startPoint: .top,
                     endPoint: .bottom
-                ).opacity(model.config.backgroundOpacity)
+                )
+                .opacity(model.config.backgroundOpacity)
             case .customColor:
-                colorFromHex(model.config.customBackgroundHex).opacity(model.config.backgroundOpacity)
+                colorFromHex(model.config.customBackgroundHex)
+                    .opacity(model.config.backgroundOpacity)
             case .customImage:
-                if let data = SharedStore.shared.loadCustomBackgroundImageData(),
+                if let data = model.customBackgroundImageData,
                    let uiImg = UIImage(data: data) {
-                    Image(uiImage: uiImg)
-                        .resizable()
-                        .scaledToFill()
-                        .opacity(model.config.backgroundOpacity)
-                        .clipped()
+                    GeometryReader { geo in
+                        let layout = AIConfiguration.computeBackgroundCropLayout(
+                            imageWidth: Double(uiImg.size.width),
+                            imageHeight: Double(uiImg.size.height),
+                            containerWidth: Double(geo.size.width),
+                            containerHeight: Double(geo.size.height),
+                            scale: model.config.customBackgroundScale,
+                            normalizedOffsetX: model.config.customBackgroundOffsetX,
+                            normalizedOffsetY: model.config.customBackgroundOffsetY
+                        )
+
+                        Image(uiImage: uiImg)
+                            .resizable()
+                            .frame(width: layout.drawWidth, height: layout.drawHeight)
+                            .offset(x: layout.offsetX, y: layout.offsetY)
+                            .frame(width: geo.size.width, height: geo.size.height)
+                            .clipped()
+                            .opacity(model.config.backgroundOpacity)
+                    }
                 } else {
-                    colorFromHex(model.config.customBackgroundHex).opacity(model.config.backgroundOpacity)
+                    colorFromHex(model.config.customBackgroundHex)
+                        .opacity(model.config.backgroundOpacity)
                 }
             }
         }
     }
 
     private func colorFromHex(_ hex: String) -> Color {
-        let clean = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        var int: UInt64 = 0
-        Scanner(string: clean).scanHexInt64(&int)
-        let a, r, g, b: UInt64
-        switch clean.count {
-        case 3: // RGB (12-bit)
-            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
-        case 6: // RGB (24-bit)
-            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
-        case 8: // ARGB (32-bit)
-            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
-        default:
-            (a, r, g, b) = (255, 30, 30, 46)
-        }
-        return Color(
-            .sRGB,
-            red: Double(r) / 255,
-            green: Double(g) / 255,
-            blue: Double(b) / 255,
-            opacity: Double(a) / 255
-        )
+        let rgba = AIConfiguration.parseHexRGBA(hex)
+        return Color(.sRGB, red: rgba.r, green: rgba.g, blue: rgba.b, opacity: rgba.a)
     }
 
     private var backgroundSurface: Color {
@@ -159,11 +159,30 @@ public struct KeyboardRootView: View {
                     }
                 }
             } else {
-                // Quick manual info & inline voice shortcut
+                // Quick manual layout switch pill & language indicator
                 HStack(spacing: 6) {
-                    Text(model.manualLanguage == .chinesePinyin ? (model.pinyinLayoutMode == .t9 ? "九宫格拼音" : "全拼输入") : "English")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
+                    if model.manualLanguage == .chinesePinyin {
+                        Button {
+                            model.togglePinyinLayoutMode()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(model.pinyinLayoutMode == .t9 ? "九宫格" : "26键全拼")
+                                Image(systemName: "arrow.left.arrow.right")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .font(.system(size: 11, weight: .semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.secondary.opacity(0.16))
+                            .foregroundStyle(.primary)
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Text("English")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer()
                 }
             }

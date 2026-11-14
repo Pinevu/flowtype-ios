@@ -177,6 +177,10 @@ public struct AIConfiguration: Codable, Equatable {
     public var backgroundOpacity: Double
     public var customBackgroundHex: String
     public var customBackgroundImageName: String
+    public var customBackgroundScale: Double
+    public var customBackgroundOffsetX: Double
+    public var customBackgroundOffsetY: Double
+    public var customBackgroundRevision: Int
 
     public init(
         asrProvider: ASRProviderKind = .openAIWhisperCompatible,
@@ -208,7 +212,11 @@ public struct AIConfiguration: Codable, Equatable {
         backgroundStyle: KeyboardBackgroundStyle = .system,
         backgroundOpacity: Double = 1.0,
         customBackgroundHex: String = "#1E1E2E",
-        customBackgroundImageName: String = "custom_keyboard_bg.jpg"
+        customBackgroundImageName: String = "custom_keyboard_bg.jpg",
+        customBackgroundScale: Double = 1.0,
+        customBackgroundOffsetX: Double = 0.0,
+        customBackgroundOffsetY: Double = 0.0,
+        customBackgroundRevision: Int = 0
     ) {
         self.asrProvider = asrProvider
         self.asrBaseURL = asrBaseURL
@@ -240,6 +248,10 @@ public struct AIConfiguration: Codable, Equatable {
         self.backgroundOpacity = backgroundOpacity
         self.customBackgroundHex = customBackgroundHex
         self.customBackgroundImageName = customBackgroundImageName
+        self.customBackgroundScale = customBackgroundScale
+        self.customBackgroundOffsetX = customBackgroundOffsetX
+        self.customBackgroundOffsetY = customBackgroundOffsetY
+        self.customBackgroundRevision = customBackgroundRevision
     }
 
     public init(from decoder: Decoder) throws {
@@ -271,9 +283,14 @@ public struct AIConfiguration: Codable, Equatable {
         self.enablePinyinFuzzy = try container.decodeIfPresent(Bool.self, forKey: .enablePinyinFuzzy) ?? false
         self.appearance = try container.decodeIfPresent(AppearancePreference.self, forKey: .appearance) ?? .system
         self.backgroundStyle = try container.decodeIfPresent(KeyboardBackgroundStyle.self, forKey: .backgroundStyle) ?? .system
-        self.backgroundOpacity = try container.decodeIfPresent(Double.self, forKey: .backgroundOpacity) ?? 1.0
+        let rawOpacity = try container.decodeIfPresent(Double.self, forKey: .backgroundOpacity) ?? 1.0
+        self.backgroundOpacity = max(0.0, min(1.0, rawOpacity))
         self.customBackgroundHex = try container.decodeIfPresent(String.self, forKey: .customBackgroundHex) ?? "#1E1E2E"
         self.customBackgroundImageName = try container.decodeIfPresent(String.self, forKey: .customBackgroundImageName) ?? "custom_keyboard_bg.jpg"
+        self.customBackgroundScale = max(1.0, try container.decodeIfPresent(Double.self, forKey: .customBackgroundScale) ?? 1.0)
+        self.customBackgroundOffsetX = try container.decodeIfPresent(Double.self, forKey: .customBackgroundOffsetX) ?? 0.0
+        self.customBackgroundOffsetY = try container.decodeIfPresent(Double.self, forKey: .customBackgroundOffsetY) ?? 0.0
+        self.customBackgroundRevision = try container.decodeIfPresent(Int.self, forKey: .customBackgroundRevision) ?? 0
     }
 
     public static let defaultDictationPrompt = """
@@ -300,6 +317,77 @@ public struct AIConfiguration: Codable, Equatable {
 你是高效写作助手。根据用户口述的简短意图（收件人、核心信息、风格要求）以及上下文，直接生成完整、得体、可直接发送的邮件、消息或文案。
 只输出最终正文内容，不要多余说明。
 """
+
+    public struct BackgroundCropLayout: Equatable, Sendable {
+        public let drawWidth: Double
+        public let drawHeight: Double
+        public let offsetX: Double
+        public let offsetY: Double
+        public let maxPanX: Double
+        public let maxPanY: Double
+        public let clampedNormX: Double
+        public let clampedNormY: Double
+    }
+
+    /// Computes aspect-fill frame size and clamped pan offsets invariant across viewport sizes.
+    public static func computeBackgroundCropLayout(
+        imageWidth: Double,
+        imageHeight: Double,
+        containerWidth: Double,
+        containerHeight: Double,
+        scale: Double,
+        normalizedOffsetX: Double,
+        normalizedOffsetY: Double
+    ) -> BackgroundCropLayout {
+        guard imageWidth > 0, imageHeight > 0, containerWidth > 0, containerHeight > 0 else {
+            return BackgroundCropLayout(
+                drawWidth: max(0, containerWidth),
+                drawHeight: max(0, containerHeight),
+                offsetX: 0,
+                offsetY: 0,
+                maxPanX: 0,
+                maxPanY: 0,
+                clampedNormX: 0,
+                clampedNormY: 0
+            )
+        }
+        let clampedScale = max(1.0, min(5.0, scale))
+        let baseScale = max(containerWidth / imageWidth, containerHeight / imageHeight)
+        let drawW = imageWidth * baseScale * clampedScale
+        let drawH = imageHeight * baseScale * clampedScale
+        let maxPanX = max(0.0, (drawW - containerWidth) / 2.0)
+        let maxPanY = max(0.0, (drawH - containerHeight) / 2.0)
+        let offsetX = min(maxPanX, max(-maxPanX, normalizedOffsetX * containerWidth))
+        let offsetY = min(maxPanY, max(-maxPanY, normalizedOffsetY * containerHeight))
+        return BackgroundCropLayout(
+            drawWidth: drawW,
+            drawHeight: drawH,
+            offsetX: offsetX,
+            offsetY: offsetY,
+            maxPanX: maxPanX,
+            maxPanY: maxPanY,
+            clampedNormX: offsetX / containerWidth,
+            clampedNormY: offsetY / containerHeight
+        )
+    }
+
+    public static func parseHexRGBA(_ hex: String) -> (r: Double, g: Double, b: Double, a: Double) {
+        let clean = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: clean).scanHexInt64(&int)
+        let a, r, g, b: UInt64
+        switch clean.count {
+        case 3:
+            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
+        case 6:
+            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
+        case 8:
+            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
+        default:
+            (a, r, g, b) = (255, 30, 30, 46)
+        }
+        return (Double(r) / 255.0, Double(g) / 255.0, Double(b) / 255.0, Double(a) / 255.0)
+    }
 }
 
 public struct ASRPreset: Identifiable {

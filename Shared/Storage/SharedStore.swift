@@ -81,6 +81,18 @@ private enum KeychainSyncBridge {
         }
         return false
     }
+
+    @discardableResult
+    static func delete(key: String, accessGroup: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: key,
+            kSecAttrAccessGroup as String: accessGroup
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
 }
 
 public final class SharedStore {
@@ -187,13 +199,23 @@ public final class SharedStore {
     public func saveCustomBackgroundImage(_ data: Data) {
         lock.lock()
         defer { lock.unlock() }
+        let key = "custom_keyboard_bg.jpg"
         let url = customBackgroundImageURL
         try? data.write(to: url, options: [.atomic])
+        if isUsingKeychainSync, let kcGroup = activeKeychainAccessGroup {
+            _ = KeychainSyncBridge.write(data: data, key: key, accessGroup: kcGroup)
+        }
     }
 
     public func loadCustomBackgroundImageData() -> Data? {
         lock.lock()
         defer { lock.unlock() }
+        let key = "custom_keyboard_bg.jpg"
+        if isUsingKeychainSync, let kcGroup = activeKeychainAccessGroup,
+           let kcData = KeychainSyncBridge.read(key: key, accessGroup: kcGroup),
+           !kcData.isEmpty {
+            return kcData
+        }
         let url = customBackgroundImageURL
         return try? Data(contentsOf: url)
     }
@@ -201,7 +223,11 @@ public final class SharedStore {
     public func removeCustomBackgroundImage() {
         lock.lock()
         defer { lock.unlock() }
+        let key = "custom_keyboard_bg.jpg"
         try? FileManager.default.removeItem(at: customBackgroundImageURL)
+        if isUsingKeychainSync, let kcGroup = activeKeychainAccessGroup {
+            _ = KeychainSyncBridge.delete(key: key, accessGroup: kcGroup)
+        }
     }
 
     // MARK: - Personal Dictionary

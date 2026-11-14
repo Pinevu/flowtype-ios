@@ -19,10 +19,14 @@ public final class KeyboardViewController: UIInputViewController {
             self?.openHostApp(url: url)
         }
 
+        view.backgroundColor = .clear
+        inputView?.backgroundColor = .clear
+
         let rootView = KeyboardRootView(model: stateModel)
         let host = UIHostingController(rootView: rootView)
         host.view.translatesAutoresizingMaskIntoConstraints = false
         host.view.backgroundColor = .clear
+        host.view.isOpaque = false
 
         addChild(host)
         view.addSubview(host.view)

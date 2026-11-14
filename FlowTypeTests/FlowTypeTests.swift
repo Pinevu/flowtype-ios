@@ -159,23 +159,106 @@ final class FlowTypeTests: XCTestCase {
         XCTAssertEqual(LexiconDatabase.pinyinToT9Digits("nihao"), "64426")
         XCTAssertEqual(LexiconDatabase.pinyinToT9Digits("women"), "96636")
 
-        // 2. Syllables for digits
+        // 2. Syllables for single and multi-syllable T9 digits
         let sylls64 = LexiconDatabase.syllablesForT9Digits("64")
         XCTAssertTrue(sylls64.contains("ni"))
         XCTAssertTrue(sylls64.contains("mi"))
 
-        // 3. Exact phrases by T9 digits
-        let (_, cands64426) = db.queryT9Candidates(digits: "64426")
-        XCTAssertTrue(cands64426.contains(where: { $0.text == "你好" }))
+        let (sylls64426, cands64426) = db.queryT9Candidates(digits: "64426")
+        XCTAssertTrue(sylls64426.contains("ni"))
+        XCTAssertEqual(cands64426.first?.text, "你好")
 
-        // 4. Exact chars & initials by T9 digits
-        let (_, cands64) = db.queryT9Candidates(digits: "64")
-        XCTAssertTrue(cands64.contains(where: { $0.text == "你" }))
+        // 3. Exact chars rank above initials & filtered syllable locks remaining digits
+        let (rankedSylls64, cands64) = db.queryT9Candidates(digits: "64")
+        XCTAssertEqual(rankedSylls64.first, "ni")
+        XCTAssertEqual(cands64.first?.text, "你")
         XCTAssertTrue(cands64.contains(where: { $0.text == "米" }))
         XCTAssertTrue(cands64.contains(where: { $0.text == "你好" }))
 
-        // 5. Filtered by syllable
+        let (nextSyllsAfterNi, candsNiFilter) = db.queryT9Candidates(digits: "64426", pinyinFilter: "ni")
+        XCTAssertTrue(candsNiFilter.contains(where: { $0.text == "你好" }))
+        XCTAssertFalse(candsNiFilter.contains(where: { $0.text == "密告" }))
+        XCTAssertTrue(nextSyllsAfterNi.contains("hao"))
+
+        // 4. Filtered by exact syllable
         let (_, candsFiltered) = db.queryT9Candidates(digits: "64", pinyinFilter: "ni")
         XCTAssertTrue(candsFiltered.contains(where: { $0.text == "你" }))
+
+        // 5. Uncached multi-syllable T9 falls back to Viterbi / prefix without returning empty
+        let (_, cands96426) = db.queryT9Candidates(digits: "96426")
+        XCTAssertFalse(cands96426.isEmpty)
+        XCTAssertTrue(cands96426.contains(where: { $0.text.hasPrefix("我") }))
+    }
+
+    func testBackgroundCropLayoutAndOpacityConfigRoundTrip() throws {
+        // 1. Zero opacity & crop fields persist across encode/decode
+        let config = AIConfiguration(
+            backgroundStyle: .customImage,
+            backgroundOpacity: 0.0,
+            customBackgroundHex: "#223344",
+            customBackgroundScale: 2.5,
+            customBackgroundOffsetX: 0.15,
+            customBackgroundOffsetY: -0.10,
+            customBackgroundRevision: 7
+        )
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(AIConfiguration.self, from: data)
+        XCTAssertEqual(decoded.backgroundStyle, .customImage)
+        XCTAssertEqual(decoded.backgroundOpacity, 0.0, accuracy: 0.0001)
+        XCTAssertEqual(decoded.customBackgroundScale, 2.5, accuracy: 0.0001)
+        XCTAssertEqual(decoded.customBackgroundOffsetX, 0.15, accuracy: 0.0001)
+        XCTAssertEqual(decoded.customBackgroundOffsetY, -0.10, accuracy: 0.0001)
+        XCTAssertEqual(decoded.customBackgroundRevision, 7)
+
+        // 2. Legacy JSON defaults stay backward-compatible
+        let legacyDecoded = try JSONDecoder().decode(AIConfiguration.self, from: Data("{}".utf8))
+        XCTAssertEqual(legacyDecoded.backgroundOpacity, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(legacyDecoded.customBackgroundScale, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(legacyDecoded.customBackgroundOffsetX, 0.0, accuracy: 0.0001)
+        XCTAssertEqual(legacyDecoded.customBackgroundOffsetY, 0.0, accuracy: 0.0001)
+
+        // 3. Scale-invariant crop layout maintains proportionality & clamps overflow
+        let large = AIConfiguration.computeBackgroundCropLayout(
+            imageWidth: 1080,
+            imageHeight: 1440,
+            containerWidth: 390,
+            containerHeight: 302,
+            scale: 2.0,
+            normalizedOffsetX: 0.12,
+            normalizedOffsetY: -0.08
+        )
+        let smallW = 276.0
+        let smallH = 276.0 * (302.0 / 390.0)
+        let small = AIConfiguration.computeBackgroundCropLayout(
+            imageWidth: 1080,
+            imageHeight: 1440,
+            containerWidth: smallW,
+            containerHeight: smallH,
+            scale: 2.0,
+            normalizedOffsetX: 0.12,
+            normalizedOffsetY: -0.08
+        )
+        XCTAssertEqual(small.drawWidth / smallW, large.drawWidth / 390.0, accuracy: 0.001)
+        XCTAssertEqual(small.offsetX / smallW, large.offsetX / 390.0, accuracy: 0.001)
+
+        let overflow = AIConfiguration.computeBackgroundCropLayout(
+            imageWidth: 1000,
+            imageHeight: 1000,
+            containerWidth: 390,
+            containerHeight: 302,
+            scale: 1.0,
+            normalizedOffsetX: 9.0,
+            normalizedOffsetY: -9.0
+        )
+        XCTAssertLessThanOrEqual(abs(overflow.offsetX), overflow.maxPanX + 0.0001)
+        XCTAssertLessThanOrEqual(abs(overflow.offsetY), overflow.maxPanY + 0.0001)
+
+        // 4. SharedStore image round-trip
+        let store = SharedStore(containerURL: tempDir)
+        let mockJPEG = Data([0xFF, 0xD8, 0xFF, 0xE0, 0x01, 0x02])
+        store.saveCustomBackgroundImage(mockJPEG)
+        XCTAssertEqual(store.loadCustomBackgroundImageData(), mockJPEG)
+        store.removeCustomBackgroundImage()
+        XCTAssertNil(store.loadCustomBackgroundImageData())
     }
 }

@@ -360,17 +360,96 @@ public final class LexiconDatabase: @unchecked Sendable {
         return digits
     }
 
-    public static func syllablesForT9Digits(_ digits: String) -> [String] {
-        let clean = digits.filter { $0 >= "2" && $0 <= "9" }
-        guard !clean.isEmpty else { return [] }
-        var matches: [String] = []
+    private static let t9ToSyllablesMap: [String: [String]] = {
+        var map: [String: [String]] = [:]
         for s in PinyinSyllableParser.validSyllables {
             let d = pinyinToT9Digits(s)
-            if d == clean {
-                matches.append(s)
+            map[d, default: []].append(s)
+        }
+        for (k, v) in map {
+            map[k] = v.sorted()
+        }
+        return map
+    }()
+
+    private static let t9SyllableStartSet: Set<String> = {
+        var prefixes = Set<String>()
+        for d in t9ToSyllablesMap.keys {
+            for len in 1...d.count {
+                prefixes.insert(String(d.prefix(len)))
             }
         }
-        return matches.sorted()
+        return prefixes
+    }()
+
+    public static func syllablesForT9Digits(_ digits: String) -> [String] {
+        let firstSeg = digits
+            .split(separator: "'", maxSplits: 1, omittingEmptySubsequences: false)
+            .first.map(String.init) ?? ""
+        let clean = firstSeg.filter { $0 >= "2" && $0 <= "9" }
+        guard !clean.isEmpty else { return [] }
+
+        var result: [String] = []
+        var seen = Set<String>()
+        func addAll(_ items: [String]) {
+            for s in items where seen.insert(s).inserted {
+                result.append(s)
+            }
+        }
+
+        // 1. Exact full-segment syllable matches
+        if let exact = t9ToSyllablesMap[clean] {
+            addAll(exact)
+        }
+
+        // 2. Valid starting syllable prefixes (e.g. "64426" -> "mi", "ni")
+        if clean.count >= 2 {
+            let maxPrefix = min(6, clean.count - 1)
+            for len in stride(from: maxPrefix, through: 2, by: -1) {
+                let prefixSub = String(clean.prefix(len))
+                let remainder = String(clean.dropFirst(len))
+                if let matches = t9ToSyllablesMap[prefixSub],
+                   t9SyllableStartSet.contains(String(remainder.prefix(min(6, remainder.count)))) {
+                    addAll(matches)
+                }
+            }
+        }
+
+        // 3. Fallback single-vowel syllables ("a", "o", "e") only if no multi-letter syllable found
+        if result.isEmpty, clean.count >= 2 {
+            let firstDigit = String(clean.prefix(1))
+            let remainder = String(clean.dropFirst(1))
+            if let matches = t9ToSyllablesMap[firstDigit],
+               t9SyllableStartSet.contains(String(remainder.prefix(min(6, remainder.count)))) {
+                addAll(matches)
+            }
+        }
+
+        return result
+    }
+
+    private func rankT9SyllablesByFrequency(_ syllables: [String]) -> [String] {
+        guard syllables.count > 1, let db = bundleDB else { return syllables }
+        let placeholders = Array(repeating: "?", count: syllables.count).joined(separator: ",")
+        let sql = "SELECT pinyin, MAX(freq) as mf FROM chars WHERE pinyin IN (\(placeholders)) GROUP BY pinyin;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return syllables }
+        defer { sqlite3_finalize(stmt) }
+        for (idx, s) in syllables.enumerated() {
+            sqlite3_bind_text(stmt, Int32(idx + 1), s, -1, SQLITE_TRANSIENT)
+        }
+        var freqs: [String: Int] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let p = sqlite3_column_text(stmt, 0) {
+                freqs[String(cString: p)] = Int(sqlite3_column_int64(stmt, 1))
+            }
+        }
+        return syllables.enumerated().sorted { lhs, rhs in
+            let fl = freqs[lhs.element] ?? 0
+            let fr = freqs[rhs.element] ?? 0
+            if fl != fr { return fl > fr }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
     }
 
     public func queryT9Candidates(
@@ -382,12 +461,19 @@ public final class LexiconDatabase: @unchecked Sendable {
         let cleanDigits = digits.filter { ($0 >= "2" && $0 <= "9") || $0 == "'" }
         guard !cleanDigits.isEmpty else { return ([], []) }
 
-        // If user tapped a specific pinyin syllable filter (e.g. "ni" for "64"), query standard pinyin directly
-        if let filter = pinyinFilter, !filter.isEmpty {
-            let (_, pinyinCands) = queryPinyinCandidates(rawInput: filter, fuzzy: false, personalWords: personalWords, limit: limit)
-            let syllables = Self.syllablesForT9Digits(cleanDigits)
-            return (syllables, pinyinCands)
+        var pureChars: [Character] = []
+        var obligatorySplits = Set<Int>()
+        for ch in cleanDigits {
+            if ch == "'" {
+                if !pureChars.isEmpty {
+                    obligatorySplits.insert(pureChars.count)
+                }
+            } else {
+                pureChars.append(ch)
+            }
         }
+        let pureDigits = String(pureChars)
+        guard !pureDigits.isEmpty else { return ([], []) }
 
         return queue.sync {
             var results: [PinyinCandidate] = []
@@ -402,13 +488,121 @@ public final class LexiconDatabase: @unchecked Sendable {
                 }
             }
 
-            let pureDigits = cleanDigits.replacingOccurrences(of: "'", with: "")
-            let syllableOptions = Self.syllablesForT9Digits(pureDigits)
+            // Parse locked syllable prefix if user chose syllables via 选拼音 (e.g. "ni" or "ni'hao")
+            var lockedSpans: [(start: Int, end: Int, syllable: String)] = []
+            var lockedDigitCount = 0
+            var lockedPinyinNoSep = ""
+            if let filter = pinyinFilter?.lowercased(), !filter.isEmpty {
+                let parts = filter.split(separator: "'").map { $0.filter { $0 >= "a" && $0 <= "z" } }.filter { !$0.isEmpty }
+                var offset = 0
+                var validLock = !parts.isEmpty
+                for part in parts {
+                    let partDigits = Self.pinyinToT9Digits(part)
+                    let end = offset + partDigits.count
+                    if end <= pureDigits.count,
+                       String(pureDigits.dropFirst(offset).prefix(partDigits.count)) == partDigits {
+                        lockedSpans.append((offset, end, part))
+                        offset = end
+                        lockedPinyinNoSep += part
+                    } else {
+                        validLock = false
+                        break
+                    }
+                }
+                if validLock {
+                    lockedDigitCount = offset
+                } else {
+                    lockedSpans.removeAll()
+                    lockedPinyinNoSep = ""
+                }
+            }
 
-            // 1. Personal Dictionary matching T9 digits
+            let unpinnedDigits = String(pureDigits.dropFirst(lockedDigitCount))
+            let syllableSlice: String
+            if let nextSplit = obligatorySplits.filter({ $0 > lockedDigitCount }).min() {
+                syllableSlice = String(pureDigits.dropFirst(lockedDigitCount).prefix(nextSplit - lockedDigitCount))
+            } else {
+                syllableSlice = unpinnedDigits
+            }
+            let rawSyllables: [String]
+            if unpinnedDigits.isEmpty && lockedSpans.count == 1 {
+                rawSyllables = Self.syllablesForT9Digits(pureDigits)
+            } else {
+                rawSyllables = Self.syllablesForT9Digits(syllableSlice)
+            }
+            let syllableOptions = rankT9SyllablesByFrequency(rawSyllables)
+
+            // When filter covers the whole input with one or more exact syllables
+            if !lockedSpans.isEmpty && unpinnedDigits.isEmpty {
+                let filterPy = lockedSpans.map(\.syllable).joined(separator: "'")
+                let filterClean = lockedPinyinNoSep
+
+                for entry in personalWords where !entry.pinyinHint.isEmpty {
+                    let hintClean = entry.pinyinHint.lowercased().filter { $0 >= "a" && $0 <= "z" }
+                    if hintClean == filterClean {
+                        appendCandidate(PinyinCandidate(
+                            text: entry.term,
+                            consumedChars: pureDigits.count,
+                            displayPinyin: filterPy,
+                            isFullMatch: true,
+                            source: .personalDictionary
+                        ))
+                    }
+                }
+                for (word, _) in fetchUserPhrases(pinyin: filterClean, limit: 6) {
+                    appendCandidate(PinyinCandidate(
+                        text: word,
+                        consumedChars: pureDigits.count,
+                        displayPinyin: filterPy,
+                        isFullMatch: true,
+                        source: .userLearned
+                    ))
+                }
+                for (word, _) in fetchBundlePhrases(pinyin: filterClean, limit: 14) {
+                    appendCandidate(PinyinCandidate(
+                        text: word,
+                        consumedChars: pureDigits.count,
+                        displayPinyin: filterPy,
+                        isFullMatch: true,
+                        source: .exactPhrase
+                    ))
+                }
+                if lockedSpans.count == 1 {
+                    for (hanzi, _) in fetchBundleChars(pinyin: filterClean, limit: 24) {
+                        appendCandidate(PinyinCandidate(
+                            text: hanzi,
+                            consumedChars: pureDigits.count,
+                            displayPinyin: filterPy,
+                            isFullMatch: true,
+                            source: .singleChar
+                        ))
+                    }
+                } else {
+                    let decoded = decodeT9ViterbiSentences(
+                        pureDigits: pureDigits,
+                        obligatorySplits: obligatorySplits,
+                        lockedSpans: lockedSpans,
+                        topK: 4
+                    )
+                    for item in decoded {
+                        appendCandidate(PinyinCandidate(
+                            text: item.text,
+                            consumedChars: pureDigits.count,
+                            displayPinyin: item.pinyin,
+                            isFullMatch: true,
+                            source: .viterbiSentence
+                        ))
+                    }
+                }
+                return (syllableOptions, results)
+            }
+
+            // 1. Personal Dictionary matching T9 digits (respecting locked pinyin prefix if set)
             for entry in personalWords where !entry.pinyinHint.isEmpty {
                 let hintDigits = Self.pinyinToT9Digits(entry.pinyinHint)
-                if hintDigits == pureDigits || (pureDigits.count >= 2 && hintDigits.hasPrefix(pureDigits)) {
+                let hintClean = entry.pinyinHint.lowercased().filter { $0 >= "a" && $0 <= "z" }
+                let matchesFilter = lockedPinyinNoSep.isEmpty || hintClean.hasPrefix(lockedPinyinNoSep)
+                if matchesFilter && (hintDigits == pureDigits || (pureDigits.count >= 2 && hintDigits.hasPrefix(pureDigits))) {
                     appendCandidate(PinyinCandidate(
                         text: entry.term,
                         consumedChars: pureDigits.count,
@@ -419,9 +613,12 @@ public final class LexiconDatabase: @unchecked Sendable {
                 }
             }
 
-            // 2. Exact phrases from bundle matching T9
-            let exactPhrases = fetchBundlePhrasesByT9(t9: pureDigits, limit: 16)
+            // 2. Exact phrases from bundle matching full T9 digits
+            let exactPhrases = fetchBundlePhrasesByT9(t9: pureDigits, limit: 20)
             for item in exactPhrases {
+                if !lockedPinyinNoSep.isEmpty && !item.pinyin.hasPrefix(lockedPinyinNoSep) {
+                    continue
+                }
                 appendCandidate(PinyinCandidate(
                     text: item.word,
                     consumedChars: pureDigits.count,
@@ -431,22 +628,50 @@ public final class LexiconDatabase: @unchecked Sendable {
                 ))
             }
 
-            // 3. Exact single characters matching T9
-            let exactChars = fetchBundleCharsByT9(t9: pureDigits, limit: 20)
-            for item in exactChars {
-                appendCandidate(PinyinCandidate(
-                    text: item.hanzi,
-                    consumedChars: pureDigits.count,
-                    displayPinyin: item.pinyin,
-                    isFullMatch: true,
-                    source: .singleChar
-                ))
+            // 3. Exact single characters matching full T9 digits
+            if pureDigits.count <= 6 && lockedSpans.count <= 1 && obligatorySplits.isEmpty {
+                let exactChars = fetchBundleCharsByT9(t9: pureDigits, limit: 24)
+                for item in exactChars {
+                    if !lockedPinyinNoSep.isEmpty && item.pinyin != lockedPinyinNoSep {
+                        continue
+                    }
+                    appendCandidate(PinyinCandidate(
+                        text: item.hanzi,
+                        consumedChars: pureDigits.count,
+                        displayPinyin: item.pinyin,
+                        isFullMatch: true,
+                        source: .singleChar
+                    ))
+                }
             }
 
-            // 4. Initials (简拼) phrases matching T9 (e.g. "64" -> "你好", "96" -> "我们")
+            // 4. Multi-syllable T9 Viterbi sentence decoding (full digit coverage)
+            if pureDigits.count >= 3 || !obligatorySplits.isEmpty {
+                let decoded = decodeT9ViterbiSentences(
+                    pureDigits: pureDigits,
+                    obligatorySplits: obligatorySplits,
+                    lockedSpans: lockedSpans,
+                    topK: 4
+                )
+                for item in decoded {
+                    appendCandidate(PinyinCandidate(
+                        text: item.text,
+                        consumedChars: pureDigits.count,
+                        displayPinyin: item.pinyin,
+                        isFullMatch: true,
+                        source: .viterbiSentence
+                    ))
+                }
+            }
+
+            // 5. Initials (简拼) phrases matching T9 (e.g. "64" -> "你好", "96" -> "我们")
             if pureDigits.count >= 2 && pureDigits.count <= 6 {
                 let initialsPhrases = fetchBundlePhrasesByT9Initials(t9: pureDigits, limit: 14)
+                let initialFirst = lockedPinyinNoSep.first.map(String.init)
                 for item in initialsPhrases {
+                    if let firstChar = initialFirst, !item.pinyin.hasPrefix(firstChar) {
+                        continue
+                    }
                     appendCandidate(PinyinCandidate(
                         text: item.word,
                         consumedChars: pureDigits.count,
@@ -457,8 +682,73 @@ public final class LexiconDatabase: @unchecked Sendable {
                 }
             }
 
-            // 5. Prefix phrases matching T9 prefix
-            if results.count < limit && pureDigits.count >= 2 {
+            // 6. Index-0 partial prefix phrases & single chars (allows step-by-step selection on long input)
+            if pureDigits.count >= 3 {
+                if !lockedSpans.isEmpty {
+                    let lockedText = lockedPinyinNoSep
+                    let lockedCount = lockedDigitCount
+                    if lockedSpans.count >= 2 {
+                        for (word, _) in fetchBundlePhrases(pinyin: lockedText, limit: 4) {
+                            appendCandidate(PinyinCandidate(
+                                text: word,
+                                consumedChars: lockedCount,
+                                displayPinyin: lockedText,
+                                isFullMatch: false,
+                                source: .exactPhrase
+                            ))
+                        }
+                    } else if let firstSyl = lockedSpans.first?.syllable {
+                        for (hanzi, _) in fetchBundleChars(pinyin: firstSyl, limit: 6) {
+                            appendCandidate(PinyinCandidate(
+                                text: hanzi,
+                                consumedChars: lockedCount,
+                                displayPinyin: firstSyl,
+                                isFullMatch: false,
+                                source: .singleChar
+                            ))
+                        }
+                    }
+                } else {
+                    let maxPhrasePrefix = min(pureDigits.count - 1, 9)
+                    if maxPhrasePrefix >= 4 {
+                        for subLen in stride(from: maxPhrasePrefix, through: 4, by: -1) {
+                            let prefixT9 = String(pureDigits.prefix(subLen))
+                            let hits = fetchBundlePhrasesByT9(t9: prefixT9, limit: 3)
+                            for item in hits {
+                                appendCandidate(PinyinCandidate(
+                                    text: item.word,
+                                    consumedChars: subLen,
+                                    displayPinyin: item.pinyin,
+                                    isFullMatch: false,
+                                    source: .exactPhrase
+                                ))
+                            }
+                            if results.count >= limit { break }
+                        }
+                    }
+
+                    let firstBoundary = obligatorySplits.min() ?? pureDigits.count
+                    let maxCharPrefix = min(6, min(firstBoundary, pureDigits.count - 1))
+                    if maxCharPrefix >= 1 {
+                        for subLen in stride(from: maxCharPrefix, through: 1, by: -1) {
+                            let prefixT9 = String(pureDigits.prefix(subLen))
+                            guard Self.t9ToSyllablesMap[prefixT9] != nil else { continue }
+                            for item in fetchBundleCharsByT9(t9: prefixT9, limit: 4) {
+                                appendCandidate(PinyinCandidate(
+                                    text: item.hanzi,
+                                    consumedChars: subLen,
+                                    displayPinyin: item.pinyin,
+                                    isFullMatch: false,
+                                    source: .singleChar
+                                ))
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 7. Longer completion phrases starting with T9 prefix
+            if results.count < limit && pureDigits.count >= 2 && lockedSpans.isEmpty {
                 let prefixPhrases = fetchBundlePhrasesByT9Prefix(prefix: pureDigits, limit: 10)
                 for item in prefixPhrases {
                     appendCandidate(PinyinCandidate(
@@ -473,6 +763,175 @@ public final class LexiconDatabase: @unchecked Sendable {
 
             return (syllableOptions, results)
         }
+    }
+
+    private func decodeT9ViterbiSentences(
+        pureDigits: String,
+        obligatorySplits: Set<Int>,
+        lockedSpans: [(start: Int, end: Int, syllable: String)],
+        topK: Int
+    ) -> [(text: String, pinyin: String)] {
+        let chars = Array(pureDigits)
+        let n = chars.count
+        guard n >= 2 else { return [] }
+
+        struct T9Span: Hashable {
+            let start: Int
+            let end: Int
+            let digits: String
+            let lockedSyllable: String?
+        }
+
+        struct T9Edge {
+            let start: Int
+            let end: Int
+            let text: String
+            let pinyin: String
+            let score: Double
+        }
+
+        struct T9Path {
+            let text: String
+            let pinyin: String
+            let score: Double
+        }
+
+        let logCorpusMass = 7.0
+        var spansByStart = Array(repeating: [T9Span](), count: n)
+        let lockedEnd = lockedSpans.last?.end ?? 0
+
+        for lock in lockedSpans {
+            let sub = String(chars[lock.start..<lock.end])
+            spansByStart[lock.start].append(T9Span(start: lock.start, end: lock.end, digits: sub, lockedSyllable: lock.syllable))
+        }
+
+        if lockedEnd < n {
+            for i in lockedEnd..<n {
+                for len in 1...min(6, n - i) {
+                    let end = i + len
+                    let crossesSplit = obligatorySplits.contains { $0 > i && $0 < end }
+                    if crossesSplit { continue }
+                    let sub = String(chars[i..<end])
+                    if Self.t9ToSyllablesMap[sub] != nil {
+                        spansByStart[i].append(T9Span(start: i, end: end, digits: sub, lockedSyllable: nil))
+                    }
+                }
+            }
+        }
+
+        var transitions = Array(repeating: [T9Edge](), count: n)
+        var bestEdgeIndex: [[String: Int]] = Array(repeating: [:], count: n)
+
+        func addEdge(start: Int, end: Int, text: String, pinyin: String, score: Double) {
+            let key = "\(end)#\(text)"
+            if let existing = bestEdgeIndex[start][key] {
+                if score > transitions[start][existing].score {
+                    transitions[start][existing] = T9Edge(start: start, end: end, text: text, pinyin: pinyin, score: score)
+                }
+            } else {
+                bestEdgeIndex[start][key] = transitions[start].count
+                transitions[start].append(T9Edge(start: start, end: end, text: text, pinyin: pinyin, score: score))
+            }
+        }
+
+        // Single-syllable T9 char edges
+        for start in 0..<n {
+            for span in spansByStart[start] {
+                if let fixedSyl = span.lockedSyllable {
+                    var rank = 0
+                    for (hanzi, freq) in fetchBundleChars(pinyin: fixedSyl, limit: 3) {
+                        let s = log10(Double(max(freq, 1)) + 1.0) - logCorpusMass + 0.1 - Double(rank) * 0.25
+                        addEdge(start: span.start, end: span.end, text: hanzi, pinyin: fixedSyl, score: s)
+                        rank += 1
+                    }
+                } else {
+                    var rank = 0
+                    for item in fetchBundleCharsByT9(t9: span.digits, limit: 4) {
+                        let s = log10(Double(max(item.freq, 1)) + 1.0) - logCorpusMass - Double(rank) * 0.25
+                        addEdge(start: span.start, end: span.end, text: item.hanzi, pinyin: item.pinyin, score: s)
+                        rank += 1
+                        if rank >= 3 { break }
+                    }
+                }
+            }
+        }
+
+        // Multi-syllable T9 phrase edges (2..4 syllables)
+        var pathLockedPrefix = ""
+        var phraseLookupCount = 0
+        func collectMulti(start: Int, currentOffset: Int, depth: Int, expectedSyllables: Int) {
+            if phraseLookupCount >= 48 { return }
+            if depth >= 2 {
+                let subDigits = String(chars[start..<currentOffset])
+                phraseLookupCount += 1
+                var rank = 0
+                for item in fetchBundlePhrasesByT9(t9: subDigits, limit: 5) {
+                    if !pathLockedPrefix.isEmpty && !item.pinyin.hasPrefix(pathLockedPrefix) {
+                        continue
+                    }
+                    let wordCharCount = item.word.count
+                    if wordCharCount == expectedSyllables {
+                        let s = log10(Double(max(item.freq, 1)) + 1.0) - logCorpusMass + 0.65 + Double(min(depth - 2, 2)) * 0.22 - Double(rank) * 0.25
+                        addEdge(start: start, end: currentOffset, text: item.word, pinyin: item.pinyin, score: s)
+                        rank += 1
+                        if rank >= 3 { break }
+                    }
+                }
+            }
+            guard depth < 4, currentOffset < n else { return }
+            for nextSpan in spansByStart[currentOffset] {
+                let prevPrefix = pathLockedPrefix
+                if let fixedSyl = nextSpan.lockedSyllable {
+                    pathLockedPrefix += fixedSyl
+                }
+                collectMulti(start: start, currentOffset: nextSpan.end, depth: depth + 1, expectedSyllables: expectedSyllables + 1)
+                pathLockedPrefix = prevPrefix
+            }
+        }
+
+        for i in 0..<n where !spansByStart[i].isEmpty {
+            pathLockedPrefix = ""
+            collectMulti(start: i, currentOffset: i, depth: 0, expectedSyllables: 0)
+        }
+
+        func prune(_ list: [T9Path], maxKeep: Int) -> [T9Path] {
+            let sorted = list.sorted { $0.score > $1.score }
+            var seen = Set<String>()
+            var out: [T9Path] = []
+            for p in sorted where seen.insert(p.text).inserted {
+                out.append(p)
+                if out.count >= maxKeep { break }
+            }
+            return out
+        }
+
+        var beams = Array(repeating: [T9Path](), count: n + 1)
+        beams[0] = [T9Path(text: "", pinyin: "", score: 0)]
+
+        for i in 0..<n {
+            guard !beams[i].isEmpty, !transitions[i].isEmpty else { continue }
+            if beams[i].count > 8 {
+                beams[i] = prune(beams[i], maxKeep: 8)
+            }
+            for path in beams[i] {
+                for edge in transitions[i] {
+                    let joinedPy = path.pinyin.isEmpty ? edge.pinyin : "\(path.pinyin) \(edge.pinyin)"
+                    beams[edge.end].append(T9Path(text: path.text + edge.text, pinyin: joinedPy, score: path.score + edge.score))
+                }
+            }
+            for j in (i + 1)...n where beams[j].count > 20 {
+                beams[j] = prune(beams[j], maxKeep: 8)
+            }
+        }
+
+        let finished = beams[n].sorted { $0.score > $1.score }
+        var seen = Set<String>()
+        var output: [(text: String, pinyin: String)] = []
+        for p in finished where seen.insert(p.text).inserted {
+            output.append((p.text, p.pinyin))
+            if output.count >= topK { break }
+        }
+        return output
     }
 
     // MARK: - English Prefix Completions

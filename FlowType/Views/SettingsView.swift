@@ -7,6 +7,8 @@ struct SettingsView: View {
     @State private var newLanguage: String = ""
     @State private var showSavedToast = false
     @State private var selectedPhotoItem: PhotosPickerItem? = nil
+    @State private var customPreviewUIImage: UIImage? = nil
+    @State private var showImageEditorSheet = false
 
     var body: some View {
         NavigationStack {
@@ -21,6 +23,7 @@ struct SettingsView: View {
             .navigationTitle("AI 与输入法设置")
             .onAppear {
                 draft = coordinator.config
+                reloadCachedPreviewImage()
             }
             .onChange(of: draft) { newValue in
                 coordinator.saveConfiguration(newValue)
@@ -28,10 +31,49 @@ struct SettingsView: View {
             .onChange(of: selectedPhotoItem) { item in
                 guard let item else { return }
                 Task {
-                    if let data = try? await item.loadTransferable(type: Data.self) {
-                        SharedStore.shared.saveCustomBackgroundImage(data)
-                        draft.backgroundStyle = .customImage
+                    defer {
+                        Task { @MainActor in
+                            selectedPhotoItem = nil
+                        }
+                    }
+                    if let rawData = try? await item.loadTransferable(type: Data.self) {
+                        let processed = await Task.detached(priority: .userInitiated) {
+                            Self.downsampleBackgroundImage(rawData)
+                        }.value
+                        if let compressed = processed {
+                            await MainActor.run {
+                                SharedStore.shared.saveCustomBackgroundImage(compressed)
+                                customPreviewUIImage = UIImage(data: compressed)
+                                draft.backgroundStyle = .customImage
+                                draft.customBackgroundScale = 1.0
+                                draft.customBackgroundOffsetX = 0.0
+                                draft.customBackgroundOffsetY = 0.0
+                                draft.customBackgroundRevision += 1
+                                coordinator.saveConfiguration(draft)
+                                showImageEditorSheet = true
+                            }
+                        }
+                    }
+                }
+            }
+            .sheet(isPresented: $showImageEditorSheet) {
+                if let img = customPreviewUIImage {
+                    CustomBackgroundEditorSheet(
+                        image: img,
+                        initialScale: draft.customBackgroundScale,
+                        initialOffsetX: draft.customBackgroundOffsetX,
+                        initialOffsetY: draft.customBackgroundOffsetY,
+                        backgroundOpacity: draft.backgroundOpacity
+                    ) { newScale, newOffsetX, newOffsetY in
+                        draft.customBackgroundScale = newScale
+                        draft.customBackgroundOffsetX = newOffsetX
+                        draft.customBackgroundOffsetY = newOffsetY
+                        draft.customBackgroundRevision += 1
                         coordinator.saveConfiguration(draft)
+                        showSavedToast = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            showSavedToast = false
+                        }
                     }
                 }
             }
@@ -290,17 +332,44 @@ struct SettingsView: View {
             }
 
             if draft.backgroundStyle == .customImage {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
                     PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
                         Label("从相册选择自定义背景图片", systemImage: "photo.badge.plus")
                             .font(.subheadline)
                     }
-                    if SharedStore.shared.loadCustomBackgroundImageData() != nil {
-                        Text("已设置自定义壁纸（点上方可重新选择）")
+
+                    if customPreviewUIImage != nil {
+                        HStack(spacing: 12) {
+                            Button {
+                                showImageEditorSheet = true
+                            } label: {
+                                Label("调整放大与拖动位置", systemImage: "crop")
+                                    .font(.subheadline.weight(.medium))
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+
+                            Button(role: .destructive) {
+                                SharedStore.shared.removeCustomBackgroundImage()
+                                customPreviewUIImage = nil
+                                draft.customBackgroundScale = 1.0
+                                draft.customBackgroundOffsetX = 0.0
+                                draft.customBackgroundOffsetY = 0.0
+                                draft.customBackgroundRevision += 1
+                                coordinator.saveConfiguration(draft)
+                            } label: {
+                                Label("清除图片", systemImage: "trash")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+
+                        Text("当前缩放 \(String(format: "%.1fx", draft.customBackgroundScale))，可在编辑器中双指放大与拖动对齐")
                             .font(.caption2)
-                            .foregroundStyle(.green)
+                            .foregroundStyle(.secondary)
                     } else {
-                        Text("尚未选择壁纸，将默认显示预设纯色")
+                        Text("尚未选择壁纸，选择图片后可自由放大与拖动裁切位置")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -311,83 +380,85 @@ struct SettingsView: View {
                 HStack {
                     Text("背景透明度")
                     Spacer()
-                    Text("\(Int(draft.backgroundOpacity * 100))%")
+                    Text("\(Int((draft.backgroundOpacity * 100).rounded()))%")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
-                Slider(value: $draft.backgroundOpacity, in: 0.2...1.0, step: 0.05)
+                Slider(value: $draft.backgroundOpacity, in: 0.0...1.0, step: 0.01)
             }
 
-            // Keyboard Preview Card
-            VStack(alignment: .leading, spacing: 6) {
-                Text("输入法背景实时预览")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-
-                ZStack {
-                    previewBackground
-                        .frame(height: 92)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                    VStack(spacing: 5) {
-                        HStack(spacing: 4) {
-                            ForEach(["1 ，。/'", "2 ABC", "3 DEF"], id: \.self) { title in
-                                Text(title)
-                                    .font(.system(size: 11, weight: .medium))
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 24)
-                                    .background(Color.white.opacity(0.75))
-                                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                            }
-                        }
-                        HStack(spacing: 4) {
-                            ForEach(["4 GHI", "5 JKL", "6 MNO"], id: \.self) { title in
-                                Text(title)
-                                    .font(.system(size: 11, weight: .medium))
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 24)
-                                    .background(Color.white.opacity(0.75))
-                                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                            }
-                        }
-                        HStack(spacing: 4) {
-                            Text("123")
-                                .font(.system(size: 10))
-                                .frame(width: 44, height: 22)
-                                .background(Color.white.opacity(0.55))
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                            Text("空格 · 九宫格")
-                                .font(.system(size: 10))
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 22)
-                                .background(Color.white.opacity(0.85))
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                            Text("换行")
-                                .font(.system(size: 10, weight: .semibold))
-                                .frame(width: 44, height: 22)
-                                .background(Color.blue)
-                                .foregroundStyle(.white)
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                        }
-                    }
-                    .padding(8)
+            // Proportional Keyboard Preview Card (matches exact 390:302 keyboard ratio)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("输入法等比例实时预览")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("390:302 等比")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
                 }
+
+                proportionalKeyboardPreview
             }
             .padding(.vertical, 4)
         } header: {
             Text("输入法外观与背景定制")
         } footer: {
-            Text("支持自定义纯色、渐变与相册壁纸，可自由调节透明度，键盘将实时同步呈现。")
+            Text("支持 0%–100% 全范围调节背景透明度；相册壁纸支持自由放大拖动裁切，预览与实际键盘等比例同步。")
+        }
+    }
+
+    private var proportionalKeyboardPreview: some View {
+        let previewWidth: CGFloat = 276
+        let previewHeight: CGFloat = previewWidth * (302.0 / 390.0)
+        let uniformScale: CGFloat = previewWidth / 390.0
+
+        return HStack {
+            Spacer()
+            ZStack {
+                BackgroundCheckerboardView()
+
+                ZStack {
+                    previewBackground(width: 390, height: 302)
+
+                    KeyboardNineKeyMockOverlay(
+                        isDark: previewPrefersDarkTextScheme,
+                        isTranslucent: draft.backgroundStyle != .system || draft.backgroundOpacity < 0.98
+                    )
+                }
+                .frame(width: 390, height: 302)
+                .scaleEffect(uniformScale)
+                .frame(width: previewWidth, height: previewHeight)
+            }
+            .frame(width: previewWidth, height: previewHeight)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.08), radius: 4, y: 2)
+            Spacer()
+        }
+    }
+
+    private var previewPrefersDarkTextScheme: Bool {
+        switch draft.appearance {
+        case .dark: return true
+        case .light: return false
+        case .system: return UITraitCollection.current.userInterfaceStyle == .dark
         }
     }
 
     @ViewBuilder
-    private var previewBackground: some View {
+    private func previewBackground(width: CGFloat, height: CGFloat) -> some View {
         ZStack {
-            Color.gray.opacity(0.2)
             switch draft.backgroundStyle {
             case .system:
-                Color(red: 0.83, green: 0.84, blue: 0.87)
+                let baseColor = previewPrefersDarkTextScheme
+                    ? Color(red: 0.11, green: 0.11, blue: 0.13)
+                    : Color(red: 0.83, green: 0.84, blue: 0.87)
+                baseColor.opacity(draft.backgroundOpacity)
             case .pureDark:
                 Color.black.opacity(draft.backgroundOpacity)
             case .cleanLight:
@@ -415,13 +486,23 @@ struct SettingsView: View {
             case .customColor:
                 colorFromHex(draft.customBackgroundHex).opacity(draft.backgroundOpacity)
             case .customImage:
-                if let data = SharedStore.shared.loadCustomBackgroundImageData(),
-                   let uiImg = UIImage(data: data) {
+                if let uiImg = customPreviewUIImage {
+                    let layout = AIConfiguration.computeBackgroundCropLayout(
+                        imageWidth: Double(uiImg.size.width),
+                        imageHeight: Double(uiImg.size.height),
+                        containerWidth: Double(width),
+                        containerHeight: Double(height),
+                        scale: draft.customBackgroundScale,
+                        normalizedOffsetX: draft.customBackgroundOffsetX,
+                        normalizedOffsetY: draft.customBackgroundOffsetY
+                    )
                     Image(uiImage: uiImg)
                         .resizable()
-                        .scaledToFill()
-                        .opacity(draft.backgroundOpacity)
+                        .frame(width: layout.drawWidth, height: layout.drawHeight)
+                        .offset(x: layout.offsetX, y: layout.offsetY)
+                        .frame(width: width, height: height)
                         .clipped()
+                        .opacity(draft.backgroundOpacity)
                 } else {
                     colorFromHex(draft.customBackgroundHex).opacity(draft.backgroundOpacity)
                 }
@@ -429,28 +510,419 @@ struct SettingsView: View {
         }
     }
 
-    private func colorFromHex(_ hex: String) -> Color {
-        let clean = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        var int: UInt64 = 0
-        Scanner(string: clean).scanHexInt64(&int)
-        let a, r, g, b: UInt64
-        switch clean.count {
-        case 3:
-            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
-        case 6:
-            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
-        case 8:
-            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
-        default:
-            (a, r, g, b) = (255, 30, 30, 46)
+    private func reloadCachedPreviewImage() {
+        if let data = SharedStore.shared.loadCustomBackgroundImageData() {
+            customPreviewUIImage = UIImage(data: data)
+        } else {
+            customPreviewUIImage = nil
         }
-        return Color(
-            .sRGB,
-            red: Double(r) / 255,
-            green: Double(g) / 255,
-            blue: Double(b) / 255,
-            opacity: Double(a) / 255
+    }
+
+    nonisolated private static func downsampleBackgroundImage(
+        _ rawData: Data,
+        maxDimension: CGFloat = 1080,
+        maxBytes: Int = 260_000
+    ) -> Data? {
+        guard let image = UIImage(data: rawData) else { return nil }
+        let width = max(1, image.size.width)
+        let height = max(1, image.size.height)
+        let maxSide = max(width, height)
+        let ratio = maxSide > maxDimension ? (maxDimension / maxSide) : 1.0
+        let targetSize = CGSize(
+            width: max(1, (width * ratio).rounded()),
+            height: max(1, (height * ratio).rounded())
         )
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1.0
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+        let rendered = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+
+        for quality in [0.78, 0.64, 0.50, 0.36] as [CGFloat] {
+            if let jpeg = rendered.jpegData(compressionQuality: quality), jpeg.count <= maxBytes {
+                return jpeg
+            }
+        }
+        return rendered.jpegData(compressionQuality: 0.30)
+    }
+
+    private func colorFromHex(_ hex: String) -> Color {
+        let rgba = AIConfiguration.parseHexRGBA(hex)
+        return Color(.sRGB, red: rgba.r, green: rgba.g, blue: rgba.b, opacity: rgba.a)
+    }
+}
+
+private struct BackgroundCheckerboardView: View {
+    var cellSize: CGFloat = 11
+
+    var body: some View {
+        Canvas { context, size in
+            let light = Color(white: 0.96)
+            let dark = Color(white: 0.86)
+            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(light))
+            let cols = Int(ceil(size.width / cellSize))
+            let rows = Int(ceil(size.height / cellSize))
+            for r in 0..<rows {
+                for c in 0..<cols where (r + c).isMultiple(of: 2) {
+                    let rect = CGRect(
+                        x: CGFloat(c) * cellSize,
+                        y: CGFloat(r) * cellSize,
+                        width: cellSize,
+                        height: cellSize
+                    )
+                    context.fill(Path(rect), with: .color(dark))
+                }
+            }
+        }
+    }
+}
+
+/// Renders an exact-scale 390x302 mock of the 5x4 Nine-Key layout for true-to-life settings preview & alignment guide.
+private struct KeyboardNineKeyMockOverlay: View {
+    let isDark: Bool
+    let isTranslucent: Bool
+    var wireframeOnly: Bool = false
+
+    private var keyFill: Color {
+        if wireframeOnly {
+            return Color.white.opacity(0.20)
+        }
+        let base = isDark ? Color(white: 0.29) : Color.white
+        return base.opacity(isTranslucent ? 0.90 : 1.0)
+    }
+
+    private var specialFill: Color {
+        if wireframeOnly {
+            return Color.white.opacity(0.12)
+        }
+        let base = isDark ? Color(white: 0.19) : Color(red: 0.68, green: 0.70, blue: 0.75)
+        return base.opacity(isTranslucent ? 0.86 : 1.0)
+    }
+
+    private var labelColor: Color {
+        wireframeOnly ? .white : (isDark ? .white : .black)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Mock Top Toolbar (38pt)
+            HStack(spacing: 8) {
+                Text("语音")
+                    .font(.system(size: 11, weight: .semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.blue.opacity(0.20))
+                    .foregroundStyle(wireframeOnly ? .white : .blue)
+                    .clipShape(Capsule())
+
+                Text("九宫格")
+                    .font(.system(size: 11, weight: .semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.secondary.opacity(0.18))
+                    .foregroundStyle(labelColor.opacity(0.85))
+                    .clipShape(Capsule())
+
+                Spacer()
+
+                Text("免切")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.green)
+                Image(systemName: "globe")
+                    .font(.system(size: 13))
+                    .foregroundStyle(labelColor.opacity(0.7))
+            }
+            .frame(height: 38)
+            .padding(.horizontal, 8)
+
+            Divider().opacity(0.22)
+
+            // Mock Candidate Bar (40pt)
+            HStack(spacing: 14) {
+                ForEach(["的", "一", "我", "你", "在", "是", "了", "不"], id: \.self) { ch in
+                    Text(ch)
+                        .font(.system(size: 16))
+                        .foregroundStyle(labelColor)
+                }
+                Spacer()
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(labelColor.opacity(0.6))
+            }
+            .frame(height: 40)
+            .padding(.horizontal, 12)
+
+            Divider().opacity(0.22)
+
+            // Mock 5x4 T9 Grid
+            GeometryReader { geo in
+                let rowSpacing: CGFloat = 7
+                let colSpacing: CGFloat = 6
+                let rowHeight = max(24, (geo.size.height - rowSpacing * 3) / 4)
+                let span2Height = rowHeight * 2 + rowSpacing
+                let colWidth = max(36, (geo.size.width - colSpacing * 4) / 5)
+                let span2Width = colWidth * 2 + colSpacing
+
+                HStack(alignment: .top, spacing: colSpacing) {
+                    VStack(spacing: rowSpacing) {
+                        mockKey("123", width: colWidth, height: rowHeight, fill: specialFill, fontSize: 14)
+                        mockKey("#@¥", width: colWidth, height: rowHeight, fill: specialFill, fontSize: 14)
+                        mockKey("ABC", width: colWidth, height: span2Height, fill: specialFill, fontSize: 15)
+                    }
+
+                    VStack(spacing: rowSpacing) {
+                        HStack(spacing: colSpacing) {
+                            mockKey(",。?!", width: colWidth, height: rowHeight, fill: keyFill, fontSize: 15)
+                            mockKey("ABC", width: colWidth, height: rowHeight, fill: keyFill, fontSize: 16)
+                            mockKey("DEF", width: colWidth, height: rowHeight, fill: keyFill, fontSize: 16)
+                        }
+                        HStack(spacing: colSpacing) {
+                            mockKey("GHI", width: colWidth, height: rowHeight, fill: keyFill, fontSize: 16)
+                            mockKey("JKL", width: colWidth, height: rowHeight, fill: keyFill, fontSize: 16)
+                            mockKey("MNO", width: colWidth, height: rowHeight, fill: keyFill, fontSize: 16)
+                        }
+                        HStack(spacing: colSpacing) {
+                            mockKey("PQRS", width: colWidth, height: rowHeight, fill: keyFill, fontSize: 16)
+                            mockKey("TUV", width: colWidth, height: rowHeight, fill: keyFill, fontSize: 16)
+                            mockKey("WXYZ", width: colWidth, height: rowHeight, fill: keyFill, fontSize: 16)
+                        }
+                        HStack(spacing: colSpacing) {
+                            mockKey("选拼音", width: colWidth, height: rowHeight, fill: keyFill, fontSize: 13)
+                            mockKey("空格", width: span2Width, height: rowHeight, fill: keyFill, fontSize: 13)
+                        }
+                    }
+
+                    VStack(spacing: rowSpacing) {
+                        Image(systemName: "delete.left")
+                            .font(.system(size: 16, weight: .medium))
+                            .frame(width: colWidth, height: rowHeight)
+                            .background(specialFill)
+                            .foregroundStyle(labelColor)
+                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        mockKey("^_^", width: colWidth, height: rowHeight, fill: specialFill, fontSize: 14)
+                        mockKey("换行", width: colWidth, height: span2Height, fill: specialFill, fontSize: 15)
+                    }
+                }
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 6)
+        }
+    }
+
+    private func mockKey(_ text: String, width: CGFloat, height: CGFloat, fill: Color, fontSize: CGFloat) -> some View {
+        Text(text)
+            .font(.system(size: fontSize, weight: .medium))
+            .foregroundStyle(labelColor)
+            .frame(width: width, height: height)
+            .background(fill)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+}
+
+private struct CustomBackgroundEditorSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let image: UIImage
+    let backgroundOpacity: Double
+    let onSave: (Double, Double, Double) -> Void
+
+    @State private var committedScale: CGFloat
+    @State private var committedOffsetX: Double
+    @State private var committedOffsetY: Double
+    @State private var showKeyOverlay: Bool = true
+
+    @GestureState private var gestureMagnification: CGFloat = 1.0
+    @GestureState private var gestureDrag: CGSize = .zero
+
+    init(
+        image: UIImage,
+        initialScale: Double,
+        initialOffsetX: Double,
+        initialOffsetY: Double,
+        backgroundOpacity: Double,
+        onSave: @escaping (Double, Double, Double) -> Void
+    ) {
+        self.image = image
+        self.backgroundOpacity = backgroundOpacity
+        self.onSave = onSave
+        _committedScale = State(initialValue: CGFloat(max(1.0, min(5.0, initialScale))))
+        _committedOffsetX = State(initialValue: initialOffsetX)
+        _committedOffsetY = State(initialValue: initialOffsetY)
+    }
+
+    var body: some View {
+        NavigationStack {
+            GeometryReader { geo in
+                let boxW = min(358, max(240, geo.size.width - 32))
+                let boxH = boxW * (302.0 / 390.0)
+                let liveScale = min(5.0, max(1.0, Double(committedScale * gestureMagnification)))
+                let candidateNormX = committedOffsetX + Double(gestureDrag.width / max(1, boxW))
+                let candidateNormY = committedOffsetY + Double(gestureDrag.height / max(1, boxH))
+                let layout = AIConfiguration.computeBackgroundCropLayout(
+                    imageWidth: Double(image.size.width),
+                    imageHeight: Double(image.size.height),
+                    containerWidth: Double(boxW),
+                    containerHeight: Double(boxH),
+                    scale: liveScale,
+                    normalizedOffsetX: candidateNormX,
+                    normalizedOffsetY: candidateNormY
+                )
+
+                VStack(spacing: 16) {
+                    Text("双指缩放或单指拖动图片，调整在键盘区域显示的画面范围")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+
+                    ZStack {
+                        BackgroundCheckerboardView()
+
+                        Image(uiImage: image)
+                            .resizable()
+                            .frame(width: layout.drawWidth, height: layout.drawHeight)
+                            .offset(x: layout.offsetX, y: layout.offsetY)
+                            .frame(width: boxW, height: boxH)
+                            .clipped()
+                            .opacity(backgroundOpacity)
+
+                        if showKeyOverlay {
+                            KeyboardNineKeyMockOverlay(isDark: false, isTranslucent: true, wireframeOnly: true)
+                                .frame(width: 390, height: 302)
+                                .scaleEffect(boxW / 390.0)
+                                .frame(width: boxW, height: boxH)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .frame(width: boxW, height: boxH)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.accentColor, lineWidth: 2)
+                    )
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 0)
+                            .updating($gestureDrag) { value, state, _ in
+                                state = value.translation
+                            }
+                            .onEnded { value in
+                                let currentScale = min(5.0, max(1.0, Double(committedScale)))
+                                let nextLayout = AIConfiguration.computeBackgroundCropLayout(
+                                    imageWidth: Double(image.size.width),
+                                    imageHeight: Double(image.size.height),
+                                    containerWidth: Double(boxW),
+                                    containerHeight: Double(boxH),
+                                    scale: currentScale,
+                                    normalizedOffsetX: committedOffsetX + Double(value.translation.width / max(1, boxW)),
+                                    normalizedOffsetY: committedOffsetY + Double(value.translation.height / max(1, boxH))
+                                )
+                                committedOffsetX = nextLayout.clampedNormX
+                                committedOffsetY = nextLayout.clampedNormY
+                            }
+                    )
+                    .simultaneousGesture(
+                        MagnificationGesture()
+                            .updating($gestureMagnification) { value, state, _ in
+                                state = value
+                            }
+                            .onEnded { value in
+                                let nextScale = CGFloat(min(5.0, max(1.0, Double(committedScale * value))))
+                                committedScale = nextScale
+                                let clamped = AIConfiguration.computeBackgroundCropLayout(
+                                    imageWidth: Double(image.size.width),
+                                    imageHeight: Double(image.size.height),
+                                    containerWidth: Double(boxW),
+                                    containerHeight: Double(boxH),
+                                    scale: Double(nextScale),
+                                    normalizedOffsetX: committedOffsetX,
+                                    normalizedOffsetY: committedOffsetY
+                                )
+                                committedOffsetX = clamped.clampedNormX
+                                committedOffsetY = clamped.clampedNormY
+                            }
+                    )
+
+                    VStack(spacing: 12) {
+                        HStack {
+                            Text("放大倍数")
+                            Spacer()
+                            Text(String(format: "%.2fx", Double(committedScale)))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+
+                        HStack(spacing: 10) {
+                            Image(systemName: "minus.magnifyingglass")
+                                .foregroundStyle(.secondary)
+                            Slider(value: $committedScale, in: 1.0...5.0, step: 0.05)
+                                .onChange(of: committedScale) { nextVal in
+                                    let clamped = AIConfiguration.computeBackgroundCropLayout(
+                                        imageWidth: Double(image.size.width),
+                                        imageHeight: Double(image.size.height),
+                                        containerWidth: Double(boxW),
+                                        containerHeight: Double(boxH),
+                                        scale: Double(nextVal),
+                                        normalizedOffsetX: committedOffsetX,
+                                        normalizedOffsetY: committedOffsetY
+                                    )
+                                    committedOffsetX = clamped.clampedNormX
+                                    committedOffsetY = clamped.clampedNormY
+                                }
+                            Image(systemName: "plus.magnifyingglass")
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Toggle("显示九宫格按键参考线", isOn: $showKeyOverlay)
+                            .font(.subheadline)
+
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                committedScale = 1.0
+                                committedOffsetX = 0.0
+                                committedOffsetY = 0.0
+                            }
+                        } label: {
+                            Label("重置居中与默认大小", systemImage: "arrow.counterclockwise")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding(.horizontal, 20)
+
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 16)
+                .navigationTitle("调整壁纸显示区域")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") { dismiss() }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("完成") {
+                            let finalScale = min(5.0, max(1.0, Double(committedScale)))
+                            let finalLayout = AIConfiguration.computeBackgroundCropLayout(
+                                imageWidth: Double(image.size.width),
+                                imageHeight: Double(image.size.height),
+                                containerWidth: Double(boxW),
+                                containerHeight: Double(boxH),
+                                scale: finalScale,
+                                normalizedOffsetX: committedOffsetX,
+                                normalizedOffsetY: committedOffsetY
+                            )
+                            onSave(finalScale, finalLayout.clampedNormX, finalLayout.clampedNormY)
+                            dismiss()
+                        }
+                        .fontWeight(.semibold)
+                    }
+                }
+            }
+        }
     }
 }
 
