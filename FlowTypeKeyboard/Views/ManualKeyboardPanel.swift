@@ -50,21 +50,22 @@ public struct ManualKeyboardPanel: View {
 
     private var t9IdleCandidateBar: some View {
         HStack(spacing: 0) {
-            HStack(spacing: 0) {
-                ForEach(model.t9StarterCandidates, id: \.self) { word in
-                    Button {
-                        model.insertStarterCandidate(word)
-                    } label: {
-                        Text(word)
-                            .font(.system(size: 20, weight: .regular))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.7)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 40)
-                            .contentShape(Rectangle())
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 0) {
+                    ForEach(model.dynamicIdleCandidates, id: \.self) { word in
+                        Button {
+                            model.insertStarterCandidate(word)
+                        } label: {
+                            Text(word)
+                                .font(.system(size: 20, weight: .regular))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                                .padding(.horizontal, 15)
+                                .frame(height: 40)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
 
@@ -78,14 +79,35 @@ public struct ManualKeyboardPanel: View {
 
     private var t9CandidateBar: some View {
         HStack(spacing: 0) {
+            // iOS Native Pinyin chip preview at left
+            if !model.displayPinyin.isEmpty {
+                Button {
+                    model.commitComposingAsRawLetters()
+                } label: {
+                    Text(model.displayPinyin)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.blue)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.blue.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, 6)
+
+                Divider()
+                    .frame(height: 20)
+                    .padding(.horizontal, 4)
+            }
+
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 22) {
-                    ForEach(model.pinyinCandidates.prefix(24)) { cand in
+                HStack(spacing: 20) {
+                    ForEach(Array(model.pinyinCandidates.prefix(24).enumerated()), id: \.element.id) { idx, cand in
                         Button {
                             model.selectPinyinCandidate(cand)
                         } label: {
                             Text(cand.text)
-                                .font(.system(size: 20, weight: .regular))
+                                .font(.system(size: 20, weight: idx == 0 ? .medium : .regular))
                                 .foregroundStyle(.primary)
                                 .lineLimit(1)
                                 .frame(height: 40)
@@ -94,7 +116,7 @@ public struct ManualKeyboardPanel: View {
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 8)
             }
 
             Divider().frame(height: 22)
@@ -243,6 +265,44 @@ public struct ManualKeyboardPanel: View {
 
     private var expandedCandidateDrawer: some View {
         VStack(spacing: 6) {
+            // Syllable filter bar (aligns with native iOS 9-key keyboard)
+            if model.pinyinLayoutMode == .t9 && !model.t9SyllableOptions.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        Button {
+                            model.selectT9SyllableFilter(nil)
+                        } label: {
+                            Text("全部")
+                                .font(.system(size: 13, weight: model.selectedT9SyllableFilter == nil ? .semibold : .regular))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(model.selectedT9SyllableFilter == nil ? Color.blue.opacity(0.18) : specialKeyBackgroundColor)
+                                .foregroundStyle(model.selectedT9SyllableFilter == nil ? Color.blue : Color.primary)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+
+                        ForEach(model.t9SyllableOptions, id: \.self) { syll in
+                            let isSelected = model.selectedT9SyllableFilter == syll
+                            Button {
+                                model.selectT9SyllableFilter(syll)
+                            } label: {
+                                Text(syll)
+                                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(isSelected ? Color.blue.opacity(0.18) : specialKeyBackgroundColor)
+                                    .foregroundStyle(isSelected ? Color.blue : Color.primary)
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.top, 4)
+                }
+            }
+
             ScrollView {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 5), spacing: 8) {
                     ForEach(model.pinyinCandidates) { cand in
@@ -855,42 +915,35 @@ struct SpacebarTrackpadKey: View {
         .frame(maxWidth: fixedWidth == nil ? .infinity : fixedWidth)
         .frame(width: fixedWidth, height: height)
         .contentShape(Rectangle())
-        .onTapGesture {
-            onTap()
-        }
-        .simultaneousGesture(
+        .gesture(
             DragGesture(minimumDistance: 0)
-                .onChanged { _ in
+                .onChanged { value in
                     if !isPressed { isPressed = true }
+                    if isTrackpadActive {
+                        if let prevX = lastDragX {
+                            onTrackpadDrag(value.location.x - prevX)
+                        }
+                        lastDragX = value.location.x
+                    }
                 }
-                .onEnded { _ in
+                .onEnded { value in
                     isPressed = false
+                    if isTrackpadActive {
+                        isTrackpadActive = false
+                        lastDragX = nil
+                        onTrackpadEnd()
+                    } else if abs(value.translation.width) < 44 && abs(value.translation.height) < 44 {
+                        onTap()
+                    }
                 }
         )
         .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.25)
-                .sequenced(before: DragGesture(minimumDistance: 0))
-                .onChanged { value in
-                    switch value {
-                    case .second(true, let drag):
-                        if !isTrackpadActive {
-                            isTrackpadActive = true
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        }
-                        if let drag {
-                            if let prevX = lastDragX {
-                                onTrackpadDrag(drag.location.x - prevX)
-                            }
-                            lastDragX = drag.location.x
-                        }
-                    default:
-                        break
-                    }
-                }
+            LongPressGesture(minimumDuration: 0.32)
                 .onEnded { _ in
-                    isTrackpadActive = false
-                    lastDragX = nil
-                    onTrackpadEnd()
+                    if !isTrackpadActive {
+                        isTrackpadActive = true
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    }
                 }
         )
     }

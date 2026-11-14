@@ -43,6 +43,16 @@ public final class LexiconDatabase: @unchecked Sendable {
     private var userDB: OpaquePointer?
     private let queue = DispatchQueue(label: "com.flowtype.lexicon.sqlite", qos: .userInteractive)
 
+    // MARK: - In-Memory T9 Cache (0ms instant hits for repetitive typing and backspaces)
+    private var t9Cache: [String: (syllableOptions: [String], candidates: [PinyinCandidate])] = [:]
+    private var t9CacheKeys: [String] = []
+    private let t9CacheCapacity = 384
+
+    public func clearT9Cache() {
+        t9Cache.removeAll()
+        t9CacheKeys.removeAll()
+    }
+
     public init(bundleDBURL: URL? = nil, userDBURL: URL? = nil) {
         let resolvedBundleURL = bundleDBURL
             ?? Bundle(for: LexiconDatabase.self).url(forResource: "lexicon", withExtension: "sqlite")
@@ -79,17 +89,197 @@ public final class LexiconDatabase: @unchecked Sendable {
         CREATE TABLE IF NOT EXISTS user_phrases (
             pinyin TEXT NOT NULL,
             word TEXT NOT NULL,
+            t9 TEXT NOT NULL DEFAULT '',
             freq INTEGER NOT NULL DEFAULT 1,
             updated_at INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (pinyin, word)
         );
         CREATE INDEX IF NOT EXISTS idx_user_phrases_pinyin ON user_phrases(pinyin, freq DESC);
+        CREATE INDEX IF NOT EXISTS idx_user_phrases_t9 ON user_phrases(t9, freq DESC, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS user_chars (
+            hanzi TEXT NOT NULL,
+            t9 TEXT NOT NULL,
+            pinyin TEXT NOT NULL DEFAULT '',
+            freq INTEGER NOT NULL DEFAULT 1,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (hanzi, t9)
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_chars_t9 ON user_chars(t9, freq DESC, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_user_chars_pinyin ON user_chars(pinyin, freq DESC);
+
+        CREATE TABLE IF NOT EXISTS user_associations (
+            prev_word TEXT NOT NULL,
+            next_word TEXT NOT NULL,
+            freq INTEGER NOT NULL DEFAULT 1,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (prev_word, next_word)
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_assoc_prev ON user_associations(prev_word, freq DESC, updated_at DESC);
+
         CREATE TABLE IF NOT EXISTS user_en_words (
             word TEXT PRIMARY KEY,
             freq INTEGER NOT NULL DEFAULT 1
         );
         """
         sqlite3_exec(udb, sql, nil, nil, nil)
+
+        // Safe migration for older tables without t9 column
+        sqlite3_exec(udb, "ALTER TABLE user_phrases ADD COLUMN t9 TEXT NOT NULL DEFAULT '';", nil, nil, nil)
+        sqlite3_exec(udb, "CREATE INDEX IF NOT EXISTS idx_user_phrases_t9 ON user_phrases(t9, freq DESC, updated_at DESC);", nil, nil, nil)
+    }
+
+    // MARK: - User Frequency Learning & Predictive Memory
+
+    public func recordT9Selection(
+        digits: String,
+        word: String,
+        pinyin: String,
+        previousWord: String? = nil
+    ) {
+        let cleanDigits = digits.filter { $0 >= "2" && $0 <= "9" }
+        let cleanPy = pinyin.lowercased().filter { ($0 >= "a" && $0 <= "z") || $0 == "'" }.replacingOccurrences(of: "'", with: "")
+        guard !word.isEmpty else { return }
+        let now = Int64(Date().timeIntervalSince1970)
+
+        queue.async { [weak self] in
+            guard let self, let udb = self.userDB else { return }
+
+            // 1. Single character frequency learning (e.g. typing 64 and selecting 米 instead of 你)
+            if word.count == 1, !cleanDigits.isEmpty {
+                let sql = """
+                INSERT INTO user_chars (hanzi, t9, pinyin, freq, updated_at)
+                VALUES (?, ?, ?, 1, ?)
+                ON CONFLICT(hanzi, t9) DO UPDATE SET
+                    freq = freq + 1,
+                    pinyin = CASE WHEN excluded.pinyin != '' THEN excluded.pinyin ELSE user_chars.pinyin END,
+                    updated_at = excluded.updated_at;
+                """
+                var stmt: OpaquePointer?
+                if sqlite3_prepare_v2(udb, sql, -1, &stmt, nil) == SQLITE_OK {
+                    sqlite3_bind_text(stmt, 1, word, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 2, cleanDigits, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 3, cleanPy, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_int64(stmt, 4, now)
+                    sqlite3_step(stmt)
+                    sqlite3_finalize(stmt)
+                }
+            }
+
+            // 2. Phrase frequency & novel phrase learning
+            if !cleanPy.isEmpty || !cleanDigits.isEmpty {
+                let resolvedPy = cleanPy.isEmpty ? "phrase" : cleanPy
+                let sql = """
+                INSERT INTO user_phrases (pinyin, word, t9, freq, updated_at)
+                VALUES (?, ?, ?, 1, ?)
+                ON CONFLICT(pinyin, word) DO UPDATE SET
+                    t9 = CASE WHEN excluded.t9 != '' THEN excluded.t9 ELSE user_phrases.t9 END,
+                    freq = freq + 1,
+                    updated_at = excluded.updated_at;
+                """
+                var stmt: OpaquePointer?
+                if sqlite3_prepare_v2(udb, sql, -1, &stmt, nil) == SQLITE_OK {
+                    sqlite3_bind_text(stmt, 1, resolvedPy, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 2, word, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 3, cleanDigits, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_int64(stmt, 4, now)
+                    sqlite3_step(stmt)
+                    sqlite3_finalize(stmt)
+                }
+            }
+
+            // 3. Predictive Next-Word Association
+            if let prev = previousWord?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !prev.isEmpty, prev != word, prev.count <= 10, word.count <= 10 {
+                let sql = """
+                INSERT INTO user_associations (prev_word, next_word, freq, updated_at)
+                VALUES (?, ?, 1, ?)
+                ON CONFLICT(prev_word, next_word) DO UPDATE SET
+                    freq = freq + 1,
+                    updated_at = excluded.updated_at;
+                """
+                var stmt: OpaquePointer?
+                if sqlite3_prepare_v2(udb, sql, -1, &stmt, nil) == SQLITE_OK {
+                    sqlite3_bind_text(stmt, 1, prev, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_text(stmt, 2, word, -1, SQLITE_TRANSIENT)
+                    sqlite3_bind_int64(stmt, 3, now)
+                    sqlite3_step(stmt)
+                    sqlite3_finalize(stmt)
+                }
+            }
+
+            // Clear cache to ensure subsequent queries see newly learned words/frequencies immediately
+            self.t9Cache.removeAll()
+            self.t9CacheKeys.removeAll()
+        }
+    }
+
+    public func fetchUserPhrasesByT9(t9: String, limit: Int = 10) -> [(word: String, freq: Int, pinyin: String)] {
+        guard let udb = userDB, !t9.isEmpty else { return [] }
+        let sql = "SELECT word, freq, pinyin FROM user_phrases WHERE t9 = ? ORDER BY freq DESC, updated_at DESC LIMIT ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(udb, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, t9, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(limit))
+        var rows: [(word: String, freq: Int, pinyin: String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let wStr = sqlite3_column_text(stmt, 0), let pyStr = sqlite3_column_text(stmt, 2) {
+                rows.append((String(cString: wStr), Int(sqlite3_column_int64(stmt, 1)), String(cString: pyStr)))
+            }
+        }
+        return rows
+    }
+
+    public func fetchUserCharsByT9(t9: String, limit: Int = 10) -> [(hanzi: String, freq: Int, pinyin: String)] {
+        guard let udb = userDB, !t9.isEmpty else { return [] }
+        let sql = "SELECT hanzi, freq, pinyin FROM user_chars WHERE t9 = ? ORDER BY freq DESC, updated_at DESC LIMIT ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(udb, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, t9, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(limit))
+        var rows: [(hanzi: String, freq: Int, pinyin: String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let hStr = sqlite3_column_text(stmt, 0), let pyStr = sqlite3_column_text(stmt, 2) {
+                rows.append((String(cString: hStr), Int(sqlite3_column_int64(stmt, 1)), String(cString: pyStr)))
+            }
+        }
+        return rows
+    }
+
+    public func fetchUserChars(pinyin: String, limit: Int = 10) -> [(String, Int)] {
+        guard let udb = userDB, !pinyin.isEmpty else { return [] }
+        let sql = "SELECT hanzi, freq FROM user_chars WHERE pinyin = ? ORDER BY freq DESC, updated_at DESC LIMIT ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(udb, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, pinyin, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(limit))
+        var rows: [(String, Int)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let hStr = sqlite3_column_text(stmt, 0) {
+                rows.append((String(cString: hStr), Int(sqlite3_column_int64(stmt, 1))))
+            }
+        }
+        return rows
+    }
+
+    public func fetchUserAssociations(prevWord: String, limit: Int = 8) -> [String] {
+        guard let udb = userDB, !prevWord.isEmpty else { return [] }
+        let sql = "SELECT next_word FROM user_associations WHERE prev_word = ? ORDER BY freq DESC, updated_at DESC LIMIT ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(udb, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, prevWord, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(limit))
+        var list: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let wStr = sqlite3_column_text(stmt, 0) {
+                list.append(String(cString: wStr))
+            }
+        }
+        return list
     }
 
     // MARK: - User Frequency Learning
@@ -477,9 +667,26 @@ public final class LexiconDatabase: @unchecked Sendable {
         let pureDigits = String(pureChars)
         guard !pureDigits.isEmpty else { return ([], []) }
 
+        let cacheKey = "\(pureDigits)|\(pinyinFilter ?? "")|\(personalWords.count)|\(includeSentenceDecoding ? 1 : 0)"
+
         return queue.sync {
+            if let cached = t9Cache[cacheKey] {
+                return cached
+            }
+
             var results: [PinyinCandidate] = []
             var seenTexts = Set<String>()
+
+            func finishResult(_ sylls: [String], _ cands: [PinyinCandidate]) -> ([String], [PinyinCandidate]) {
+                let pair = (sylls, cands)
+                if t9Cache.count >= t9CacheCapacity, let oldest = t9CacheKeys.first {
+                    t9CacheKeys.removeFirst()
+                    t9Cache.removeValue(forKey: oldest)
+                }
+                t9Cache[cacheKey] = pair
+                t9CacheKeys.append(cacheKey)
+                return pair
+            }
 
             func appendCandidate(_ cand: PinyinCandidate) {
                 guard results.count < limit else { return }
@@ -551,9 +758,18 @@ public final class LexiconDatabase: @unchecked Sendable {
                         ))
                     }
                 }
-                for (word, _) in fetchUserPhrases(pinyin: filterClean, limit: 6) {
+                for (word, _) in fetchUserPhrases(pinyin: filterClean, limit: 8) {
                     appendCandidate(PinyinCandidate(
                         text: word,
+                        consumedChars: pureDigits.count,
+                        displayPinyin: filterPy,
+                        isFullMatch: true,
+                        source: .userLearned
+                    ))
+                }
+                for (hanzi, _) in fetchUserChars(pinyin: filterClean, limit: 12) {
+                    appendCandidate(PinyinCandidate(
+                        text: hanzi,
                         consumedChars: pureDigits.count,
                         displayPinyin: filterPy,
                         isFullMatch: true,
@@ -597,7 +813,38 @@ public final class LexiconDatabase: @unchecked Sendable {
                         ))
                     }
                 }
-                return (syllableOptions, results)
+                return finishResult(syllableOptions, results)
+            }
+
+            // 0. User Learned Phrases & Characters matching full T9 digits (TOP PRIORITY: Boosted to #1)
+            let userPhrases = fetchUserPhrasesByT9(t9: pureDigits, limit: 10)
+            for item in userPhrases {
+                if !lockedPinyinNoSep.isEmpty && !item.pinyin.hasPrefix(lockedPinyinNoSep) {
+                    continue
+                }
+                appendCandidate(PinyinCandidate(
+                    text: item.word,
+                    consumedChars: pureDigits.count,
+                    displayPinyin: item.pinyin,
+                    isFullMatch: true,
+                    source: .userLearned
+                ))
+            }
+
+            if pureDigits.count <= 6 && lockedSpans.count <= 1 && obligatorySplits.isEmpty {
+                let userChars = fetchUserCharsByT9(t9: pureDigits, limit: 12)
+                for item in userChars {
+                    if !lockedPinyinNoSep.isEmpty && item.pinyin != lockedPinyinNoSep {
+                        continue
+                    }
+                    appendCandidate(PinyinCandidate(
+                        text: item.hanzi,
+                        consumedChars: pureDigits.count,
+                        displayPinyin: item.pinyin,
+                        isFullMatch: true,
+                        source: .userLearned
+                    ))
+                }
             }
 
             // 1. Personal Dictionary matching T9 digits (respecting locked pinyin prefix if set)
@@ -765,7 +1012,7 @@ public final class LexiconDatabase: @unchecked Sendable {
                 }
             }
 
-            return (syllableOptions, results)
+            return finishResult(syllableOptions, results)
         }
     }
 

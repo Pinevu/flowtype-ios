@@ -70,6 +70,8 @@ public final class KeyboardStateModel: ObservableObject {
     // MARK: - Background Cache & Defaults
     @Published public var customBackgroundImage: UIImage?
     public let t9StarterCandidates: [String] = ["的", "一", "我", "你", "吗", "啊", "可以"]
+    @Published public var lastCommittedWord: String? = nil
+    @Published public var dynamicIdleCandidates: [String] = ["的", "一", "我", "你", "吗", "啊", "可以"]
 
     // MARK: - Undo State
     @Published public var canUndoLastAIInsert: Bool = false
@@ -607,24 +609,49 @@ public final class KeyboardStateModel: ObservableObject {
         }
     }
 
+    public func refreshIdleCandidates() {
+        guard let last = lastCommittedWord, !last.isEmpty else {
+            dynamicIdleCandidates = t9StarterCandidates
+            return
+        }
+        let assocs = lexicon.fetchUserAssociations(prevWord: last, limit: 8)
+        if !assocs.isEmpty {
+            var merged = assocs
+            for s in t9StarterCandidates where !merged.contains(s) && merged.count < 8 {
+                merged.append(s)
+            }
+            dynamicIdleCandidates = merged
+        } else {
+            dynamicIdleCandidates = t9StarterCandidates
+        }
+    }
+
     public func selectPinyinCandidate(_ candidate: PinyinCandidate) {
         triggerHaptic()
         guard let proxy = proxyProvider?() else { return }
         proxy.insertText(candidate.text)
 
         if pinyinLayoutMode == .t9 && !t9ComposingDigits.isEmpty {
-            if !candidate.displayPinyin.isEmpty {
-                lexicon.recordChineseSelection(pinyin: candidate.displayPinyin, word: candidate.text)
-            }
+            let pureDigits = t9ComposingDigits.replacingOccurrences(of: "'", with: "")
+            let consumedDigits = String(pureDigits.prefix(candidate.consumedChars))
+
+            lexicon.recordT9Selection(
+                digits: consumedDigits,
+                word: candidate.text,
+                pinyin: candidate.displayPinyin,
+                previousWord: lastCommittedWord
+            )
+            lastCommittedWord = candidate.text
             maybeAutoLearnCorrection(term: candidate.text, pinyinHint: candidate.displayPinyin)
 
-            let pureDigits = t9ComposingDigits.replacingOccurrences(of: "'", with: "")
             if candidate.consumedChars >= pureDigits.count || candidate.isFullMatch {
                 clearT9Composing()
+                refreshIdleCandidates()
             } else {
                 let remaining = String(pureDigits.dropFirst(candidate.consumedChars))
                 if remaining.isEmpty {
                     clearT9Composing()
+                    refreshIdleCandidates()
                 } else {
                     t9ComposingDigits = remaining
                     selectedT9SyllableFilter = nil
@@ -638,6 +665,13 @@ public final class KeyboardStateModel: ObservableObject {
         let clean = composingPinyin.lowercased().filter { $0 >= "a" && $0 <= "z" }
         let usedPinyin = String(clean.prefix(candidate.consumedChars))
         lexicon.recordChineseSelection(pinyin: usedPinyin, word: candidate.text)
+        lexicon.recordT9Selection(
+            digits: LexiconDatabase.pinyinToT9Digits(usedPinyin),
+            word: candidate.text,
+            pinyin: usedPinyin,
+            previousWord: lastCommittedWord
+        )
+        lastCommittedWord = candidate.text
 
         // Typeless v2.8.0: auto-learn correction into Personal Dictionary if user edits shortly after dictation
         maybeAutoLearnCorrection(term: candidate.text, pinyinHint: usedPinyin)
@@ -645,6 +679,7 @@ public final class KeyboardStateModel: ObservableObject {
         let remainingClean = String(clean.dropFirst(candidate.consumedChars))
         if remainingClean.isEmpty {
             clearComposing()
+            refreshIdleCandidates()
         } else {
             composingPinyin = remainingClean
             isCandidateDrawerExpanded = false
@@ -781,6 +816,11 @@ public final class KeyboardStateModel: ObservableObject {
     public func insertStarterCandidate(_ word: String) {
         triggerHaptic()
         proxyProvider?()?.insertText(word)
+        if let prev = lastCommittedWord, !prev.isEmpty {
+            lexicon.recordT9Selection(digits: "", word: word, pinyin: "", previousWord: prev)
+        }
+        lastCommittedWord = word
+        refreshIdleCandidates()
         refreshContextFromProxy()
     }
 
@@ -870,7 +910,9 @@ public final class KeyboardStateModel: ObservableObject {
         let raw = t9ComposingDigits
         guard !raw.isEmpty else { return }
         proxyProvider?()?.insertText(raw)
+        lastCommittedWord = nil
         clearT9Composing()
+        refreshIdleCandidates()
         refreshContextFromProxy()
     }
 
@@ -895,20 +937,26 @@ public final class KeyboardStateModel: ObservableObject {
             return
         }
         proxyProvider?()?.insertText(" ")
+        lastCommittedWord = nil
+        refreshIdleCandidates()
         refreshContextFromProxy()
     }
 
     public func handleT9ReturnTap() {
         triggerHaptic()
-        if let first = pinyinCandidates.first {
-            selectPinyinCandidate(first)
-            return
-        }
         if !t9ComposingDigits.isEmpty {
-            commitT9AsRawDigits()
+            // iOS Native 9-key: 确认 commits composed pinyin / letters
+            let textToCommit = displayPinyin.isEmpty ? t9ComposingDigits : displayPinyin.replacingOccurrences(of: "'", with: "")
+            proxyProvider?()?.insertText(textToCommit)
+            lastCommittedWord = nil
+            clearT9Composing()
+            refreshIdleCandidates()
+            refreshContextFromProxy()
             return
         }
         proxyProvider?()?.insertText("\n")
+        lastCommittedWord = nil
+        refreshIdleCandidates()
         refreshContextFromProxy()
     }
 

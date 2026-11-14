@@ -36,15 +36,19 @@ struct KeyPalette: Equatable {
     }
 }
 
-/// Zero-blur keycap with instant pressed-state feedback (cheap to render, no offscreen shadow pass).
-struct KeyCapButtonStyle: ButtonStyle {
+/// Zero-latency keycap with instant pressed-state feedback on touch-down (DragGesture minimumDistance: 0).
+struct T9ResponsiveKey<Label: View>: View {
     let fill: Color
     let pressedFill: Color
     let edge: Color
     var cornerRadius: CGFloat = 7
+    let action: () -> Void
+    @ViewBuilder let label: () -> Label
 
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
+    @State private var isPressed = false
+
+    var body: some View {
+        label()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(
                 ZStack(alignment: .bottom) {
@@ -54,10 +58,24 @@ struct KeyCapButtonStyle: ButtonStyle {
                         .padding(.horizontal, 3)
                         .offset(y: 1)
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(configuration.isPressed ? pressedFill : fill)
+                        .fill(isPressed ? pressedFill : fill)
                 }
             )
             .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        if !isPressed {
+                            isPressed = true
+                        }
+                    }
+                    .onEnded { value in
+                        isPressed = false
+                        if abs(value.translation.width) < 44 && abs(value.translation.height) < 44 {
+                            action()
+                        }
+                    }
+            )
     }
 }
 
@@ -271,20 +289,18 @@ struct T9KeyGridView: View, Equatable {
                 model.toggleEmoticonDrawer()
             }
 
-            Button {
+            T9ResponsiveKey(
+                fill: state.returnIsAccent ? Color.blue : palette.special,
+                pressedFill: state.returnIsAccent ? Color.blue.opacity(0.75) : palette.specialPressed,
+                edge: palette.edge,
+                cornerRadius: 7
+            ) {
                 model.handleReturnTap()
             } label: {
                 Text(state.returnTitle)
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(state.returnIsAccent ? Color.white : Color.primary)
             }
-            .buttonStyle(
-                KeyCapButtonStyle(
-                    fill: state.returnIsAccent ? Color.blue : palette.special,
-                    pressedFill: state.returnIsAccent ? Color.blue.opacity(0.75) : palette.specialPressed,
-                    edge: palette.edge
-                )
-            )
             .frame(width: colWidth, height: span2Height)
         }
     }
@@ -292,9 +308,29 @@ struct T9KeyGridView: View, Equatable {
     // MARK: Key Builders
 
     private func letterKey(_ digit: String, _ letters: String, _ width: CGFloat, _ height: CGFloat) -> some View {
-        capKey(letters, size: 17, kind: .normal, tracking: 1.6, width: width, height: height) {
+        T9ResponsiveKey(
+            fill: palette.key,
+            pressedFill: palette.keyPressed,
+            edge: palette.edge,
+            cornerRadius: 7
+        ) {
             model.handleT9KeyTap(digit)
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Text(letters)
+                    .font(.system(size: 17, weight: .medium))
+                    .tracking(1.4)
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                Text(digit)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary.opacity(0.60))
+                    .padding(.top, 4)
+                    .padding(.trailing, 6)
+            }
         }
+        .frame(width: width, height: height)
         .accessibilityLabel("\(digit) \(letters)")
     }
 
@@ -321,7 +357,13 @@ struct T9KeyGridView: View, Equatable {
             fill = Color.blue.opacity(0.20)
             pressed = Color.blue.opacity(0.32)
         }
-        return Button(action: action) {
+        return T9ResponsiveKey(
+            fill: fill,
+            pressedFill: pressed,
+            edge: palette.edge,
+            cornerRadius: 7,
+            action: action
+        ) {
             Text(title)
                 .font(.system(size: size, weight: .medium))
                 .tracking(tracking)
@@ -329,7 +371,6 @@ struct T9KeyGridView: View, Equatable {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
         }
-        .buttonStyle(KeyCapButtonStyle(fill: fill, pressedFill: pressed, edge: palette.edge))
         .frame(width: width, height: height)
     }
 
@@ -379,13 +420,18 @@ struct T9KeyGridView: View, Equatable {
     ) -> some View {
         let fill: Color = kind == .accent ? Color.blue.opacity(0.20) : palette.key
         let pressed: Color = kind == .accent ? Color.blue.opacity(0.32) : palette.keyPressed
-        return Button(action: action) {
+        return T9ResponsiveKey(
+            fill: fill,
+            pressedFill: pressed,
+            edge: Color.clear,
+            cornerRadius: 6,
+            action: action
+        ) {
             Text(title)
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(foreground)
                 .lineLimit(1)
         }
-        .buttonStyle(KeyCapButtonStyle(fill: fill, pressedFill: pressed, edge: Color.clear, cornerRadius: 6))
         .frame(width: width, height: height)
     }
 }

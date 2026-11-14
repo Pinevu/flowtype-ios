@@ -200,6 +200,64 @@ final class FlowTypeTests: XCTestCase {
         XCTAssertLessThanOrEqual(cancelled.count, 40)
     }
 
+    func testT9UserLearningAndFrequencyBoost() throws {
+        let userDBURL = tempDir.appendingPathComponent("user_t9_learning.sqlite")
+        let db = LexiconDatabase(
+            bundleDBURL: Bundle(for: LexiconDatabase.self).url(forResource: "lexicon", withExtension: "sqlite"),
+            userDBURL: userDBURL
+        )
+
+        // Baseline: 64 queries "你" as #1
+        let (_, baselineCands) = db.queryT9Candidates(digits: "64")
+        XCTAssertEqual(baselineCands.first?.text, "你")
+
+        // User repeatedly selects "米" for 64
+        let exp = expectation(description: "record learning")
+        db.recordT9Selection(digits: "64", word: "米", pinyin: "mi")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 2.0)
+
+        // After learning: "米" must be boosted to candidate #1!
+        let (_, learnedCands) = db.queryT9Candidates(digits: "64")
+        XCTAssertEqual(learnedCands.first?.text, "米")
+        XCTAssertEqual(learnedCands.first?.source, .userLearned)
+    }
+
+    func testT9CustomPhraseLearningAndAssociations() throws {
+        let userDBURL = tempDir.appendingPathComponent("user_custom_phrase.sqlite")
+        let db = LexiconDatabase(
+            bundleDBURL: Bundle(for: LexiconDatabase.self).url(forResource: "lexicon", withExtension: "sqlite"),
+            userDBURL: userDBURL
+        )
+
+        // User enters a custom phrase not in standard lexicon: "全能签好用" for T9
+        let novelPhrase = "全能签好用"
+        let novelT9 = "76663674269664"
+        let exp1 = expectation(description: "record novel phrase")
+        db.recordT9Selection(digits: novelT9, word: novelPhrase, pinyin: "quannengqianhaoyong")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            exp1.fulfill()
+        }
+        wait(for: [exp1], timeout: 2.0)
+
+        let (_, novelCands) = db.queryT9Candidates(digits: novelT9)
+        XCTAssertEqual(novelCands.first?.text, novelPhrase)
+        XCTAssertEqual(novelCands.first?.source, .userLearned)
+
+        // Test next-word association learning: "你好" -> "世界"
+        let exp2 = expectation(description: "record association")
+        db.recordT9Selection(digits: "74543", word: "世界", pinyin: "shijie", previousWord: "你好")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            exp2.fulfill()
+        }
+        wait(for: [exp2], timeout: 2.0)
+
+        let associations = db.fetchUserAssociations(prevWord: "你好")
+        XCTAssertTrue(associations.contains("世界"))
+    }
+
     func testBackgroundCropLayoutAndOpacityConfigRoundTrip() throws {
         // 1. Zero opacity & crop fields persist across encode/decode
         let config = AIConfiguration(
