@@ -8,6 +8,9 @@ on:
       - '.github/workflows/build-gboard-mod.yml'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-gboard:
     name: Compile Dylib & Patch Gboard IPA
@@ -78,17 +81,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG_NAME="v1.0.0-gboard"
+          TAG_NAME="v1.0.1-gboard"
           gh release delete "$TAG_NAME" -y 2>/dev/null || true
           git tag -d "$TAG_NAME" 2>/dev/null || true
           git push origin :refs/tags/"$TAG_NAME" 2>/dev/null || true
 
           gh release create "$TAG_NAME" build/Gboard-Lintype-unsigned.ipa \
-            --title "Gboard + Lintype 语音输入 & iOS 原生九宫格定制版" \
-            --notes "本版本为 Gboard 2.3.19 深度定制版（支持全能签 ESign / 巨魔 TrollStore 签名安装）：
-          1. 深度整合 Lintype AI 实时语音输入功能（支持 iOS 本地与高精度实时识别，带动态波形与快捷上屏）。
-          2. 优化九宫格按键皮肤为 iOS 原生风格（白色按键、原生灰功能键、系统蓝确认键、原生阴影与圆角）。
-          3. 纯净候选词栏：去除了前置序号干扰数字，采用原生字号与清晰排版。"
+            --title "Gboard + Lintype 语音输入 & iOS 原生九宫格定制版 (iOS 18 防闪退优化)" \
+            --notes "本版本特别针对 iOS 18 系统进行了底层防闪退重构（支持全能签 ESign / 巨魔 TrollStore 签名安装）：
+          1. 修复 iOS 18 dyld 强制要求 Mach-O LC_CODE_SIGNATURE 必须为最后一条加载命令的核心规范，彻底消除启动即崩溃。
+          2. 重写全部方法注入为 C 函数指针安全交换（IMP Swizzling），消除子类布局递归与栈溢出风险。
+          3. 麦克风与 Speech 框架改为按需延迟安全加载，防止启动时 TCC 权限断言崩溃。
+          4. 保留并嵌入完整的 com.apple.security.application-groups 共享组权限配置。"
 
       - name: Deploy to GitHub Pages
         run: |
@@ -105,5 +109,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Gboard-Lintype-unsigned.ipa
-          git commit -m "Deploy Gboard-Lintype-unsigned.ipa" || true
+          git commit -m "Deploy iOS 18 anti-crash Gboard-Lintype-unsigned.ipa" || true
           git push -u origin gh-pages --force
