@@ -1,0 +1,107 @@
+name: FlowType
+options:
+  bundleIdPrefix: com.flowtype.voice
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "16.0"
+  defaultConfig: Release
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+    FLOWTYPE_APP_GROUP_ID: group.com.flowtype.voice
+    FLOWTYPE_URL_SCHEME: flowtype
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+
+targets:
+  FlowType:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: FlowType
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_NAME: FlowType
+        PRODUCT_BUNDLE_IDENTIFIER: com.flowtype.voice.app
+        INFOPLIST_FILE: FlowType/Info.plist
+        CODE_SIGN_ENTITLEMENTS: FlowType/FlowType.entitlements
+        SKIP_INSTALL: "NO"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+    dependencies:
+      - target: FlowTypeKeyboard
+        embed: true
+      - sdk: libsqlite3.tbd
+      - sdk: AVFoundation.framework
+      - sdk: AVKit.framework
+      - sdk: Speech.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
+
+  FlowTypeKeyboard:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: FlowTypeKeyboard
+        excludes:
+          - Resources/**
+      - path: Shared
+    resources:
+      - path: FlowTypeKeyboard/Resources/lexicon.sqlite
+    settings:
+      base:
+        PRODUCT_NAME: FlowTypeKeyboard
+        PRODUCT_BUNDLE_IDENTIFIER: com.flowtype.voice.app.keyboard
+        INFOPLIST_FILE: FlowTypeKeyboard/Info.plist
+        CODE_SIGN_ENTITLEMENTS: FlowTypeKeyboard/FlowTypeKeyboard.entitlements
+        APPLICATION_EXTENSION_API_ONLY: "YES"
+        SKIP_INSTALL: "YES"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+          - "@executable_path/../../Frameworks"
+    dependencies:
+      - sdk: libsqlite3.tbd
+      - sdk: UIKit.framework
+      - sdk: SwiftUI.framework
+
+  FlowTypeTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: FlowTypeTests
+      - path: Shared
+    resources:
+      - path: FlowTypeKeyboard/Resources/lexicon.sqlite
+    settings:
+      base:
+        PRODUCT_NAME: FlowTypeTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.flowtype.voice.tests
+        GENERATE_INFOPLIST_FILE: "YES"
+    dependencies:
+      - sdk: libsqlite3.tbd
+
+schemes:
+  FlowType:
+    build:
+      targets:
+        FlowType: all
+        FlowTypeKeyboard: all
+        FlowTypeTests: [test]
+    test:
+      config: Debug
+      targets:
+        - FlowTypeTests
+    archive:
+      config: Release

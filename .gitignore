@@ -1,0 +1,22 @@
+# Runtime / Workspace artifacts
+events.jsonl
+.cache_dict/
+
+# Xcode / macOS
+.DS_Store
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+build/
+*.xcarchive/
+*.ipa
+*.dSYM.zip
+*.dSYM
+*.p12
+*.mobileprovision
+ExportOptions.plist
+*.xcuserdatad
+*.xcuserstate
+xcuserdata/
+profile
+.swiftpm/

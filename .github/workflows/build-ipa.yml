@@ -1,0 +1,246 @@
+name: Build & Package FlowType iOS
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      signing_mode:
+        description: "签名模式 (auto 会自动检测 Secrets 是否已配置证书)"
+        required: true
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - unsigned
+          - signed
+      export_method:
+        description: "证书导出类型 (仅 signed 模式生效)"
+        required: true
+        default: "ad-hoc"
+        type: choice
+        options:
+          - ad-hoc
+          - development
+          - enterprise
+          - app-store-connect
+      bundle_id_prefix:
+        description: "可选：自定义 Bundle ID 前缀（留空则自动从描述文件提取）"
+        required: false
+        default: ""
+        type: string
+      app_group_id:
+        description: "可选：自定义 App Group ID（留空则自动从描述文件提取）"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  test:
+    name: Unit Tests (iOS Simulator)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+
+      - name: Verify bundled lexicon database
+        run: test -s FlowTypeKeyboard/Resources/lexicon.sqlite
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Select available iPhone Simulator
+        id: sim
+        run: |
+          SIM_UDID=$(python3 -c '
+          import json, subprocess
+          out = subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"])
+          data = json.loads(out)
+          best = None
+          for runtime, devices in sorted(data.get("devices", {}).items(), reverse=True):
+              if "iOS" not in runtime:
+                  continue
+              for d in devices:
+                  if d.get("isAvailable") and "iPhone" in d.get("name", ""):
+                      best = d["udid"]
+                      break
+              if best:
+                  break
+          print(best or "")
+          ')
+          if [ -z "$SIM_UDID" ]; then
+            echo "No available iPhone simulator found"
+            exit 1
+          fi
+          echo "udid=$SIM_UDID" >> "$GITHUB_OUTPUT"
+          echo "Using simulator UDID: $SIM_UDID"
+
+      - name: Run FlowTypeTests
+        run: |
+          xcodebuild test \
+            -project FlowType.xcodeproj \
+            -scheme FlowType \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            CODE_SIGNING_ALLOWED=NO
+
+  build-ipa:
+    name: Build iOS IPA
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    env:
+      HAS_P12: ${{ secrets.IOS_P12_BASE64 != '' }}
+      HAS_APP_PROV: ${{ secrets.IOS_APP_PROVISION_BASE64 != '' }}
+      HAS_EXT_PROV: ${{ secrets.IOS_EXT_PROVISION_BASE64 != '' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+
+      - name: Resolve signing mode
+        id: mode
+        run: |
+          REQ="${{ github.event.inputs.signing_mode || 'auto' }}"
+          if [ "$REQ" = "auto" ]; then
+            if [ "$HAS_P12" = "true" ] && [ "$HAS_APP_PROV" = "true" ] && [ "$HAS_EXT_PROV" = "true" ]; then
+              EFFECTIVE="signed"
+            else
+              EFFECTIVE="unsigned"
+            fi
+          else
+            EFFECTIVE="$REQ"
+          fi
+
+          if [ "$EFFECTIVE" = "signed" ]; then
+            if [ "$HAS_P12" != "true" ] || [ "$HAS_APP_PROV" != "true" ] || [ "$HAS_EXT_PROV" != "true" ]; then
+              echo "Error: signed mode requires IOS_P12_BASE64, IOS_APP_PROVISION_BASE64, and IOS_EXT_PROVISION_BASE64 secrets."
+              exit 1
+            fi
+          fi
+
+          echo "effective=$EFFECTIVE" >> "$GITHUB_OUTPUT"
+          echo "Effective IPA mode: $EFFECTIVE"
+
+      - name: Build Unsigned IPA (for TrollStore / ESign / AltStore / zsign)
+        if: steps.mode.outputs.effective == 'unsigned'
+        run: |
+          python3 scripts/ci_configure_signing.py \
+            --unsigned \
+            --project-yml project.yml \
+            --bundle-id-prefix "${{ github.event.inputs.bundle_id_prefix }}" \
+            --app-group-id "${{ github.event.inputs.app_group_id }}"
+
+          xcodegen generate
+          xcodebuild build \
+            -project FlowType.xcodeproj \
+            -scheme FlowType \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/FlowType.app"
+          test -d "$APP_PATH"
+          test -d "$APP_PATH/PlugIns/FlowTypeKeyboard.appex"
+
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/FlowType.app
+          (cd build && zip -qry FlowType-unsigned.ipa Payload)
+          ls -lh build/FlowType-unsigned.ipa
+
+      - name: Import Certificate & Configure Signed Build
+        if: steps.mode.outputs.effective == 'signed'
+        env:
+          IOS_P12_BASE64: ${{ secrets.IOS_P12_BASE64 }}
+          IOS_P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
+          IOS_APP_PROVISION_BASE64: ${{ secrets.IOS_APP_PROVISION_BASE64 }}
+          IOS_EXT_PROVISION_BASE64: ${{ secrets.IOS_EXT_PROVISION_BASE64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: "flowtype-ci-temp-keychain"
+        run: |
+          mkdir -p build/certs "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$IOS_P12_BASE64" | base64 --decode > build/certs/cert.p12
+          echo "$IOS_APP_PROVISION_BASE64" | base64 --decode > build/certs/app.mobileprovision
+          echo "$IOS_EXT_PROVISION_BASE64" | base64 --decode > build/certs/ext.mobileprovision
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/flowtype_build.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import build/certs/cert.p12 -k "$KEYCHAIN_PATH" -P "$IOS_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          SIGN_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | sed -n 's/.*"\(.*\)".*/\1/p' | head -n 1)
+          echo "Detected signing identity: $SIGN_IDENTITY"
+
+          security cms -D -i build/certs/app.mobileprovision > build/certs/app.plist
+          security cms -D -i build/certs/ext.mobileprovision > build/certs/ext.plist
+
+          python3 scripts/ci_configure_signing.py \
+            --app-plist build/certs/app.plist \
+            --ext-plist build/certs/ext.plist \
+            --project-yml project.yml \
+            --export-options build/ExportOptions.plist \
+            --export-method "${{ github.event.inputs.export_method || 'ad-hoc' }}" \
+            --bundle-id-prefix "${{ github.event.inputs.bundle_id_prefix }}" \
+            --app-group-id "${{ github.event.inputs.app_group_id }}" \
+            --team-id "$APPLE_TEAM_ID" \
+            --sign-identity "$SIGN_IDENTITY" \
+            --github-env "$GITHUB_ENV"
+
+          cp build/certs/app.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/${RESOLVED_APP_PROFILE_UUID}.mobileprovision"
+          cp build/certs/ext.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/${RESOLVED_EXT_PROFILE_UUID}.mobileprovision"
+
+      - name: Archive & Export Signed IPA
+        if: steps.mode.outputs.effective == 'signed'
+        run: |
+          xcodegen generate
+          xcodebuild archive \
+            -project FlowType.xcodeproj \
+            -scheme FlowType \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath build/FlowType.xcarchive \
+            OTHER_CODE_SIGN_FLAGS="--keychain $RUNNER_TEMP/flowtype_build.keychain-db"
+
+          xcodebuild -exportArchive \
+            -archivePath build/FlowType.xcarchive \
+            -exportPath build/export \
+            -exportOptionsPlist build/ExportOptions.plist
+
+          IPA_FILE=$(find build/export -maxdepth 1 -name "*.ipa" | head -n 1)
+          test -n "$IPA_FILE"
+          mv "$IPA_FILE" build/FlowType-signed.ipa
+          ls -lh build/FlowType-signed.ipa
+
+      - name: Cleanup Keychain & Certificates
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/flowtype_build.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/flowtype_build.keychain-db" || true
+          fi
+          rm -rf build/certs
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlowType-${{ steps.mode.outputs.effective }}-ipa
+          path: build/FlowType-*.ipa
+          if-no-files-found: error
+          retention-days: 30
