@@ -2,6 +2,7 @@
 #import <objc/runtime.h>
 #import "LintypeVoiceManager.h"
 #import "GboardNativeTheme.h"
+#import "AppGroupFix.h"
 
 #pragma mark - GKBUIInputViewController Hooks
 
@@ -78,10 +79,13 @@ static void my_voiceLauncher_launchVoiceInput(id self, SEL _cmd) {
 __attribute__((constructor)) static void init_lintype_gboard(void) {
     NSLog(@"[LintypeGboard] Initializing Lintype Gboard Mod...");
 
-    // Only install keyboard hooks inside the Keyboard Extension (.appex)
+    // 1. MUST INSTALL AppGroup redirection in BOTH main app and extension to prevent nil-container crashes
+    [AppGroupFix installAppGroupHooks];
+
+    // 2. Only install keyboard UI hooks inside Keyboard Extension (.appex)
     NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
     if (![bundlePath hasSuffix:@".appex"]) {
-        NSLog(@"[LintypeGboard] Main container app detected, skipping keyboard hooks.");
+        NSLog(@"[LintypeGboard] Main app detected, AppGroup protection active.");
         return;
     }
 
@@ -117,5 +121,5 @@ __attribute__((constructor)) static void init_lintype_gboard(void) {
         }
     }
 
-    NSLog(@"[LintypeGboard] Successfully installed Lintype hooks!");
+    NSLog(@"[LintypeGboard] Successfully installed Lintype keyboard extension hooks!");
 }

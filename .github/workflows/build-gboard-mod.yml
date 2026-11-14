@@ -45,12 +45,13 @@ jobs:
             -framework CoreGraphics \
             -framework QuartzCore \
             -framework AVFoundation \
-            -framework Speech \
+            -weak_framework Speech \
             -install_name @rpath/libLintypeGboard.dylib \
             -o build/libLintypeGboard.dylib \
             GboardMod/LintypeVoiceOverlayView.m \
             GboardMod/LintypeVoiceManager.m \
             GboardMod/GboardNativeTheme.m \
+            GboardMod/AppGroupFix.m \
             GboardMod/LintypeGboard.m
 
           file build/libLintypeGboard.dylib
@@ -81,18 +82,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG_NAME="v1.0.1-gboard"
+          TAG_NAME="v1.0.2-gboard"
           gh release delete "$TAG_NAME" -y 2>/dev/null || true
           git tag -d "$TAG_NAME" 2>/dev/null || true
           git push origin :refs/tags/"$TAG_NAME" 2>/dev/null || true
 
           gh release create "$TAG_NAME" build/Gboard-Lintype-unsigned.ipa \
-            --title "Gboard + Lintype 语音输入 & iOS 原生九宫格定制版 (iOS 18 防闪退优化)" \
-            --notes "本版本特别针对 iOS 18 系统进行了底层防闪退重构（支持全能签 ESign / 巨魔 TrollStore 签名安装）：
-          1. 修复 iOS 18 dyld 强制要求 Mach-O LC_CODE_SIGNATURE 必须为最后一条加载命令的核心规范，彻底消除启动即崩溃。
-          2. 重写全部方法注入为 C 函数指针安全交换（IMP Swizzling），消除子类布局递归与栈溢出风险。
-          3. 麦克风与 Speech 框架改为按需延迟安全加载，防止启动时 TCC 权限断言崩溃。
-          4. 保留并嵌入完整的 com.apple.security.application-groups 共享组权限配置。"
+            --title "Gboard + Lintype 语音输入 & iOS 原生九宫格定制版 (iOS 18 + 全能签完美运行版)" \
+            --notes "本版本（v1.0.2）针对全能签 (ESign) / 巨魔 (TrollStore) 在 iOS 18 签名下的核心闪退问题进行了深度修复：
+          1. 【动态 AppGroup 重定向】解决第三方签名缺少 Google 原生 group.com.google.keyboard 导致 containerURL 返回 nil 引起的崩溃。
+          2. 【NSUserDefaults Suite 防护】防止第三方签名环境下 initWithSuiteName 返回 nil 导致 GKBHandshake 客户端启动崩溃。
+          3. 【移除硬编码 Google 权限描述】消除 iOS 18 AMFI 内核因证书与描述文件 AppGroup 不匹配引发的代码签名强制终止 (SIGKILL)。
+          4. 【弱链接 Speech 框架】防止键盘插件启动装载阶段因 Speech.framework 权限引发 dyld 终止。
+          5. 【保持 Mach-O 规范】确保 LC_CODE_SIGNATURE 严格置于最后一位。"
 
       - name: Deploy to GitHub Pages
         run: |

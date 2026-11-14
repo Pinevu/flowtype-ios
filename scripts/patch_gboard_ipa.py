@@ -115,37 +115,17 @@ def patch_gboard(base_ipa, dylib_path, output_ipa):
         if p.is_dir():
             shutil.rmtree(p)
 
-    # Prepare Entitlements with App Groups
-    entitlements_xml = """<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>com.apple.security.application-groups</key>
-	<array>
-		<string>group.com.google.common</string>
-		<string>group.com.google.keyboard</string>
-	</array>
-</dict>
-</plist>"""
-    app_ent_path = work_dir / "app.entitlements"
-    ext_ent_path = work_dir / "ext.entitlements"
-    app_ent_path.write_text(entitlements_xml)
-    ext_ent_path.write_text(entitlements_xml)
-
-    # If codesign tool is present, ad-hoc sign with proper entitlements
+    # If codesign tool is present, ad-hoc sign cleanly without hardcoded Google entitlements
+    # so ESign / TrollStore can inject the user's valid certificate entitlements without AMFI mismatch
     if shutil.which("codesign"):
-        print("Ad-hoc codesigning with preserved entitlements...")
+        print("Ad-hoc codesigning with clean entitlements for third-party cert compatibility...")
         try:
             subprocess.run(["codesign", "--force", "--sign", "-", str(app_fw / "libLintypeGboard.dylib")], check=True)
-            subprocess.run(["codesign", "--force", "--sign", "-", "--entitlements", str(ext_ent_path), str(appex_dir)], check=True)
-            subprocess.run(["codesign", "--force", "--sign", "-", "--entitlements", str(app_ent_path), str(app_dir)], check=True)
+            subprocess.run(["codesign", "--force", "--sign", "-", str(appex_dir)], check=True)
+            subprocess.run(["codesign", "--force", "--sign", "-", str(app_dir)], check=True)
             print("Codesign verification completed successfully.")
         except Exception as e:
             print("Codesign note:", e)
-
-    # Clean temporary entitlements files from bundle before packaging
-    if app_ent_path.exists(): app_ent_path.unlink()
-    if ext_ent_path.exists(): ext_ent_path.unlink()
 
     print(f"Packaging {output_ipa}...")
     output_path = pathlib.Path(output_ipa).resolve()

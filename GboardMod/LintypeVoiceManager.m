@@ -107,11 +107,19 @@
 
     // Lazily initialize speech recognizer
     @try {
+        Class sfClass = NSClassFromString(@"SFSpeechRecognizer");
+        if (!sfClass) {
+            if (finalHandler) {
+                NSError *err = [NSError errorWithDomain:@"LintypeVoice" code:-3 userInfo:@{NSLocalizedDescriptionKey: @"系统语音识别组件不可用"}];
+                finalHandler(@"", err);
+            }
+            return;
+        }
         if (!self.speechRecognizer) {
             NSLocale *locale = [NSLocale localeWithLocaleIdentifier:@"zh-CN"];
-            self.speechRecognizer = [[SFSpeechRecognizer alloc] initWithLocale:locale];
+            self.speechRecognizer = [[sfClass alloc] initWithLocale:locale];
             if (!self.speechRecognizer) {
-                self.speechRecognizer = [[SFSpeechRecognizer alloc] initWithLocale:[NSLocale currentLocale]];
+                self.speechRecognizer = [[sfClass alloc] initWithLocale:[NSLocale currentLocale]];
             }
         }
     } @catch (NSException *e) {
