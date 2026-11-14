@@ -116,10 +116,32 @@ struct HomeView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if !SharedStore.shared.isUsingAppGroup {
-                Label("当前未检测到 App Group 容器（签名 Profile 需包含 \(AppConfig.appGroupID)）", systemImage: "exclamationmark.triangle.fill")
+            if SharedStore.shared.isUsingAppGroup {
+                Label("App Group 共享容器已就绪（\(AppConfig.appGroupID)）", systemImage: "checkmark.shield.fill")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.green)
+            } else {
+                let provGroups = AppConfig.appGroupDiagnostics.provisionGroupIDs
+                if provGroups.isEmpty {
+                    Label("当前未检测到 App Group 容器（签名 Profile 需包含 \(AppConfig.appGroupID)）", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("证书含 \(provGroups.count) 条 App Group，但当前签名权限尚未生效：", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.orange)
+                        Text(provGroups.joined(separator: "、"))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        Text("请在全能签签名设置中开启「保留/注入应用组权限」或选中上述组后重签主 App 与键盘插件。")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
 
             Button {

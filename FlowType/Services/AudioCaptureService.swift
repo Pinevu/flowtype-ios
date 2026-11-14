@@ -119,7 +119,17 @@ public final class AudioCaptureService {
         let options: AVAudioSession.CategoryOptions = [.allowBluetooth, .defaultToSpeaker, .mixWithOthers]
         #endif
         try session.setCategory(.playAndRecord, mode: .measurement, options: options)
-        try session.setActive(true, options: .notifyOthersOnDeactivation)
+        do {
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            let nsErr = error as NSError
+            if nsErr.code == AVAudioSession.ErrorCode.insufficientPriority.rawValue ||
+                nsErr.code == AVAudioSession.ErrorCode.cannotInterruptOthers.rawValue {
+                try session.setActive(true)
+            } else {
+                throw error
+            }
+        }
 
         resetCapturedSamples()
 

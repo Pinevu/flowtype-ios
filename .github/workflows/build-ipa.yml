@@ -160,8 +160,26 @@ jobs:
           test -d "$APP_PATH/PlugIns/FlowTypeKeyboard.appex"
           test -s "$APP_PATH/PlugIns/FlowTypeKeyboard.appex/lexicon.sqlite"
 
+          python3 - <<'PY'
+          import pathlib, yaml
+          proj = yaml.safe_load(pathlib.Path("project.yml").read_text())
+          app_group = proj["settings"]["base"]["FLOWTYPE_APP_GROUP_ID"]
+          for src, dst in [
+              ("FlowType/FlowType.entitlements", "build/unsigned-app.entitlements"),
+              ("FlowTypeKeyboard/FlowTypeKeyboard.entitlements", "build/unsigned-ext.entitlements"),
+          ]:
+              txt = pathlib.Path(src).read_text().replace("$(FLOWTYPE_APP_GROUP_ID)", app_group)
+              pathlib.Path(dst).write_text(txt)
+          PY
+
           mkdir -p build/Payload
           cp -R "$APP_PATH" build/Payload/FlowType.app
+          codesign --force --sign - --entitlements build/unsigned-ext.entitlements build/Payload/FlowType.app/PlugIns/FlowTypeKeyboard.appex
+          codesign --force --sign - --entitlements build/unsigned-app.entitlements build/Payload/FlowType.app
+          codesign -d --entitlements :- build/Payload/FlowType.app | tee build/app-entitlements-dump.txt
+          codesign -d --entitlements :- build/Payload/FlowType.app/PlugIns/FlowTypeKeyboard.appex | tee build/ext-entitlements-dump.txt
+          grep -q "com.apple.security.application-groups" build/app-entitlements-dump.txt
+          grep -q "com.apple.security.application-groups" build/ext-entitlements-dump.txt
           (cd build && zip -qry FlowType-unsigned.ipa Payload)
           ls -lh build/FlowType-unsigned.ipa
 

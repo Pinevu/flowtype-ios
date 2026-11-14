@@ -37,6 +37,9 @@ public final class PiPKeepAliveManager: NSObject, ObservableObject {
     public let hostView = PiPSampleBufferView(frame: CGRect(x: 0, y: 0, width: 320, height: 84))
 
     private var pipController: AVPictureInPictureController?
+    private var possibleObservation: NSKeyValueObservation?
+    private var pendingStartWorkItem: DispatchWorkItem?
+    private var pendingStart = false
     private var frameTimer: Timer?
     private var currentState: HostVoiceState = .standbyPiP
     private var currentLevel: Float = 0
@@ -49,6 +52,8 @@ public final class PiPKeepAliveManager: NSObject, ObservableObject {
     }
 
     deinit {
+        possibleObservation?.invalidate()
+        pendingStartWorkItem?.cancel()
         stopFramePump()
     }
 
@@ -67,6 +72,15 @@ public final class PiPKeepAliveManager: NSObject, ObservableObject {
             let controller = AVPictureInPictureController(contentSource: contentSource)
             controller.delegate = self
             controller.canStartPictureInPictureAutomaticallyFromInline = true
+            possibleObservation = controller.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] ctrl, _ in
+                let isPossible = ctrl.isPictureInPicturePossible
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if isPossible && self.pendingStart && self.pipController?.isPictureInPictureActive != true {
+                        self.triggerStartNow()
+                    }
+                }
+            }
             pipController = controller
         }
 
@@ -84,25 +98,61 @@ public final class PiPKeepAliveManager: NSObject, ObservableObject {
 
     public func startPiP() {
         lastErrorMessage = nil
+        pendingStart = true
+        pendingStartWorkItem?.cancel()
         setupPiP()
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-            try session.setActive(true)
-        } catch {
-            lastErrorMessage = "音频会话激活失败：\(error.localizedDescription)"
+
+        let session = AVAudioSession.sharedInstance()
+        if session.category != .playAndRecord {
+            do {
+                try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+                try session.setActive(true)
+            } catch {
+                let nsErr = error as NSError
+                if nsErr.code == AVAudioSession.ErrorCode.insufficientPriority.rawValue ||
+                    nsErr.code == AVAudioSession.ErrorCode.cannotInterruptOthers.rawValue {
+                    // Background app holds exclusive audio priority; still attempt PiP activation with sampleBuffer layer
+                    lastErrorMessage = "提示：其他应用正占用高优先级音频（\(nsErr.code)），若画中画未弹出请先暂停媒体后再试"
+                } else {
+                    lastErrorMessage = "音频会话激活提示：\(error.localizedDescription)"
+                }
+            }
         }
 
         enqueueStatusFrame()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            guard let self, let controller = self.pipController else { return }
-            if !controller.isPictureInPictureActive {
-                controller.startPictureInPicture()
+
+        if pipController?.isPictureInPicturePossible == true {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                self?.triggerStartNow()
             }
+        } else {
+            // Wait up to 2.5s for isPictureInPicturePossible KVO instead of failing immediately
+            let timeout = DispatchWorkItem { [weak self] in
+                guard let self, self.pendingStart else { return }
+                self.triggerStartNow()
+            }
+            pendingStartWorkItem = timeout
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: timeout)
+        }
+    }
+
+    private func triggerStartNow() {
+        pendingStart = false
+        pendingStartWorkItem?.cancel()
+        pendingStartWorkItem = nil
+        guard let controller = pipController else { return }
+        if !controller.isPictureInPictureActive {
+            controller.startPictureInPicture()
+        } else {
+            isPiPActive = true
+            lastErrorMessage = nil
         }
     }
 
     public func stopPiP() {
+        pendingStart = false
+        pendingStartWorkItem?.cancel()
+        pendingStartWorkItem = nil
         pipController?.stopPictureInPicture()
         isPiPActive = false
     }
@@ -285,7 +335,11 @@ public final class PiPKeepAliveManager: NSObject, ObservableObject {
 extension PiPKeepAliveManager: AVPictureInPictureControllerDelegate, AVPictureInPictureSampleBufferPlaybackDelegate {
     public func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         DispatchQueue.main.async {
+            self.pendingStart = false
+            self.pendingStartWorkItem?.cancel()
+            self.pendingStartWorkItem = nil
             self.isPiPActive = true
+            self.lastErrorMessage = nil
         }
     }
 

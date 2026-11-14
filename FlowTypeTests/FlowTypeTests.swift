@@ -102,4 +102,33 @@ final class FlowTypeTests: XCTestCase {
         XCTAssertTrue(sysPrompt.contains("日本語"))
         XCTAssertTrue(sysPrompt.contains("Soundcore"))
     }
+
+    func testProvisioningAppGroupExtraction() throws {
+        let mockXML = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Name</key><string>MockProfile</string>
+            <key>Entitlements</key>
+            <dict>
+                <key>com.apple.security.application-groups</key>
+                <array>
+                    <string>group.com.example.one</string>
+                    <string>group.com.example.two</string>
+                </array>
+            </dict>
+        </dict>
+        </plist>
+        """
+        var blob = Data([0x30, 0x82, 0x01, 0x00, 0x06, 0x09]) // simulated CMS ASN.1 header bytes
+        blob.append(Data(mockXML.utf8))
+        blob.append(Data([0x31, 0x00, 0xAB, 0xCD]))
+
+        let provURL = tempDir.appendingPathComponent("embedded.mobileprovision")
+        try blob.write(to: provURL)
+
+        let extracted = AppConfig.extractProvisionAppGroups(from: provURL)
+        XCTAssertEqual(extracted, ["group.com.example.one", "group.com.example.two"])
+    }
 }
