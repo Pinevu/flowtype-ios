@@ -55,9 +55,9 @@ targets:
       - path: FlowTypeKeyboard
         excludes:
           - Resources/**
-      - path: Shared
-    resources:
       - path: FlowTypeKeyboard/Resources/lexicon.sqlite
+        buildPhase: resources
+      - path: Shared
     settings:
       base:
         PRODUCT_NAME: FlowTypeKeyboard
@@ -82,8 +82,8 @@ targets:
     sources:
       - path: FlowTypeTests
       - path: Shared
-    resources:
       - path: FlowTypeKeyboard/Resources/lexicon.sqlite
+        buildPhase: resources
     settings:
       base:
         PRODUCT_NAME: FlowTypeTests

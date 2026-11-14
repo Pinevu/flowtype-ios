@@ -89,6 +89,7 @@ jobs:
             -project FlowType.xcodeproj \
             -scheme FlowType \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            -parallel-testing-enabled NO \
             CODE_SIGNING_ALLOWED=NO
 
   build-ipa:
@@ -157,6 +158,7 @@ jobs:
           APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/FlowType.app"
           test -d "$APP_PATH"
           test -d "$APP_PATH/PlugIns/FlowTypeKeyboard.appex"
+          test -s "$APP_PATH/PlugIns/FlowTypeKeyboard.appex/lexicon.sqlite"
 
           mkdir -p build/Payload
           cp -R "$APP_PATH" build/Payload/FlowType.app
@@ -218,6 +220,8 @@ jobs:
             -destination "generic/platform=iOS" \
             -archivePath build/FlowType.xcarchive \
             OTHER_CODE_SIGN_FLAGS="--keychain $RUNNER_TEMP/flowtype_build.keychain-db"
+
+          test -s "build/FlowType.xcarchive/Products/Applications/FlowType.app/PlugIns/FlowTypeKeyboard.appex/lexicon.sqlite"
 
           xcodebuild -exportArchive \
             -archivePath build/FlowType.xcarchive \

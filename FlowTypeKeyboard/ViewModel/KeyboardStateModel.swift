@@ -485,10 +485,10 @@ public final class KeyboardStateModel: ObservableObject {
         }
         let fuzzy = config.enablePinyinFuzzy
         let words = personalWords
+        let lexiconDB = lexicon
 
         queryQueue.async { [weak self] in
-            guard let self else { return }
-            let (seg, cands) = self.lexicon.queryPinyinCandidates(
+            let (seg, cands) = lexiconDB.queryPinyinCandidates(
                 rawInput: inputSnapshot,
                 fuzzy: fuzzy,
                 personalWords: words,

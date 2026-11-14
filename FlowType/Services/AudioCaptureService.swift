@@ -121,10 +121,7 @@ public final class AudioCaptureService {
         try session.setCategory(.playAndRecord, mode: .measurement, options: options)
         try session.setActive(true, options: .notifyOthersOnDeactivation)
 
-        samplesLock.lock()
-        capturedInt16Samples.removeAll(keepingCapacity: true)
-        latestSpeechTranscript = ""
-        samplesLock.unlock()
+        resetCapturedSamples()
 
         let inputNode = audioEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
@@ -219,6 +216,13 @@ public final class AudioCaptureService {
         audioEngine.prepare()
         try audioEngine.start()
         isCapturing = true
+    }
+
+    private func resetCapturedSamples() {
+        samplesLock.lock()
+        defer { samplesLock.unlock() }
+        capturedInt16Samples.removeAll(keepingCapacity: true)
+        latestSpeechTranscript = ""
     }
 
     public func stopRecording() -> (wavData: Data, appleSpeechText: String, durationSeconds: Double) {

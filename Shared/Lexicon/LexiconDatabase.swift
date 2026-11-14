@@ -3,7 +3,7 @@ import SQLite3
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-public enum CandidateSource: Equatable {
+public enum CandidateSource: Equatable, Sendable {
     case personalDictionary
     case userLearned
     case exactPhrase
@@ -12,7 +12,7 @@ public enum CandidateSource: Equatable {
     case singleChar
 }
 
-public struct PinyinCandidate: Identifiable, Equatable {
+public struct PinyinCandidate: Identifiable, Equatable, Sendable {
     public let id: String
     public let text: String
     public let consumedChars: Int
@@ -36,7 +36,7 @@ public struct PinyinCandidate: Identifiable, Equatable {
     }
 }
 
-public final class LexiconDatabase {
+public final class LexiconDatabase: @unchecked Sendable {
     public static let shared = LexiconDatabase()
 
     private var bundleDB: OpaquePointer?
@@ -424,7 +424,7 @@ public final class LexiconDatabase {
         guard n > 1 else { return [] }
 
         // Collect all valid syllable spans and multi-syllable spans up to 6 syllables
-        var fullEdges = seg.latticeEdges.filter { !$0.isPartial }
+        let fullEdges = seg.latticeEdges.filter { !$0.isPartial }
         if fullEdges.isEmpty {
             return []
         }

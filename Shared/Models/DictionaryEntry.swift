@@ -1,6 +1,6 @@
 import Foundation
 
-public enum WordCategory: String, Codable, CaseIterable, Identifiable {
+public enum WordCategory: String, Codable, CaseIterable, Identifiable, Sendable {
     case name
     case tech
     case brand
@@ -18,7 +18,7 @@ public enum WordCategory: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-public struct PersonalWord: Codable, Identifiable, Equatable, Hashable {
+public struct PersonalWord: Codable, Identifiable, Equatable, Hashable, Sendable {
     public var id: UUID
     public var term: String
     public var pinyinHint: String

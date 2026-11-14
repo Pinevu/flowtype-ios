@@ -33,6 +33,10 @@ final class FlowTypeTests: XCTestCase {
     }
 
     func testLexiconDatabaseQueriesAndViterbiSentence() throws {
+        XCTAssertNotNil(
+            Bundle(for: LexiconDatabase.self).url(forResource: "lexicon", withExtension: "sqlite"),
+            "lexicon.sqlite should be bundled into FlowTypeTests resources"
+        )
         let userDBURL = tempDir.appendingPathComponent("user_test.sqlite")
         let db = LexiconDatabase(userDBURL: userDBURL)
 
