@@ -364,27 +364,12 @@ static void my_inputVc_viewDidLayoutSubviews(UIInputViewController *self, SEL _c
     if (orig_inputVc_viewDidLayoutSubviews) {
         orig_inputVc_viewDidLayoutSubviews(self, _cmd);
     }
-
-    @try {
-        TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
-        if (mgr.isOverlayVisible) {
-            for (UIView *sub in self.view.subviews) {
-                if (sub != mgr.overlayView) {
-                    sub.hidden = YES;
-                }
-            }
-            [mgr.overlayView updateLayoutForContainerBounds:self.view.bounds];
-            [self.view bringSubviewToFront:mgr.overlayView];
-        }
-    } @catch (NSException *e) {
-        NSLog(@"[LintypeGboard] Exception in viewDidLayoutSubviews: %@", e);
-    }
 }
 
 static void (*orig_inputVc_viewWillDisappear)(UIInputViewController *self, SEL _cmd, BOOL animated) = NULL;
 static void my_inputVc_viewWillDisappear(UIInputViewController *self, SEL _cmd, BOOL animated) {
     @try {
-        [[TypelessVoiceManager sharedManager] dismissOverlay];
+        [[TypelessVoiceManager sharedManager] dismissVoiceOverlayAnimated:NO];
     } @catch (NSException *e) {}
 
     if (orig_inputVc_viewWillDisappear) {
@@ -401,9 +386,8 @@ static void my_voiceLauncher_launchVoiceInput(id self, SEL _cmd) {
         TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
         UIInputViewController *inputVC = mgr.activeInputViewController;
 
-        if (inputVC && inputVC.view) {
-            [mgr showOverlayInView:inputVC.view];
-            [mgr startRecording];
+        if (inputVC) {
+            [mgr presentVoiceOverlayInViewController:inputVC autoStart:YES];
             return;
         }
     } @catch (NSException *e) {
