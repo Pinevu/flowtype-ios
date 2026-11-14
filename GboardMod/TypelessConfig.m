@@ -1,46 +1,57 @@
 #import "TypelessConfig.h"
-#import <CoreFoundation/CoreFoundation.h>
+#import <Security/Security.h>
 
 static NSString *const kAppGroupPrimary = @"group.com.google.keyboard";
 static NSString *const kAppGroupSecondary = @"group.com.google.common";
-static NSString *const kConfigChangedDarwinName = @"com.lintype.gboard.configChanged";
-static NSString *const kConfigFileName = @"typeless_config.json";
+static NSString *const kConfigFileName = @"typeless_config_v2.json";
+static NSString *const kLegacyConfigFileName = @"typeless_config.json";
+static NSString *const kConfigDictKey = @"LintypeTypelessConfigDictV2";
+static NSString *const kKeychainService = @"com.lintype.gboard.config";
+static NSString *const kKeychainAccount = @"shared_config_v2";
+static CFStringRef const kConfigDidChangeDarwinName = CFSTR("com.lintype.gboard.configDidChange");
 
-static NSString *const kVoiceModeKey = @"Typeless_VoiceMode";
-static NSString *const kTargetLangKey = @"Typeless_TargetLang";
-static NSString *const kBaseURLKey = @"Typeless_BaseURL";
-static NSString *const kApiKeyKey = @"Typeless_ApiKey";
-static NSString *const kASRModelKey = @"Typeless_ASRModel";
-static NSString *const kLLMModelKey = @"Typeless_LLMModel";
-static NSString *const kUseAppleASRKey = @"Typeless_UseAppleASR";
-static NSString *const kSmartCleanupKey = @"Typeless_SmartCleanup";
-static NSString *const kUpdatedAtKey = @"Typeless_ConfigUpdatedAt";
+static NSString *const kDefaultAsrBaseURL = @"https://api.openai.com/v1";
+static NSString *const kDefaultLlmBaseURL = @"https://api.openai.com/v1";
+static NSString *const kDefaultAsrModel = @"whisper-1";
+static NSString *const kDefaultLlmModel = @"gpt-4o-mini";
 
-static NSString *const kPromptDictateKey = @"Typeless_PromptDictate";
-static NSString *const kPromptEditKey = @"Typeless_PromptEdit";
-static NSString *const kPromptTranslateKey = @"Typeless_PromptTranslate";
-static NSString *const kPromptHelpWriteKey = @"Typeless_PromptHelpWrite";
+static NSString *const kDefaultPromptDictate =
+    @"你是一个严谨、高效的语音输入排版与润色助手。"
+    @"请将用户的语音转写文本中的口语废话、卡顿重复（如“嗯”、“那个”、“就是说”等）和明显的同音错别字进行清理，"
+    @"补充合理的中文或英文标点符号，保持说话者的原始语义和语气不变。"
+    @"只输出整理后的纯文本结果，绝对不要加任何解释、前缀、引号或额外内容。";
 
-static NSString *const kDefaultDictatePrompt = @"你是一个智能语音听写助手。请修正以下口语转写中的错别字、去除口癖（嗯、啊、那个等）、添加合适的标点符号。保持原意不变，直接输出整理后的纯净文本，不要做额外解释或回复。";
-static NSString *const kDefaultEditPrompt = @"你是一个智能文本编辑助手。请根据用户的语音指令，精准修改、润色或改写给定的原始文本。仅输出修改后的最终文本结果，不要输出多余说明。";
-static NSString *const kDefaultTranslatePrompt = @"你是一个专业的实时翻译引擎。请将用户的语音文本地道、流畅地翻译为目标语言。直接输出翻译结果，不要附带任何解释或原文。";
-static NSString *const kDefaultHelpWritePrompt = @"你是一个高效的内容写作助手。请根据用户的简短口头需求，直接撰写并输出完整、得体、可直接发送的文本内容，不要附带开场白或多余解释。";
+static NSString *const kDefaultPromptEdit =
+    @"你是一个专业的文字修改与润色助手。"
+    @"用户当前已在输入框中选中了一段文本，随后说出了一段修改指令。"
+    @"请严格按照用户的口述修改要求，对原选中文本进行改写、删减、扩写或语病修正。"
+    @"只输出修改后的最终完整文本，不要输出“好的”、“修改如下”或任何多余解释。";
 
-static void TypelessConfigDarwinCallback(CFNotificationCenterRef center, void *observer, CFNotificationName name, const void *object, CFDictionaryRef userInfo) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[TypelessConfig sharedConfig] load];
-    });
-}
+static NSString *const kDefaultPromptTranslate =
+    @"你是一个精通多国语言的专业同声传译。"
+    @"请将用户输入的语音转写文本准确、地道、自然地翻译成目标语言，保留原有语气和专业词汇准确性。"
+    @"只输出翻译后的纯文本结果，绝对不要附带任何原文、音标或额外说明。";
 
-@implementation TypelessConfig {
-    NSTimeInterval _lastLoadedTimestamp;
-}
+static NSString *const kDefaultPromptHelpWrite =
+    @"你是一个聪明得体的 AI 写作与回复助手。"
+    @"请根据用户的语音指令或要点草稿，直接帮用户撰写成结构清晰、表达流畅、得体自然的完整文本（如邮件、微信回复、汇报总结等）。"
+    @"只输出最终可直接发送的正文内容，不要包含“为你生成如下”等多余客套话。";
+
+@interface TypelessConfig ()
+@property (nonatomic, copy, nullable) NSString *cachedDetectedGroupID;
+@property (nonatomic, copy, nullable) NSString *cachedGroupPath;
+@property (nonatomic, assign) BOOL didProbeAppGroups;
+@property (nonatomic, assign) NSTimeInterval lastUpdatedAt;
+@end
+
+@implementation TypelessConfig
 
 + (instancetype)sharedConfig {
     static TypelessConfig *instance = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         instance = [[TypelessConfig alloc] init];
+        [instance load];
     });
     return instance;
 }
@@ -56,313 +67,540 @@ static void TypelessConfigDarwinCallback(CFNotificationCenterRef center, void *o
 }
 
 + (NSArray<NSString *> *)supportedTargetLanguages {
-    return @[@"English", @"简体中文", @"繁體中文", @"日本語", @"한국어", @"Français", @"Deutsch", @"Español"];
+    return @[@"英语", @"简体中文", @"日语", @"韩语", @"法语", @"德语", @"西班牙语"];
+}
+
++ (NSString *)titleForPolishStyle:(TypelessPolishStyle)style {
+    switch (style) {
+        case TypelessPolishStyleSmart: return @"智能润色";
+        case TypelessPolishStyleConcise: return @"精简干练";
+        case TypelessPolishStyleFormal: return @"正式书面";
+        case TypelessPolishStyleLight: return @"轻修原意";
+    }
+    return @"智能润色";
 }
 
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _lastLoadedTimestamp = 0;
-        CFNotificationCenterAddObserver(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            (__bridge const void *)self,
-            TypelessConfigDarwinCallback,
-            (__bridge CFStringRef)kConfigChangedDarwinName,
-            NULL,
-            CFNotificationSuspensionBehaviorDeliverImmediately
-        );
-        [self load];
+        [self applyDefaultValues];
     }
     return self;
 }
 
-- (nullable NSString *)sharedAppGroupPath {
+- (void)applyDefaultValues {
+    _voiceMode = TypelessVoiceModeDictate;
+    _targetLanguage = @"英语";
+    _polishStyle = TypelessPolishStyleSmart;
+    _pipKeepAliveEnabled = YES;
+
+    _asrBaseURL = kDefaultAsrBaseURL;
+    _asrApiKey = @"";
+    _asrModel = kDefaultAsrModel;
+    _useAppleASR = YES;
+
+    _llmBaseURL = kDefaultLlmBaseURL;
+    _llmApiKey = @"";
+    _llmModel = kDefaultLlmModel;
+    _smartDictationCleanup = YES;
+
+    _customPromptDictate = kDefaultPromptDictate;
+    _customPromptEdit = kDefaultPromptEdit;
+    _customPromptTranslate = kDefaultPromptTranslate;
+    _customPromptHelpWrite = kDefaultPromptHelpWrite;
+
+    _lastRawTranscript = @"";
+    _lastProcessedResult = @"";
+    _recentHistory = @[];
+    _lastUpdatedAt = 0;
+}
+
+#pragma mark - Dynamic AppGroup Discovery
+
+- (NSArray<NSString *> *)mobileProvisionAppGroups {
+    NSMutableArray<NSString *> *found = [NSMutableArray array];
+    @try {
+        NSBundle *mainBundle = [NSBundle mainBundle];
+        NSString *bundlePath = mainBundle.bundlePath ?: @"";
+        NSMutableArray<NSString *> *provPaths = [NSMutableArray array];
+        [provPaths addObject:[bundlePath stringByAppendingPathComponent:@"embedded.mobileprovision"]];
+        if ([bundlePath hasSuffix:@".appex"]) {
+            NSString *hostPath = [[bundlePath stringByDeletingLastPathComponent] stringByDeletingLastPathComponent];
+            [provPaths addObject:[hostPath stringByAppendingPathComponent:@"embedded.mobileprovision"]];
+        }
+
+        for (NSString *path in provPaths) {
+            NSData *data = [NSData dataWithContentsOfFile:path];
+            if (data.length == 0) continue;
+            NSString *ascii = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+            if (!ascii) continue;
+            NSRange startRange = [ascii rangeOfString:@"<plist"];
+            NSRange endRange = [ascii rangeOfString:@"</plist>"];
+            if (startRange.location != NSNotFound && endRange.location != NSNotFound && endRange.location > startRange.location) {
+                NSRange xmlRange = NSMakeRange(startRange.location, NSMaxRange(endRange) - startRange.location);
+                NSString *xml = [ascii substringWithRange:xmlRange];
+                NSData *xmlData = [xml dataUsingEncoding:NSUTF8StringEncoding];
+                if (xmlData) {
+                    id plist = [NSPropertyListSerialization propertyListWithData:xmlData options:NSPropertyListImmutable format:nil error:nil];
+                    if ([plist isKindOfClass:[NSDictionary class]]) {
+                        NSDictionary *entitlements = plist[@"Entitlements"];
+                        id groups = [entitlements isKindOfClass:[NSDictionary class]] ? entitlements[@"com.apple.security.application-groups"] : nil;
+                        if ([groups isKindOfClass:[NSArray class]]) {
+                            for (id g in (NSArray *)groups) {
+                                if ([g isKindOfClass:[NSString class]] && [(NSString *)g length] > 0 && ![found containsObject:g]) {
+                                    [found addObject:g];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } @catch (NSException *e) {}
+    return found;
+}
+
+- (NSArray<NSString *> *)candidateAppGroupIdentifiers {
+    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+    void (^addCand)(NSString *) = ^(NSString *cid) {
+        if ([cid isKindOfClass:[NSString class]] && cid.length > 0 && ![candidates containsObject:cid]) {
+            [candidates addObject:cid];
+        }
+    };
+
+    for (NSString *g in [self mobileProvisionAppGroups]) {
+        addCand(g);
+    }
+
+    NSString *bid = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
+    if (bid.length > 0) {
+        NSString *baseBid = bid;
+        if ([[[NSBundle mainBundle] bundlePath] hasSuffix:@".appex"]) {
+            NSRange lastDot = [bid rangeOfString:@"." options:NSBackwardsSearch];
+            if (lastDot.location != NSNotFound && lastDot.location > 0) {
+                baseBid = [bid substringToIndex:lastDot.location];
+            }
+        }
+        addCand([@"group." stringByAppendingString:baseBid]);
+        addCand([@"group." stringByAppendingString:bid]);
+        addCand([@"group." stringByAppendingString:[baseBid stringByAppendingString:@".shared"]]);
+    }
+
+    addCand(kAppGroupPrimary);
+    addCand(kAppGroupSecondary);
+    return candidates;
+}
+
+- (void)probeAppGroupIfNeeded {
+    if (self.didProbeAppGroups) return;
+    self.didProbeAppGroups = YES;
+
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSURL *u1 = [fm containerURLForSecurityApplicationGroupIdentifier:kAppGroupPrimary];
-    if (u1.path.length > 0) return u1.path;
-    NSURL *u2 = [fm containerURLForSecurityApplicationGroupIdentifier:kAppGroupSecondary];
-    if (u2.path.length > 0) return u2.path;
-    return nil;
+    for (NSString *gid in [self candidateAppGroupIdentifiers]) {
+        @try {
+            NSURL *url = [fm containerURLForSecurityApplicationGroupIdentifier:gid];
+            if (url.path.length > 0) {
+                BOOL isDir = NO;
+                if ([fm fileExistsAtPath:url.path isDirectory:&isDir] && isDir) {
+                    self.cachedDetectedGroupID = gid;
+                    self.cachedGroupPath = url.path;
+                    break;
+                }
+            }
+        } @catch (NSException *e) {}
+    }
+}
+
+- (nullable NSString *)detectedAppGroupIdentifier {
+    [self probeAppGroupIfNeeded];
+    return self.cachedDetectedGroupID;
+}
+
+- (nullable NSString *)sharedAppGroupPath {
+    [self probeAppGroupIfNeeded];
+    return self.cachedGroupPath;
 }
 
 - (BOOL)hasSharedAppGroup {
-    NSString *p = [self sharedAppGroupPath];
-    if (p.length == 0) return NO;
-    return [p containsString:@"/Shared/AppGroup/"] || [p containsString:@"/ApplicationGroup/"];
+    return self.sharedAppGroupPath.length > 0;
 }
 
 - (NSString *)sharedConfigDirectory {
     NSString *groupPath = [self sharedAppGroupPath];
-    NSString *dir = nil;
+    NSString *baseDir = nil;
     if (groupPath.length > 0) {
-        dir = [groupPath stringByAppendingPathComponent:@"Library/Application Support"];
+        baseDir = [groupPath stringByAppendingPathComponent:@"Library/Application Support/Lintype"];
     } else {
-        dir = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
-        if (dir.length == 0) dir = NSTemporaryDirectory();
+        NSString *appSupport = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
+        if (!appSupport) appSupport = NSTemporaryDirectory();
+        baseDir = [appSupport stringByAppendingPathComponent:@"Lintype"];
     }
-    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-    return dir;
+    [[NSFileManager defaultManager] createDirectoryAtPath:baseDir withIntermediateDirectories:YES attributes:nil error:nil];
+    return baseDir;
 }
 
-- (nullable NSUserDefaults *)sharedUserDefaults {
+- (NSString *)configFilePath {
+    return [[self sharedConfigDirectory] stringByAppendingPathComponent:kConfigFileName];
+}
+
+- (NSString *)legacyConfigFilePath {
+    return [[self sharedConfigDirectory] stringByAppendingPathComponent:kLegacyConfigFileName];
+}
+
+#pragma mark - Serialization & Multi-Store Sync
+
+- (NSString *)normalizedURL:(NSString *)url fallback:(NSString *)fallback {
+    NSString *clean = [url stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    while ([clean hasSuffix:@"/"]) {
+        clean = [clean substringToIndex:clean.length - 1];
+    }
+    return clean.length > 0 ? clean : fallback;
+}
+
+- (NSDictionary<NSString *, id> *)exportConfigDictionary {
+    return @{
+        @"version": @(2),
+        @"updatedAt": @(self.lastUpdatedAt > 0 ? self.lastUpdatedAt : [[NSDate date] timeIntervalSince1970]),
+        @"voiceMode": @(self.voiceMode),
+        @"targetLanguage": self.targetLanguage ?: @"英语",
+        @"polishStyle": @(self.polishStyle),
+        @"pipKeepAliveEnabled": @(self.pipKeepAliveEnabled),
+        @"asrBaseURL": [self normalizedURL:self.asrBaseURL fallback:kDefaultAsrBaseURL],
+        @"asrApiKey": self.asrApiKey ?: @"",
+        @"asrModel": self.asrModel.length > 0 ? self.asrModel : kDefaultAsrModel,
+        @"useAppleASR": @(self.useAppleASR),
+        @"llmBaseURL": [self normalizedURL:self.llmBaseURL fallback:kDefaultLlmBaseURL],
+        @"llmApiKey": self.llmApiKey ?: @"",
+        @"llmModel": self.llmModel.length > 0 ? self.llmModel : kDefaultLlmModel,
+        @"smartDictationCleanup": @(self.smartDictationCleanup),
+        @"customPromptDictate": self.customPromptDictate ?: kDefaultPromptDictate,
+        @"customPromptEdit": self.customPromptEdit ?: kDefaultPromptEdit,
+        @"customPromptTranslate": self.customPromptTranslate ?: kDefaultPromptTranslate,
+        @"customPromptHelpWrite": self.customPromptHelpWrite ?: kDefaultPromptHelpWrite
+    };
+}
+
+- (BOOL)applyConfigDictionary:(NSDictionary<NSString *, id> *)dict persist:(BOOL)persist {
+    if (![dict isKindOfClass:[NSDictionary class]] || dict.count == 0) return NO;
+
+    NSTimeInterval ts = [dict[@"updatedAt"] doubleValue];
+    if (ts > 0 && self.lastUpdatedAt > 0 && ts < self.lastUpdatedAt) {
+        return NO;
+    }
+    if (ts > 0) self.lastUpdatedAt = ts;
+
+    if (dict[@"voiceMode"]) self.voiceMode = (TypelessVoiceMode)[dict[@"voiceMode"] integerValue];
+    if ([dict[@"targetLanguage"] isKindOfClass:[NSString class]] && [dict[@"targetLanguage"] length] > 0) {
+        self.targetLanguage = dict[@"targetLanguage"];
+    }
+    if (dict[@"polishStyle"]) self.polishStyle = (TypelessPolishStyle)[dict[@"polishStyle"] integerValue];
+    if (dict[@"pipKeepAliveEnabled"]) self.pipKeepAliveEnabled = [dict[@"pipKeepAliveEnabled"] boolValue];
+
+    // Migration support from v1.0.7 shared keys (`baseURL` / `apiKey`)
+    NSString *legacyURL = [dict[@"baseURL"] isKindOfClass:[NSString class]] ? dict[@"baseURL"] : nil;
+    NSString *legacyKey = [dict[@"apiKey"] isKindOfClass:[NSString class]] ? dict[@"apiKey"] : nil;
+
+    NSString *asrURL = [dict[@"asrBaseURL"] isKindOfClass:[NSString class]] ? dict[@"asrBaseURL"] : legacyURL;
+    NSString *asrKey = [dict[@"asrApiKey"] isKindOfClass:[NSString class]] ? dict[@"asrApiKey"] : legacyKey;
+    NSString *llmURL = [dict[@"llmBaseURL"] isKindOfClass:[NSString class]] ? dict[@"llmBaseURL"] : legacyURL;
+    NSString *llmKey = [dict[@"llmApiKey"] isKindOfClass:[NSString class]] ? dict[@"llmApiKey"] : legacyKey;
+
+    if (asrURL.length > 0) self.asrBaseURL = [self normalizedURL:asrURL fallback:kDefaultAsrBaseURL];
+    if (asrKey != nil) self.asrApiKey = [asrKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([dict[@"asrModel"] isKindOfClass:[NSString class]] && [dict[@"asrModel"] length] > 0) {
+        self.asrModel = dict[@"asrModel"];
+    }
+    if (dict[@"useAppleASR"]) self.useAppleASR = [dict[@"useAppleASR"] boolValue];
+
+    if (llmURL.length > 0) self.llmBaseURL = [self normalizedURL:llmURL fallback:kDefaultLlmBaseURL];
+    if (llmKey != nil) self.llmApiKey = [llmKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([dict[@"llmModel"] isKindOfClass:[NSString class]] && [dict[@"llmModel"] length] > 0) {
+        self.llmModel = dict[@"llmModel"];
+    }
+    if (dict[@"smartDictationCleanup"]) self.smartDictationCleanup = [dict[@"smartDictationCleanup"] boolValue];
+
+    if ([dict[@"customPromptDictate"] isKindOfClass:[NSString class]] && [dict[@"customPromptDictate"] length] > 0) {
+        self.customPromptDictate = dict[@"customPromptDictate"];
+    }
+    if ([dict[@"customPromptEdit"] isKindOfClass:[NSString class]] && [dict[@"customPromptEdit"] length] > 0) {
+        self.customPromptEdit = dict[@"customPromptEdit"];
+    }
+    if ([dict[@"customPromptTranslate"] isKindOfClass:[NSString class]] && [dict[@"customPromptTranslate"] length] > 0) {
+        self.customPromptTranslate = dict[@"customPromptTranslate"];
+    }
+    if ([dict[@"customPromptHelpWrite"] isKindOfClass:[NSString class]] && [dict[@"customPromptHelpWrite"] length] > 0) {
+        self.customPromptHelpWrite = dict[@"customPromptHelpWrite"];
+    }
+
+    if (persist) {
+        [self persistLocalMirrorOnly];
+    }
+    return YES;
+}
+
+- (nullable NSDictionary *)readKeychainConfig {
     @try {
-        NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kAppGroupPrimary];
-        if (d) return d;
-        d = [[NSUserDefaults alloc] initWithSuiteName:kAppGroupSecondary];
-        if (d) return d;
+        NSDictionary *query = @{
+            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecAttrService: kKeychainService,
+            (__bridge id)kSecAttrAccount: kKeychainAccount,
+            (__bridge id)kSecReturnData: @YES,
+            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
+        };
+        CFTypeRef result = NULL;
+        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+        if (status == errSecSuccess && result != NULL) {
+            NSData *data = (__bridge_transfer NSData *)result;
+            id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([obj isKindOfClass:[NSDictionary class]]) {
+                return obj;
+            }
+        }
     } @catch (NSException *e) {}
     return nil;
 }
 
-- (nullable NSDictionary *)readConfigJSONAtDirectory:(NSString *)dir {
-    if (dir.length == 0) return nil;
-    NSString *path = [dir stringByAppendingPathComponent:kConfigFileName];
+- (void)writeKeychainConfig:(NSDictionary *)dict {
+    @try {
+        NSData *data = [NSJSONSerialization dataWithJSONObject:dict options:0 error:nil];
+        if (data.length == 0) return;
+
+        NSDictionary *baseQuery = @{
+            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecAttrService: kKeychainService,
+            (__bridge id)kSecAttrAccount: kKeychainAccount
+        };
+        SecItemDelete((__bridge CFDictionaryRef)baseQuery);
+
+        NSMutableDictionary *addQuery = [baseQuery mutableCopy];
+        addQuery[(__bridge id)kSecValueData] = data;
+        addQuery[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
+        SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
+    } @catch (NSException *e) {}
+}
+
+- (nullable NSDictionary *)readDictFromFile:(NSString *)path {
     NSData *data = [NSData dataWithContentsOfFile:path];
-    if (!data) return nil;
+    if (data.length == 0) return nil;
     id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     return [obj isKindOfClass:[NSDictionary class]] ? obj : nil;
 }
 
-- (void)applyFromDictionary:(NSDictionary *)dict {
-    if (![dict isKindOfClass:[NSDictionary class]]) return;
-
-    NSNumber *modeNum = dict[@"voiceMode"];
-    if (modeNum) {
-        NSInteger m = modeNum.integerValue;
-        _voiceMode = (m >= TypelessVoiceModeDictate && m <= TypelessVoiceModeHelpWrite) ? (TypelessVoiceMode)m : TypelessVoiceModeDictate;
-    }
-    if ([dict[@"targetLanguage"] isKindOfClass:[NSString class]] && [dict[@"targetLanguage"] length] > 0) {
-        _targetLanguage = [dict[@"targetLanguage"] copy];
-    }
-    if ([dict[@"baseURL"] isKindOfClass:[NSString class]]) {
-        _baseURL = [dict[@"baseURL"] copy];
-    }
-    if ([dict[@"apiKey"] isKindOfClass:[NSString class]]) {
-        _apiKey = [dict[@"apiKey"] copy];
-    }
-    if ([dict[@"asrModel"] isKindOfClass:[NSString class]]) {
-        _asrModel = [dict[@"asrModel"] copy];
-    }
-    if ([dict[@"llmModel"] isKindOfClass:[NSString class]]) {
-        _llmModel = [dict[@"llmModel"] copy];
-    }
-    if (dict[@"useAppleASR"] != nil) {
-        _useAppleASR = [dict[@"useAppleASR"] boolValue];
-    }
-    if (dict[@"smartDictationCleanup"] != nil) {
-        _smartDictationCleanup = [dict[@"smartDictationCleanup"] boolValue];
-    }
-    if ([dict[@"customPromptDictate"] isKindOfClass:[NSString class]] && [dict[@"customPromptDictate"] length] > 0) {
-        _customPromptDictate = [dict[@"customPromptDictate"] copy];
-    }
-    if ([dict[@"customPromptEdit"] isKindOfClass:[NSString class]] && [dict[@"customPromptEdit"] length] > 0) {
-        _customPromptEdit = [dict[@"customPromptEdit"] copy];
-    }
-    if ([dict[@"customPromptTranslate"] isKindOfClass:[NSString class]] && [dict[@"customPromptTranslate"] length] > 0) {
-        _customPromptTranslate = [dict[@"customPromptTranslate"] copy];
-    }
-    if ([dict[@"customPromptHelpWrite"] isKindOfClass:[NSString class]] && [dict[@"customPromptHelpWrite"] length] > 0) {
-        _customPromptHelpWrite = [dict[@"customPromptHelpWrite"] copy];
-    }
-}
-
-- (void)applyFromUserDefaults:(NSUserDefaults *)defs {
-    if (!defs) return;
-    NSInteger modeInt = [defs integerForKey:kVoiceModeKey];
-    if (modeInt >= TypelessVoiceModeDictate && modeInt <= TypelessVoiceModeHelpWrite) {
-        _voiceMode = (TypelessVoiceMode)modeInt;
-    }
-    if ([defs stringForKey:kTargetLangKey].length > 0) _targetLanguage = [defs stringForKey:kTargetLangKey];
-    if ([defs objectForKey:kBaseURLKey]) _baseURL = [defs stringForKey:kBaseURLKey] ?: @"https://api.openai.com/v1";
-    if ([defs objectForKey:kApiKeyKey]) _apiKey = [defs stringForKey:kApiKeyKey] ?: @"";
-    if ([defs objectForKey:kASRModelKey]) _asrModel = [defs stringForKey:kASRModelKey] ?: @"whisper-1";
-    if ([defs objectForKey:kLLMModelKey]) _llmModel = [defs stringForKey:kLLMModelKey] ?: @"gpt-4o-mini";
-    if ([defs objectForKey:kUseAppleASRKey]) _useAppleASR = [defs boolForKey:kUseAppleASRKey];
-    if ([defs objectForKey:kSmartCleanupKey]) _smartDictationCleanup = [defs boolForKey:kSmartCleanupKey];
-    if ([defs stringForKey:kPromptDictateKey].length > 0) _customPromptDictate = [defs stringForKey:kPromptDictateKey];
-    if ([defs stringForKey:kPromptEditKey].length > 0) _customPromptEdit = [defs stringForKey:kPromptEditKey];
-    if ([defs stringForKey:kPromptTranslateKey].length > 0) _customPromptTranslate = [defs stringForKey:kPromptTranslateKey];
-    if ([defs stringForKey:kPromptHelpWriteKey].length > 0) _customPromptHelpWrite = [defs stringForKey:kPromptHelpWriteKey];
-}
-
 - (void)load {
-    // Initialize baseline defaults first
-    _voiceMode = TypelessVoiceModeDictate;
-    _targetLanguage = @"English";
-    _baseURL = @"https://api.openai.com/v1";
-    _apiKey = @"";
-    _asrModel = @"whisper-1";
-    _llmModel = @"gpt-4o-mini";
-    _useAppleASR = NO;
-    _smartDictationCleanup = YES;
-    _customPromptDictate = kDefaultDictatePrompt;
-    _customPromptEdit = kDefaultEditPrompt;
-    _customPromptTranslate = kDefaultTranslatePrompt;
-    _customPromptHelpWrite = kDefaultHelpWritePrompt;
+    NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
+    void (^collect)(NSDictionary *) = ^(NSDictionary *d) {
+        if ([d isKindOfClass:[NSDictionary class]] && d.count > 0) {
+            [candidates addObject:d];
+        }
+    };
+
+    collect([self readDictFromFile:[self configFilePath]]);
+    collect([self readDictFromFile:[self legacyConfigFilePath]]);
+
+    NSString *gid = [self detectedAppGroupIdentifier];
+    if (gid.length > 0) {
+        NSUserDefaults *suiteDefs = [[NSUserDefaults alloc] initWithSuiteName:gid];
+        id obj = [suiteDefs objectForKey:kConfigDictKey];
+        if (![obj isKindOfClass:[NSDictionary class]]) {
+            obj = [suiteDefs objectForKey:@"TypelessConfigDict"];
+        }
+        collect(obj);
+    }
+
+    collect([self readKeychainConfig]);
 
     NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
-    NSUserDefaults *grp = [self sharedUserDefaults];
+    id stdObj = [std objectForKey:kConfigDictKey];
+    if (![stdObj isKindOfClass:[NSDictionary class]]) {
+        stdObj = [std objectForKey:@"TypelessConfigDict"];
+    }
+    collect(stdObj);
 
-    // Pick newest source by updatedAt timestamp across local/shared defaults & JSON files
-    NSString *localDir = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
-    NSString *sharedDir = [self sharedConfigDirectory];
-
-    NSDictionary *localJSON = [self readConfigJSONAtDirectory:localDir];
-    NSDictionary *sharedJSON = (![sharedDir isEqualToString:localDir]) ? [self readConfigJSONAtDirectory:sharedDir] : nil;
-
-    NSTimeInterval tsStd = [std doubleForKey:kUpdatedAtKey];
-    NSTimeInterval tsGrp = grp ? [grp doubleForKey:kUpdatedAtKey] : 0;
-    NSTimeInterval tsLocalJSON = [localJSON[@"updatedAt"] doubleValue];
-    NSTimeInterval tsSharedJSON = [sharedJSON[@"updatedAt"] doubleValue];
-
-    // Apply in ascending order of freshness so newest wins
-    typedef struct { NSTimeInterval ts; int kind; } ConfigSource;
-    ConfigSource sources[4] = {
-        { tsStd, 0 },
-        { tsLocalJSON, 1 },
-        { tsGrp, 2 },
-        { tsSharedJSON, 3 }
-    };
-    for (int i = 0; i < 4; i++) {
-        for (int j = i + 1; j < 4; j++) {
-            if (sources[j].ts < sources[i].ts) {
-                ConfigSource tmp = sources[i];
-                sources[i] = sources[j];
-                sources[j] = tmp;
-            }
+    NSDictionary *best = nil;
+    NSTimeInterval bestTS = -1.0;
+    for (NSDictionary *d in candidates) {
+        NSTimeInterval ts = [d[@"updatedAt"] doubleValue];
+        BOOL hasV2 = (d[@"version"] != nil);
+        // Prefer v2 dicts or newest timestamp cleanly
+        NSTimeInterval score = ts > 0 ? ts : (hasV2 ? 1.0 : 0.0);
+        if (score >= bestTS) {
+            bestTS = score;
+            best = d;
         }
     }
 
-    for (int i = 0; i < 4; i++) {
-        switch (sources[i].kind) {
-            case 0: [self applyFromUserDefaults:std]; break;
-            case 1: [self applyFromDictionary:localJSON]; break;
-            case 2: [self applyFromUserDefaults:grp]; break;
-            case 3: [self applyFromDictionary:sharedJSON]; break;
-        }
+    if (best) {
+        // Allow loading even if bestTS is equal
+        self.lastUpdatedAt = 0;
+        [self applyConfigDictionary:best persist:NO];
     }
-    _lastLoadedTimestamp = sources[3].ts;
+
+    NSArray *savedHistory = [std objectForKey:@"LintypeRecentHistoryV2"];
+    if ([savedHistory isKindOfClass:[NSArray class]]) {
+        self.recentHistory = savedHistory;
+    }
 }
 
-- (NSDictionary *)serializedDictionaryWithTimestamp:(NSTimeInterval)ts {
-    return @{
-        @"voiceMode": @(_voiceMode),
-        @"targetLanguage": _targetLanguage ?: @"English",
-        @"baseURL": _baseURL ?: @"https://api.openai.com/v1",
-        @"apiKey": _apiKey ?: @"",
-        @"asrModel": _asrModel ?: @"whisper-1",
-        @"llmModel": _llmModel ?: @"gpt-4o-mini",
-        @"useAppleASR": @(_useAppleASR),
-        @"smartDictationCleanup": @(_smartDictationCleanup),
-        @"customPromptDictate": _customPromptDictate ?: kDefaultDictatePrompt,
-        @"customPromptEdit": _customPromptEdit ?: kDefaultEditPrompt,
-        @"customPromptTranslate": _customPromptTranslate ?: kDefaultTranslatePrompt,
-        @"customPromptHelpWrite": _customPromptHelpWrite ?: kDefaultHelpWritePrompt,
-        @"updatedAt": @(ts)
-    };
-}
-
-- (void)writeToUserDefaults:(NSUserDefaults *)defs timestamp:(NSTimeInterval)ts {
-    if (!defs) return;
-    [defs setInteger:_voiceMode forKey:kVoiceModeKey];
-    [defs setObject:_targetLanguage ?: @"English" forKey:kTargetLangKey];
-    [defs setObject:_baseURL ?: @"https://api.openai.com/v1" forKey:kBaseURLKey];
-    [defs setObject:_apiKey ?: @"" forKey:kApiKeyKey];
-    [defs setObject:_asrModel ?: @"whisper-1" forKey:kASRModelKey];
-    [defs setObject:_llmModel ?: @"gpt-4o-mini" forKey:kLLMModelKey];
-    [defs setBool:_useAppleASR forKey:kUseAppleASRKey];
-    [defs setBool:_smartDictationCleanup forKey:kSmartCleanupKey];
-    [defs setObject:_customPromptDictate ?: kDefaultDictatePrompt forKey:kPromptDictateKey];
-    [defs setObject:_customPromptEdit ?: kDefaultEditPrompt forKey:kPromptEditKey];
-    [defs setObject:_customPromptTranslate ?: kDefaultTranslatePrompt forKey:kPromptTranslateKey];
-    [defs setObject:_customPromptHelpWrite ?: kDefaultHelpWritePrompt forKey:kPromptHelpWriteKey];
-    [defs setDouble:ts forKey:kUpdatedAtKey];
-    [defs synchronize];
+- (void)persistLocalMirrorOnly {
+    NSDictionary *dict = [self exportConfigDictionary];
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dict options:NSJSONWritingPrettyPrinted error:nil];
+    if (jsonData.length > 0) {
+        [jsonData writeToFile:[self configFilePath] atomically:YES];
+    }
+    NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
+    [std setObject:dict forKey:kConfigDictKey];
+    [std synchronize];
 }
 
 - (void)save {
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    _lastLoadedTimestamp = now;
+    self.lastUpdatedAt = [[NSDate date] timeIntervalSince1970];
+    self.asrBaseURL = [self normalizedURL:self.asrBaseURL fallback:kDefaultAsrBaseURL];
+    self.llmBaseURL = [self normalizedURL:self.llmBaseURL fallback:kDefaultLlmBaseURL];
+    if (self.asrModel.length == 0) self.asrModel = kDefaultAsrModel;
+    if (self.llmModel.length == 0) self.llmModel = kDefaultLlmModel;
 
-    [self writeToUserDefaults:[NSUserDefaults standardUserDefaults] timestamp:now];
-    [self writeToUserDefaults:[self sharedUserDefaults] timestamp:now];
+    NSDictionary *dict = [self exportConfigDictionary];
 
-    NSDictionary *dict = [self serializedDictionaryWithTimestamp:now];
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dict options:NSJSONWritingPrettyPrinted error:nil];
-    if (jsonData) {
-        NSString *sharedDir = [self sharedConfigDirectory];
-        [jsonData writeToFile:[sharedDir stringByAppendingPathComponent:kConfigFileName] atomically:YES];
-
-        NSString *localDir = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
-        if (localDir.length > 0 && ![localDir isEqualToString:sharedDir]) {
-            [[NSFileManager defaultManager] createDirectoryAtPath:localDir withIntermediateDirectories:YES attributes:nil error:nil];
-            [jsonData writeToFile:[localDir stringByAppendingPathComponent:kConfigFileName] atomically:YES];
-        }
+    if (jsonData.length > 0) {
+        [jsonData writeToFile:[self configFilePath] atomically:YES];
     }
 
-    CFNotificationCenterPostNotification(
-        CFNotificationCenterGetDarwinNotifyCenter(),
-        (__bridge CFStringRef)kConfigChangedDarwinName,
-        NULL,
-        NULL,
-        YES
-    );
+    NSString *gid = [self detectedAppGroupIdentifier];
+    if (gid.length > 0) {
+        NSUserDefaults *suiteDefs = [[NSUserDefaults alloc] initWithSuiteName:gid];
+        [suiteDefs setObject:dict forKey:kConfigDictKey];
+        [suiteDefs synchronize];
+    }
+
+    [self writeKeychainConfig:dict];
+
+    NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
+    [std setObject:dict forKey:kConfigDictKey];
+    [std synchronize];
+
+    CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
+    if (darwinCenter) {
+        CFNotificationCenterPostNotification(darwinCenter, kConfigDidChangeDarwinName, NULL, NULL, true);
+    }
 }
 
 - (void)resetToDefaults {
-    _voiceMode = TypelessVoiceModeDictate;
-    _targetLanguage = @"English";
-    _baseURL = @"https://api.openai.com/v1";
-    _apiKey = @"";
-    _asrModel = @"whisper-1";
-    _llmModel = @"gpt-4o-mini";
-    _useAppleASR = NO;
-    _smartDictationCleanup = YES;
-    _customPromptDictate = kDefaultDictatePrompt;
-    _customPromptEdit = kDefaultEditPrompt;
-    _customPromptTranslate = kDefaultTranslatePrompt;
-    _customPromptHelpWrite = kDefaultHelpWritePrompt;
+    [self applyDefaultValues];
     [self save];
+}
+
+#pragma mark - Helpers & History
+
+- (NSString *)baseURL {
+    return self.llmBaseURL.length > 0 ? self.llmBaseURL : self.asrBaseURL;
+}
+
+- (void)setBaseURL:(NSString *)baseURL {
+    self.asrBaseURL = baseURL;
+    self.llmBaseURL = baseURL;
+}
+
+- (NSString *)apiKey {
+    return self.llmApiKey.length > 0 ? self.llmApiKey : self.asrApiKey;
+}
+
+- (void)setApiKey:(NSString *)apiKey {
+    self.asrApiKey = apiKey;
+    self.llmApiKey = apiKey;
 }
 
 - (NSString *)promptForMode:(TypelessVoiceMode)mode {
     switch (mode) {
-        case TypelessVoiceModeDictate: return _customPromptDictate ?: kDefaultDictatePrompt;
-        case TypelessVoiceModeEdit: return _customPromptEdit ?: kDefaultEditPrompt;
-        case TypelessVoiceModeTranslate: return _customPromptTranslate ?: kDefaultTranslatePrompt;
-        case TypelessVoiceModeHelpWrite: return _customPromptHelpWrite ?: kDefaultHelpWritePrompt;
+        case TypelessVoiceModeDictate:
+            return self.customPromptDictate.length > 0 ? self.customPromptDictate : kDefaultPromptDictate;
+        case TypelessVoiceModeEdit:
+            return self.customPromptEdit.length > 0 ? self.customPromptEdit : kDefaultPromptEdit;
+        case TypelessVoiceModeTranslate:
+            return self.customPromptTranslate.length > 0 ? self.customPromptTranslate : kDefaultPromptTranslate;
+        case TypelessVoiceModeHelpWrite:
+            return self.customPromptHelpWrite.length > 0 ? self.customPromptHelpWrite : kDefaultPromptHelpWrite;
     }
-    return _customPromptDictate ?: kDefaultDictatePrompt;
+    return kDefaultPromptDictate;
+}
+
+- (NSString *)effectivePromptForMode:(TypelessVoiceMode)mode {
+    NSString *base = [self promptForMode:mode];
+    if (mode == TypelessVoiceModeDictate || mode == TypelessVoiceModeEdit || mode == TypelessVoiceModeHelpWrite) {
+        switch (self.polishStyle) {
+            case TypelessPolishStyleConcise:
+                return [base stringByAppendingString:@"\n补充风格要求：请尽量精简压缩冗长表达，直奔主题，去除一切多余寒暄和重复修饰，使文本简短干练。"];
+            case TypelessPolishStyleFormal:
+                return [base stringByAppendingString:@"\n补充风格要求：请使用得体、礼貌、专业、偏正式的书面语措辞与完整标点，适合工作汇报、邮件或商务沟通。"];
+            case TypelessPolishStyleLight:
+                return [base stringByAppendingString:@"\n补充风格要求：请最大程度保留说话人的原始用词与句式，仅修正明显的错别字、语气词卡顿与标点符号。"];
+            case TypelessPolishStyleSmart:
+            default:
+                break;
+        }
+    }
+    return base;
 }
 
 - (NSString *)customPrompt {
-    return [self promptForMode:_voiceMode];
+    return [self promptForMode:self.voiceMode];
 }
 
 - (void)setCustomPrompt:(NSString *)customPrompt {
-    NSString *val = customPrompt.length > 0 ? customPrompt : [self promptForMode:_voiceMode];
-    switch (_voiceMode) {
-        case TypelessVoiceModeDictate: _customPromptDictate = [val copy]; break;
-        case TypelessVoiceModeEdit: _customPromptEdit = [val copy]; break;
-        case TypelessVoiceModeTranslate: _customPromptTranslate = [val copy]; break;
-        case TypelessVoiceModeHelpWrite: _customPromptHelpWrite = [val copy]; break;
+    NSString *val = customPrompt ?: @"";
+    switch (self.voiceMode) {
+        case TypelessVoiceModeDictate: self.customPromptDictate = val; break;
+        case TypelessVoiceModeEdit: self.customPromptEdit = val; break;
+        case TypelessVoiceModeTranslate: self.customPromptTranslate = val; break;
+        case TypelessVoiceModeHelpWrite: self.customPromptHelpWrite = val; break;
     }
 }
 
 - (BOOL)isAIPolish {
-    return _smartDictationCleanup;
+    return self.smartDictationCleanup;
 }
 
 - (void)setIsAIPolish:(BOOL)isAIPolish {
-    _smartDictationCleanup = isAIPolish;
+    self.smartDictationCleanup = isAIPolish;
+}
+
+- (BOOL)hasValidAsrConfig {
+    if (self.useAppleASR) return YES;
+    return [self.asrApiKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].length > 0 &&
+           self.asrBaseURL.length > 0;
+}
+
+- (BOOL)hasValidLlmConfig {
+    return [self.llmApiKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].length > 0 &&
+           self.llmBaseURL.length > 0;
 }
 
 - (BOOL)hasValidApiKey {
-    return [[_apiKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] length] > 0;
+    return [self hasValidLlmConfig] || [self.asrApiKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].length > 0;
 }
 
 - (BOOL)shouldUseWhisperAPI {
-    return !_useAppleASR && [self hasValidApiKey];
+    if (self.useAppleASR) return NO;
+    return [self.asrApiKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].length > 0;
+}
+
+- (void)recordHistoryResult:(NSString *)result rawText:(nullable NSString *)rawText {
+    if (result.length == 0) return;
+    if (rawText) self.lastRawTranscript = rawText;
+    self.lastProcessedResult = result;
+
+    NSMutableArray<NSString *> *updated = [NSMutableArray array];
+    [updated addObject:result];
+    for (NSString *existing in self.recentHistory) {
+        if ([existing isKindOfClass:[NSString class]] && existing.length > 0 && ![existing isEqualToString:result]) {
+            [updated addObject:existing];
+        }
+        if (updated.count >= 5) break;
+    }
+    self.recentHistory = updated;
+    NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
+    [std setObject:updated forKey:@"LintypeRecentHistoryV2"];
+    [std synchronize];
 }
 
 @end

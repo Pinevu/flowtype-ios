@@ -11,13 +11,20 @@ typedef void (^TypelessBridgeRecordingCompletion)(NSString * _Nullable wavPath, 
 
 // Host app API (Gboard.app)
 @property (nonatomic, readonly) BOOL isKeepAliveActive;
+@property (nonatomic, readonly) BOOL isPipActive;
+@property (nonatomic, readonly) BOOL isLoopbackServerActive;
+@property (nonatomic, copy, readonly) NSString *hostBridgeStatusSummary;
+
 - (void)configureHostObservers;
 - (BOOL)handleHostOpenURL:(NSURL *)url;
 - (void)startKeepAliveAndShowToast:(BOOL)showToast;
 - (void)stopKeepAlive;
+- (void)refreshPipSettingIfActive;
+- (void)startPipManuallyIfPossible;
 
 // Extension API (Gboard.appex)
 - (BOOL)isHostBridgeAlive;
+- (BOOL)syncConfigFromHostIfNeeded;
 - (BOOL)startRemoteRecordingWithLevelHandler:(nullable TypelessBridgeLevelBlock)levelBlock
                                 errorMessage:(NSString * _Nullable * _Nullable)outError;
 - (void)stopRemoteRecordingWithCompletion:(TypelessBridgeRecordingCompletion)completion;

@@ -264,8 +264,20 @@ static BOOL my_layout_isBundled(id self, SEL _cmd, id lang) {
     return orig_layout_isBundled ? orig_layout_isBundled(self, _cmd, lang) : NO;
 }
 
+static NSString *const kUserChoseLanguageKey = @"LintypeUserChoseLanguage_v8";
+static NSString *const kUserChoseZhVariantKey = @"LintypeUserChoseZhVariant_v8";
+static BOOL sInAutoVariantFallback = NO;
+
+static id CreateZhHansLanguageID(void) {
+    Class langIdCls = objc_getClass("GKBLanguageID");
+    if (langIdCls && [langIdCls respondsToSelector:@selector(languageIDFromString:)]) {
+        return ((id(*)(Class, SEL, id))objc_msgSend)(langIdCls, @selector(languageIDFromString:), @"zh_hans");
+    }
+    return nil;
+}
+
 static void EnsureDefaultZhHans9KeyPreferencesIfNeeded(void) {
-    static NSString *const kInitFlagKey = @"LintypeZh9KeyInit_v7";
+    static NSString *const kInitFlagKey = @"LintypeZh9KeyInit_v8";
     @try {
         Class prefsCls = objc_getClass("GKBPreferences");
         if (!prefsCls || ![prefsCls respondsToSelector:@selector(sharedInstance)]) return;
@@ -276,21 +288,63 @@ static void EnsureDefaultZhHans9KeyPreferencesIfNeeded(void) {
         if ([prefs respondsToSelector:@selector(boolPreferenceForKey:)]) {
             alreadyInit = ((BOOL(*)(id, SEL, id))objc_msgSend)(prefs, @selector(boolPreferenceForKey:), kInitFlagKey);
         }
+        NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
+        BOOL stdInit = [std boolForKey:kInitFlagKey];
+
         NSArray *enabled = nil;
         if ([prefs respondsToSelector:@selector(arrayPreferenceForKey:)]) {
             enabled = ((id(*)(id, SEL, id))objc_msgSend)(prefs, @selector(arrayPreferenceForKey:), @"EnabledLanguages");
         }
+        BOOL hasZhHans = NO;
+        for (id item in enabled) {
+            if (IsZhHansLanguage(item)) {
+                hasZhHans = YES;
+                break;
+            }
+        }
 
-        if (!alreadyInit || enabled.count == 0) {
+        NSString *curLang = nil;
+        if ([prefs respondsToSelector:@selector(stringPreferenceForKey:)]) {
+            curLang = ((id(*)(id, SEL, id))objc_msgSend)(prefs, @selector(stringPreferenceForKey:), @"CurrentLanguage");
+        }
+        BOOL userChoseLang = [std boolForKey:kUserChoseLanguageKey];
+
+        if (!alreadyInit || !stdInit || !hasZhHans || (!userChoseLang && !IsZhHansLanguage(curLang))) {
+            NSMutableArray *newEnabled = [NSMutableArray arrayWithObject:@"zh_hans"];
+            for (id item in enabled) {
+                if ([item isKindOfClass:[NSString class]] && !IsZhHansLanguage(item)) {
+                    [newEnabled addObject:item];
+                }
+            }
+            if (![newEnabled containsObject:@"en_us"]) {
+                [newEnabled addObject:@"en_us"];
+            }
+
             if ([prefs respondsToSelector:@selector(setObjectPreferenceWithValue:forKey:)]) {
-                ((void(*)(id, SEL, id, id))objc_msgSend)(prefs, @selector(setObjectPreferenceWithValue:forKey:), @[@"zh_hans"], @"EnabledLanguages");
+                ((void(*)(id, SEL, id, id))objc_msgSend)(prefs, @selector(setObjectPreferenceWithValue:forKey:), newEnabled, @"EnabledLanguages");
                 ((void(*)(id, SEL, id, id))objc_msgSend)(prefs, @selector(setObjectPreferenceWithValue:forKey:), @"zh_hans", @"CurrentLanguage");
                 ((void(*)(id, SEL, id, id))objc_msgSend)(prefs, @selector(setObjectPreferenceWithValue:forKey:), @"nine_key_zh_hans", @"zh_hans_varaint");
                 ((void(*)(id, SEL, id, id))objc_msgSend)(prefs, @selector(setObjectPreferenceWithValue:forKey:), @"nine_key_zh_hans", @"zh_hans_variant");
             }
             if ([prefs respondsToSelector:@selector(setBoolPreferenceWithValue:forKey:)]) {
+                ((void(*)(id, SEL, BOOL, id))objc_msgSend)(prefs, @selector(setBoolPreferenceWithValue:forKey:), NO, @"AlwaysUseSystemPreferredLanguage");
                 ((void(*)(id, SEL, BOOL, id))objc_msgSend)(prefs, @selector(setBoolPreferenceWithValue:forKey:), YES, @"VoiceInputSetting");
                 ((void(*)(id, SEL, BOOL, id))objc_msgSend)(prefs, @selector(setBoolPreferenceWithValue:forKey:), YES, kInitFlagKey);
+            }
+
+            [std setObject:newEnabled forKey:@"EnabledLanguages"];
+            [std setObject:@"zh_hans" forKey:@"CurrentLanguage"];
+            [std setObject:@"nine_key_zh_hans" forKey:@"zh_hans_varaint"];
+            [std setObject:@"nine_key_zh_hans" forKey:@"zh_hans_variant"];
+            [std setBool:YES forKey:kInitFlagKey];
+            [std synchronize];
+        }
+
+        Class curLangMgrCls = objc_getClass("GKBCurrentLanguageManager");
+        if (curLangMgrCls && [curLangMgrCls respondsToSelector:@selector(sharedInstance)]) {
+            id clm = ((id(*)(Class, SEL))objc_msgSend)(curLangMgrCls, @selector(sharedInstance));
+            if (clm && [clm respondsToSelector:@selector(setAlwaysUseSystemPreferredLanguage:)]) {
+                ((void(*)(id, SEL, BOOL))objc_msgSend)(clm, @selector(setAlwaysUseSystemPreferredLanguage:), NO);
             }
         }
     } @catch (NSException *e) {
@@ -298,14 +352,43 @@ static void EnsureDefaultZhHans9KeyPreferencesIfNeeded(void) {
     }
 }
 
+static BOOL (*orig_curLangMgr_alwaysSystem)(id self, SEL _cmd) = NULL;
+static BOOL my_curLangMgr_alwaysSystem(id self, SEL _cmd) {
+    return NO;
+}
+
+static BOOL (*orig_langMgr_alwaysSystem)(id self, SEL _cmd) = NULL;
+static BOOL my_langMgr_alwaysSystem(id self, SEL _cmd) {
+    return NO;
+}
+
 static id (*orig_langMgr_defaultEnabledLanguage)(id self, SEL _cmd) = NULL;
 static id my_langMgr_defaultEnabledLanguage(id self, SEL _cmd) {
-    Class langIdCls = objc_getClass("GKBLanguageID");
-    if (langIdCls && [langIdCls respondsToSelector:@selector(languageIDFromString:)]) {
-        id zh = ((id(*)(Class, SEL, id))objc_msgSend)(langIdCls, @selector(languageIDFromString:), @"zh_hans");
-        if (zh) return zh;
-    }
+    id zh = CreateZhHansLanguageID();
+    if (zh) return zh;
     return orig_langMgr_defaultEnabledLanguage ? orig_langMgr_defaultEnabledLanguage(self, _cmd) : nil;
+}
+
+static id (*orig_langMgr_currentLanguage)(id self, SEL _cmd) = NULL;
+static id my_langMgr_currentLanguage(id self, SEL _cmd) {
+    id res = orig_langMgr_currentLanguage ? orig_langMgr_currentLanguage(self, _cmd) : nil;
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:kUserChoseLanguageKey]) {
+        if (!res || !IsZhHansLanguage(res)) {
+            id zh = CreateZhHansLanguageID();
+            if (zh) return zh;
+        }
+    }
+    return res;
+}
+
+static void (*orig_langMgr_setCurrentLanguage)(id self, SEL _cmd, id lang) = NULL;
+static void my_langMgr_setCurrentLanguage(id self, SEL _cmd, id lang) {
+    if (lang && !IsZhHansLanguage(lang)) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kUserChoseLanguageKey];
+    }
+    if (orig_langMgr_setCurrentLanguage) {
+        orig_langMgr_setCurrentLanguage(self, _cmd, lang);
+    }
 }
 
 static void (*orig_langMgr_reloadData)(id self, SEL _cmd) = NULL;
@@ -318,11 +401,30 @@ static void my_langMgr_reloadData(id self, SEL _cmd) {
 
 static id (*orig_langMgr_enabledVariant)(id self, SEL _cmd, id lang) = NULL;
 static id my_langMgr_enabledVariant(id self, SEL _cmd, id lang) {
+    sInAutoVariantFallback = YES;
     id res = orig_langMgr_enabledVariant ? orig_langMgr_enabledVariant(self, _cmd, lang) : nil;
-    if ((!res || ![res isKindOfClass:[NSString class]] || [(NSString *)res length] == 0) && IsZhHansLanguage(lang)) {
-        return @"nine_key_zh_hans";
+    sInAutoVariantFallback = NO;
+
+    if (IsZhHansLanguage(lang)) {
+        BOOL userChoseVar = [[NSUserDefaults standardUserDefaults] boolForKey:kUserChoseZhVariantKey];
+        if (!res || ![res isKindOfClass:[NSString class]] || [(NSString *)res length] == 0 ||
+            (!userChoseVar && ![(NSString *)res isEqualToString:@"nine_key_zh_hans"])) {
+            return @"nine_key_zh_hans";
+        }
     }
     return res;
+}
+
+static void (*orig_langMgr_setEnabledVariant)(id self, SEL _cmd, id variant, id lang) = NULL;
+static void my_langMgr_setEnabledVariant(id self, SEL _cmd, id variant, id lang) {
+    if (!sInAutoVariantFallback && IsZhHansLanguage(lang) && [variant isKindOfClass:[NSString class]]) {
+        if (![(NSString *)variant isEqualToString:@"nine_key_zh_hans"]) {
+            [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kUserChoseZhVariantKey];
+        }
+    }
+    if (orig_langMgr_setEnabledVariant) {
+        orig_langMgr_setEnabledVariant(self, _cmd, variant, lang);
+    }
 }
 
 #pragma mark - Main App GKBSettingsViewController Native Integration (Crash-Free)
@@ -377,15 +479,10 @@ static id my_settings_mainMenuPageDescriptor(id self, SEL _cmd) {
 static void TypelessPushSettingsFromVC(UIViewController *vc) {
     if (!vc) return;
     TypelessAppSettingsViewController *settingsVC = [[TypelessAppSettingsViewController alloc] init];
-    if (vc.navigationController) {
-        [vc.navigationController pushViewController:settingsVC animated:YES];
-    } else if ([vc respondsToSelector:@selector(pushController:animated:)]) {
-        ((void(*)(id, SEL, id, BOOL))objc_msgSend)(vc, @selector(pushController:animated:), settingsVC, YES);
-    } else {
-        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:settingsVC];
-        nav.modalPresentationStyle = UIModalPresentationPageSheet;
-        [vc presentViewController:nav animated:YES completion:nil];
-    }
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:settingsVC];
+    nav.modalPresentationStyle = UIModalPresentationFullScreen;
+    UIViewController *presenter = vc.navigationController ?: vc;
+    [presenter presentViewController:nav animated:YES completion:nil];
 }
 
 // Exact ObjC signature: v40@0:8@16q24@32 (param2 is NSInteger settingID!)
@@ -431,7 +528,229 @@ static BOOL my_appDelegate_openURL(id self, SEL _cmd, UIApplication *app, NSURL 
     return orig_appDelegate_openURL ? orig_appDelegate_openURL(self, _cmd, app, url, opts) : NO;
 }
 
-#pragma mark - Keyboard Extension Hooks
+#pragma mark - Keyboard Extension Hooks & Coordinated Header Voice Bar
+
+static NSInteger const kHeaderVoiceBarTag = 99201;
+
+@interface LintypeHeaderBarHelper : NSObject
++ (instancetype)sharedHelper;
+- (void)attachOrRefreshInHeaderView:(UIView *)container gButton:(nullable UIView *)gButton;
+@end
+
+@implementation LintypeHeaderBarHelper
+
++ (instancetype)sharedHelper {
+    static LintypeHeaderBarHelper *h = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        h = [[LintypeHeaderBarHelper alloc] init];
+    });
+    return h;
+}
+
+- (void)handleVoiceTap:(id)sender {
+    TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
+    UIInputViewController *inputVC = mgr.activeInputViewController;
+    if (inputVC) {
+        [mgr presentVoiceOverlayInViewController:inputVC autoStart:YES];
+    }
+}
+
+- (void)handleKeepAliveTap:(id)sender {
+    TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
+    TypelessHostBridge *bridge = [TypelessHostBridge sharedBridge];
+    if ([bridge isHostBridgeAlive]) {
+        if (mgr.activeInputViewController) {
+            [mgr presentVoiceOverlayInViewController:mgr.activeInputViewController autoStart:YES];
+        }
+    } else {
+        [bridge openHostKeepAliveFromViewController:mgr.activeInputViewController];
+    }
+}
+
+- (void)hideRightCornerMicInView:(UIView *)view root:(UIView *)root gButton:(nullable UIView *)gButton depth:(NSInteger)depth {
+    if (!view || depth > 3 || view == gButton || view.tag == kHeaderVoiceBarTag) return;
+    CGFloat rootW = CGRectGetWidth(root.bounds);
+    for (UIView *sub in view.subviews) {
+        if (sub == gButton || sub.tag == kHeaderVoiceBarTag) continue;
+        CGRect rectInRoot = [sub convertRect:sub.bounds toView:root];
+        BOOL isRightCornerSmall = (CGRectGetMidX(rectInRoot) > rootW - 64.0 &&
+                                   CGRectGetWidth(rectInRoot) > 8.0 &&
+                                   CGRectGetWidth(rectInRoot) <= 56.0 &&
+                                   CGRectGetHeight(rectInRoot) > 8.0 &&
+                                   CGRectGetHeight(rectInRoot) <= 52.0 &&
+                                   CGRectGetMidY(rectInRoot) <= 56.0);
+        if (isRightCornerSmall && ([sub isKindOfClass:[UIControl class]] || [sub isKindOfClass:[UIImageView class]])) {
+            sub.hidden = YES;
+            sub.alpha = 0.0;
+            sub.userInteractionEnabled = NO;
+            continue;
+        }
+        [self hideRightCornerMicInView:sub root:root gButton:gButton depth:depth + 1];
+    }
+}
+
+- (void)attachOrRefreshInHeaderView:(UIView *)container gButton:(nullable UIView *)gButton {
+    if (!container || CGRectGetWidth(container.bounds) < 160) return;
+
+    // Hide Gboard's mismatched small corner gray mic button while leaving G button & candidates intact
+    [self hideRightCornerMicInView:container root:container gButton:gButton depth:0];
+
+    UIView *pill = [container viewWithTag:kHeaderVoiceBarTag];
+    BOOL dark = NO;
+    if (@available(iOS 13.0, *)) {
+        dark = (container.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    }
+    BOOL alive = [[TypelessHostBridge sharedBridge] isHostBridgeAlive];
+
+    if (!pill) {
+        pill = [[UIView alloc] initWithFrame:CGRectZero];
+        pill.tag = kHeaderVoiceBarTag;
+        pill.translatesAutoresizingMaskIntoConstraints = NO;
+        pill.layer.cornerRadius = 16.0;
+        pill.layer.borderWidth = 0.6;
+        [container addSubview:pill];
+
+        UIButton *voiceBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        voiceBtn.tag = 99202;
+        voiceBtn.translatesAutoresizingMaskIntoConstraints = NO;
+        voiceBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
+        voiceBtn.contentEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 8);
+        if (@available(iOS 13.0, *)) {
+            UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
+            [voiceBtn setImage:[UIImage systemImageNamed:@"waveform.circle.fill" withConfiguration:cfg] forState:UIControlStateNormal];
+            voiceBtn.imageEdgeInsets = UIEdgeInsetsMake(0, -3, 0, 3);
+        }
+        [voiceBtn setTitle:@"AI 语音" forState:UIControlStateNormal];
+        [voiceBtn addTarget:self action:@selector(handleVoiceTap:) forControlEvents:UIControlEventTouchUpInside];
+        [pill addSubview:voiceBtn];
+
+        UIView *sep = [[UIView alloc] initWithFrame:CGRectZero];
+        sep.tag = 99203;
+        sep.translatesAutoresizingMaskIntoConstraints = NO;
+        [pill addSubview:sep];
+
+        UIButton *kaBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        kaBtn.tag = 99204;
+        kaBtn.translatesAutoresizingMaskIntoConstraints = NO;
+        kaBtn.titleLabel.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightMedium];
+        kaBtn.contentEdgeInsets = UIEdgeInsetsMake(0, 7, 0, 10);
+        [kaBtn addTarget:self action:@selector(handleKeepAliveTap:) forControlEvents:UIControlEventTouchUpInside];
+        [pill addSubview:kaBtn];
+
+        NSLayoutYAxisAnchor *centerAnchor = gButton ? gButton.centerYAnchor : container.centerYAnchor;
+        [NSLayoutConstraint activateConstraints:@[
+            [pill.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-10.0],
+            [pill.centerYAnchor constraintEqualToAnchor:centerAnchor],
+            [pill.heightAnchor constraintEqualToConstant:32.0],
+
+            [voiceBtn.leadingAnchor constraintEqualToAnchor:pill.leadingAnchor],
+            [voiceBtn.topAnchor constraintEqualToAnchor:pill.topAnchor],
+            [voiceBtn.bottomAnchor constraintEqualToAnchor:pill.bottomAnchor],
+
+            [sep.leadingAnchor constraintEqualToAnchor:voiceBtn.trailingAnchor],
+            [sep.centerYAnchor constraintEqualToAnchor:pill.centerYAnchor],
+            [sep.widthAnchor constraintEqualToConstant:1.0 / [UIScreen mainScreen].scale],
+            [sep.heightAnchor constraintEqualToConstant:14.0],
+
+            [kaBtn.leadingAnchor constraintEqualToAnchor:sep.trailingAnchor],
+            [kaBtn.trailingAnchor constraintEqualToAnchor:pill.trailingAnchor],
+            [kaBtn.topAnchor constraintEqualToAnchor:pill.topAnchor],
+            [kaBtn.bottomAnchor constraintEqualToAnchor:pill.bottomAnchor],
+        ]];
+    }
+
+    pill.backgroundColor = dark
+        ? [UIColor colorWithRed:0.14 green:0.18 blue:0.26 alpha:0.94]
+        : [UIColor colorWithRed:0.94 green:0.96 blue:1.00 alpha:0.96];
+    pill.layer.borderColor = dark
+        ? [UIColor colorWithRed:0.28 green:0.44 blue:0.78 alpha:0.45].CGColor
+        : [UIColor colorWithRed:0.23 green:0.51 blue:0.96 alpha:0.25].CGColor;
+
+    UIButton *voiceBtn = (UIButton *)[pill viewWithTag:99202];
+    UIView *sep = [pill viewWithTag:99203];
+    UIButton *kaBtn = (UIButton *)[pill viewWithTag:99204];
+
+    UIColor *accent = dark
+        ? [UIColor colorWithRed:0.42 green:0.68 blue:1.00 alpha:1.0]
+        : [UIColor colorWithRed:0.10 green:0.43 blue:0.94 alpha:1.0];
+    voiceBtn.tintColor = accent;
+    [voiceBtn setTitleColor:accent forState:UIControlStateNormal];
+
+    sep.backgroundColor = dark
+        ? [UIColor colorWithWhite:1.0 alpha:0.16]
+        : [UIColor colorWithWhite:0.0 alpha:0.12];
+
+    UIColor *kaColor = alive
+        ? [UIColor colorWithRed:0.05 green:0.62 blue:0.42 alpha:1.0]
+        : [UIColor colorWithRed:0.85 green:0.47 blue:0.05 alpha:1.0];
+    kaBtn.tintColor = kaColor;
+    [kaBtn setTitleColor:kaColor forState:UIControlStateNormal];
+    [kaBtn setTitle:(alive ? @"● 免切" : @"⚡ 保活") forState:UIControlStateNormal];
+
+    [container bringSubviewToFront:pill];
+}
+
+@end
+
+static void RefreshHeaderVoicePillForVC(id headerVC) {
+    @try {
+        if (!headerVC) return;
+        UIView *container = nil;
+        if ([headerVC respondsToSelector:@selector(headerContainerView)]) {
+            container = ((id(*)(id, SEL))objc_msgSend)(headerVC, @selector(headerContainerView));
+        }
+        if (!container && [headerVC respondsToSelector:@selector(view)]) {
+            container = ((id(*)(id, SEL))objc_msgSend)(headerVC, @selector(view));
+        }
+        UIView *gBtn = nil;
+        if ([headerVC respondsToSelector:@selector(GButton)]) {
+            gBtn = ((id(*)(id, SEL))objc_msgSend)(headerVC, @selector(GButton));
+        }
+        if (container) {
+            [[LintypeHeaderBarHelper sharedHelper] attachOrRefreshInHeaderView:container gButton:gBtn];
+        }
+    } @catch (NSException *e) {}
+}
+
+static void (*orig_headerVc_viewWillAppear)(UIViewController *self, SEL _cmd, BOOL animated) = NULL;
+static void my_headerVc_viewWillAppear(UIViewController *self, SEL _cmd, BOOL animated) {
+    if (orig_headerVc_viewWillAppear) orig_headerVc_viewWillAppear(self, _cmd, animated);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        RefreshHeaderVoicePillForVC(self);
+    });
+}
+
+static void (*orig_headerVc_viewDidAppear)(UIViewController *self, SEL _cmd, BOOL animated) = NULL;
+static void my_headerVc_viewDidAppear(UIViewController *self, SEL _cmd, BOOL animated) {
+    if (orig_headerVc_viewDidAppear) orig_headerVc_viewDidAppear(self, _cmd, animated);
+    RefreshHeaderVoicePillForVC(self);
+}
+
+static void (*orig_inputVc_viewWillAppear)(UIInputViewController *self, SEL _cmd, BOOL animated) = NULL;
+static void my_inputVc_viewWillAppear(UIInputViewController *self, SEL _cmd, BOOL animated) {
+    @try {
+        [[TypelessConfig sharedConfig] load];
+        [[TypelessHostBridge sharedBridge] syncConfigFromHostIfNeeded];
+        EnsureDefaultZhHans9KeyPreferencesIfNeeded();
+        [TypelessVoiceManager sharedManager].activeInputViewController = self;
+    } @catch (NSException *e) {}
+    if (orig_inputVc_viewWillAppear) {
+        orig_inputVc_viewWillAppear(self, _cmd, animated);
+    }
+}
+
+static UIView * _Nullable FindHeaderViewInHierarchy(UIView *root, NSInteger depth) {
+    if (!root || depth > 5) return nil;
+    if ([root.accessibilityIdentifier isEqualToString:@"combined_search_header"]) {
+        return root;
+    }
+    for (UIView *sub in root.subviews) {
+        UIView *hit = FindHeaderViewInHierarchy(sub, depth + 1);
+        if (hit) return hit;
+    }
+    return nil;
+}
 
 static void (*orig_inputVc_viewDidAppear)(UIInputViewController *self, SEL _cmd, BOOL animated) = NULL;
 static void my_inputVc_viewDidAppear(UIInputViewController *self, SEL _cmd, BOOL animated) {
@@ -441,6 +760,21 @@ static void my_inputVc_viewDidAppear(UIInputViewController *self, SEL _cmd, BOOL
     @try {
         [[TypelessConfig sharedConfig] load];
         [TypelessVoiceManager sharedManager].activeInputViewController = self;
+        BOOL attached = NO;
+        for (UIViewController *child in self.childViewControllers) {
+            if ([NSStringFromClass([child class]) containsString:@"Header"]) {
+                RefreshHeaderVoicePillForVC(child);
+                attached = YES;
+            }
+        }
+        if (!attached) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                UIView *hdr = FindHeaderViewInHierarchy(self.view, 0);
+                if (hdr) {
+                    [[LintypeHeaderBarHelper sharedHelper] attachOrRefreshInHeaderView:hdr gButton:nil];
+                }
+            });
+        }
     } @catch (NSException *e) {}
 }
 
@@ -474,9 +808,9 @@ static void my_voiceLauncher_launchVoiceInput(id self, SEL _cmd) {
 #pragma mark - Constructor (Lightweight Swizzles Only)
 
 __attribute__((constructor)) static void init_lintype_gboard(void) {
-    NSLog(@"[LintypeGboard] Initializing v1.0.7 lightweight safe hooks...");
+    NSLog(@"[LintypeGboard] Initializing v1.0.8 lightweight safe hooks...");
 
-    // 1. Safe AppGroup container & GKBPreferences null-safety (NO init-method ARC bugs)
+    // 1. Safe AppGroup container & GKBPreferences null-safety
     SafeHookInstanceMethod([NSFileManager class],
                            @selector(containerURLForSecurityApplicationGroupIdentifier:),
                            (IMP)safe_containerURL,
@@ -509,11 +843,20 @@ __attribute__((constructor)) static void init_lintype_gboard(void) {
         SafeHookInstanceMethod(layoutMgrCls, @selector(isLayoutBundledForLanguage:), (IMP)my_layout_isBundled, (IMP *)&orig_layout_isBundled);
     }
 
+    Class curLangMgrCls = objc_getClass("GKBCurrentLanguageManager");
+    if (curLangMgrCls) {
+        SafeHookInstanceMethod(curLangMgrCls, @selector(alwaysUseSystemPreferredLanguage), (IMP)my_curLangMgr_alwaysSystem, (IMP *)&orig_curLangMgr_alwaysSystem);
+    }
+
     Class langMgrCls = objc_getClass("GKBLanguageManager");
     if (langMgrCls) {
+        SafeHookInstanceMethod(langMgrCls, @selector(alwaysUseSystemPreferredLanguage), (IMP)my_langMgr_alwaysSystem, (IMP *)&orig_langMgr_alwaysSystem);
         SafeHookInstanceMethod(langMgrCls, @selector(defaultEnabledLanguage), (IMP)my_langMgr_defaultEnabledLanguage, (IMP *)&orig_langMgr_defaultEnabledLanguage);
+        SafeHookInstanceMethod(langMgrCls, @selector(currentLanguage), (IMP)my_langMgr_currentLanguage, (IMP *)&orig_langMgr_currentLanguage);
+        SafeHookInstanceMethod(langMgrCls, @selector(setCurrentLanguage:), (IMP)my_langMgr_setCurrentLanguage, (IMP *)&orig_langMgr_setCurrentLanguage);
         SafeHookInstanceMethod(langMgrCls, @selector(reloadData), (IMP)my_langMgr_reloadData, (IMP *)&orig_langMgr_reloadData);
         SafeHookInstanceMethod(langMgrCls, @selector(enabledKeyboardVariantForLanguage:), (IMP)my_langMgr_enabledVariant, (IMP *)&orig_langMgr_enabledVariant);
+        SafeHookInstanceMethod(langMgrCls, @selector(setEnabledKeyboardVariant:forLanguage:), (IMP)my_langMgr_setEnabledVariant, (IMP *)&orig_langMgr_setEnabledVariant);
     }
 
     NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
@@ -536,8 +879,15 @@ __attribute__((constructor)) static void init_lintype_gboard(void) {
     // --- Keyboard Extension (Gboard.appex) ---
     Class inputVcCls = objc_getClass("GKBUIInputViewController");
     if (inputVcCls) {
+        SafeHookInstanceMethod(inputVcCls, @selector(viewWillAppear:), (IMP)my_inputVc_viewWillAppear, (IMP *)&orig_inputVc_viewWillAppear);
         SafeHookInstanceMethod(inputVcCls, @selector(viewDidAppear:), (IMP)my_inputVc_viewDidAppear, (IMP *)&orig_inputVc_viewDidAppear);
         SafeHookInstanceMethod(inputVcCls, @selector(viewWillDisappear:), (IMP)my_inputVc_viewWillDisappear, (IMP *)&orig_inputVc_viewWillDisappear);
+    }
+
+    Class headerVcCls = objc_getClass("GKBExtensionHeaderViewController");
+    if (headerVcCls) {
+        SafeHookInstanceMethod(headerVcCls, @selector(viewWillAppear:), (IMP)my_headerVc_viewWillAppear, (IMP *)&orig_headerVc_viewWillAppear);
+        SafeHookInstanceMethod(headerVcCls, @selector(viewDidAppear:), (IMP)my_headerVc_viewDidAppear, (IMP *)&orig_headerVc_viewDidAppear);
     }
 
     Class voiceLauncherCls = objc_getClass("GKBVoiceInputLauncher");

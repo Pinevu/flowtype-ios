@@ -1,779 +1,1240 @@
 #import "TypelessOverlayView.h"
 #import "TypelessConfig.h"
-#import "TypelessSettingsView.h"
 #import "TypelessVoiceManager.h"
 #import "TypelessHostBridge.h"
+#import <QuartzCore/QuartzCore.h>
 
-@interface TypelessOverlayView () <TypelessSettingsViewDelegate>
+@interface TypelessOverlayView ()
 
-// Top Toolbar
-@property (nonatomic, strong) UIView *toolbarView;
-@property (nonatomic, strong) UIButton *manualToggleBtn;
+// Top bar
+@property (nonatomic, strong) UIView *topBarView;
+@property (nonatomic, strong) UIButton *keyboardBackBtn;
 @property (nonatomic, strong) UIScrollView *modeScrollView;
+@property (nonatomic, strong) UIStackView *modeStackView;
 @property (nonatomic, strong) NSMutableArray<UIButton *> *modeButtons;
-@property (nonatomic, strong) UIButton *undoBtn;
-@property (nonatomic, strong) UIButton *modelPillBtn;
-@property (nonatomic, strong) UIView *toolbarDivider;
+@property (nonatomic, strong) UIButton *keepAlivePillBtn;
+@property (nonatomic, strong) UIView *keepAliveDotView;
 
-// Accessory Strip
-@property (nonatomic, strong) UILabel *accessoryHintLabel;
-@property (nonatomic, strong) UIButton *translateLangPill;
+// Dynamic context / option chip bar (Row 2)
+@property (nonatomic, strong) UIScrollView *chipScrollView;
+@property (nonatomic, strong) UIStackView *chipStackView;
 
-// Center Idle View
-@property (nonatomic, strong) UIView *idleContainer;
-@property (nonatomic, strong) UIButton *bigMicButton;
-@property (nonatomic, strong) UIImageView *bigMicIconView;
-@property (nonatomic, strong) UILabel *idleTitleLabel;
-@property (nonatomic, strong) UILabel *idleSubtitleLabel;
+// Main center area: Card + Mic Dock (or History Drawer)
+@property (nonatomic, strong) UIView *centerStageContainer;
+@property (nonatomic, strong) UIView *statusCardView;
+@property (nonatomic, strong) UILabel *statusBadgeLabel;
+@property (nonatomic, strong) UILabel *transcriptLabel;
+@property (nonatomic, strong) UIButton *cardActionBtn;
+@property (nonatomic, strong) UIButton *cardSecondaryBtn;
+@property (nonatomic, strong) NSLayoutConstraint *badgeFullTrailingConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *badgeErrorTrailingConstraint;
 
-// Center Recording View
-@property (nonatomic, strong) UIView *recordingContainer;
-@property (nonatomic, strong) UIView *waveContainer;
+// History drawer view (overlays centerStageContainer cleanly when toggled)
+@property (nonatomic, strong) UIView *historyContainerView;
+@property (nonatomic, strong) UIStackView *historyListStack;
+
+// Mic dock
+@property (nonatomic, strong) UIView *micDockView;
+@property (nonatomic, strong) UIButton *cancelBtn;
+@property (nonatomic, strong) UIButton *finishBtn;
+@property (nonatomic, strong) UIButton *micOrbBtn;
+@property (nonatomic, strong) UIView *micHaloView;
+@property (nonatomic, strong) UIActivityIndicatorView *aiSpinner;
+@property (nonatomic, strong) UILabel *timerLabel;
+@property (nonatomic, strong) UILabel *micHintLabel;
+@property (nonatomic, strong) UIStackView *leftWaveStack;
+@property (nonatomic, strong) UIStackView *rightWaveStack;
 @property (nonatomic, strong) NSMutableArray<UIView *> *waveBars;
-@property (nonatomic, strong) UILabel *partialTextLabel;
-@property (nonatomic, strong) UIButton *recCancelBtn;
-@property (nonatomic, strong) UIButton *recDoneBtn;
 
-// Center Processing / Error View
-@property (nonatomic, strong) UIView *statusContainer;
-@property (nonatomic, strong) UIActivityIndicatorView *spinner;
-@property (nonatomic, strong) UILabel *statusTitleLabel;
-@property (nonatomic, strong) UIButton *statusActionBtn;
+// Bottom keycap row
+@property (nonatomic, strong) UIView *bottomBarView;
+@property (nonatomic, strong) UIButton *pinyinBtn;
+@property (nonatomic, strong) UIButton *spaceBtn;
+@property (nonatomic, strong) UIButton *backspaceBtn;
+@property (nonatomic, strong) UIButton *returnBtn;
 
-// Bottom Utility Keys
-@property (nonatomic, strong) UIView *bottomBar;
-@property (nonatomic, strong) UIButton *pinyinBackKey;
-@property (nonatomic, strong) UIButton *spaceKey;
-@property (nonatomic, strong) UIButton *backspaceKey;
-@property (nonatomic, strong) UIButton *returnKey;
-@property (nonatomic, strong) NSTimer *backspaceRepeatTimer;
-
-// Settings Sheet
-@property (nonatomic, strong, nullable) TypelessSettingsView *settingsView;
-@property (nonatomic, copy, nullable) NSString *transientNotice;
-@property (nonatomic, assign) NSInteger errorActionKind; // 0 = retry, 1 = wake host keepalive, 2 = open iOS settings
+// State & Timers
+@property (nonatomic, assign) BOOL hasActiveError;
+@property (nonatomic, copy, nullable) NSString *currentErrorMessage;
+@property (nonatomic, assign) BOOL showingHistoryDrawer;
+@property (nonatomic, copy, nullable) NSString *noticeOverrideText;
+@property (nonatomic, strong, nullable) NSTimer *noticeClearTimer;
+@property (nonatomic, strong, nullable) NSTimer *deleteRepeatTimer;
+@property (nonatomic, strong, nullable) NSTimer *bridgePollTimer;
+@property (nonatomic, strong) UIImpactFeedbackGenerator *haptic;
+@property (nonatomic, assign) NSUInteger noticeToken;
 
 @end
 
 @implementation TypelessOverlayView
 
++ (UIColor *)adaptiveColorLight:(UIColor *)light dark:(UIColor *)dark {
+    if (@available(iOS 13.0, *)) {
+        return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull trait) {
+            return (trait.userInterfaceStyle == UIUserInterfaceStyleDark) ? dark : light;
+        }];
+    }
+    return light;
+}
+
++ (UIColor *)panelBgColor {
+    return [self adaptiveColorLight:[UIColor colorWithRed:0.94 green:0.95 blue:0.97 alpha:1.0]
+                               dark:[UIColor colorWithRed:0.10 green:0.11 blue:0.13 alpha:1.0]];
+}
+
++ (UIColor *)surfaceCardColor {
+    return [self adaptiveColorLight:[UIColor colorWithRed:1.00 green:1.00 blue:1.00 alpha:0.98]
+                               dark:[UIColor colorWithRed:0.16 green:0.17 blue:0.20 alpha:1.0]];
+}
+
++ (UIColor *)chipInactiveColor {
+    return [self adaptiveColorLight:[UIColor colorWithRed:0.88 green:0.90 blue:0.93 alpha:1.0]
+                               dark:[UIColor colorWithRed:0.22 green:0.23 blue:0.27 alpha:1.0]];
+}
+
++ (UIColor *)keycapColor {
+    return [self adaptiveColorLight:[UIColor whiteColor]
+                               dark:[UIColor colorWithRed:0.26 green:0.27 blue:0.30 alpha:1.0]];
+}
+
++ (UIColor *)primaryTextColor {
+    return [self adaptiveColorLight:[UIColor colorWithRed:0.10 green:0.12 blue:0.16 alpha:1.0]
+                               dark:[UIColor colorWithRed:0.95 green:0.96 blue:0.98 alpha:1.0]];
+}
+
++ (UIColor *)secondaryTextColor {
+    return [self adaptiveColorLight:[UIColor colorWithRed:0.42 green:0.45 blue:0.52 alpha:1.0]
+                               dark:[UIColor colorWithRed:0.63 green:0.66 blue:0.73 alpha:1.0]];
+}
+
++ (UIColor *)accentBlue {
+    return [UIColor colorWithRed:0.10 green:0.45 blue:0.91 alpha:1.0];
+}
+
++ (UIColor *)borderHairlineColor {
+    return [self adaptiveColorLight:[UIColor colorWithWhite:0.0 alpha:0.08]
+                               dark:[UIColor colorWithWhite:1.0 alpha:0.10]];
+}
+
+#pragma mark - Init & Lifecycle
+
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        [self setupUI];
+        self.backgroundColor = [TypelessOverlayView panelBgColor];
+        self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        _modeButtons = [NSMutableArray array];
+        _waveBars = [NSMutableArray array];
+        _haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+
+        [self buildUI];
         [self refreshStateUI];
     }
     return self;
 }
 
-- (void)dealloc {
-    [_backspaceRepeatTimer invalidate];
-}
-
-- (BOOL)isDark {
-    if (@available(iOS 12.0, *)) {
-        return self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+- (void)willMoveToSuperview:(UIView *)newSuperview {
+    [super willMoveToSuperview:newSuperview];
+    [self.bridgePollTimer invalidate];
+    self.bridgePollTimer = nil;
+    if (newSuperview != nil) {
+        self.showingHistoryDrawer = NO;
+        __weak typeof(self) weakSelf = self;
+        self.bridgePollTimer = [NSTimer scheduledTimerWithTimeInterval:1.8 repeats:YES block:^(NSTimer * _Nonnull timer) {
+            [weakSelf updateKeepAlivePillAppearance];
+        }];
+        [self updateKeepAlivePillAppearance];
     }
-    return NO;
 }
 
-- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
-    [super traitCollectionDidChange:previousTraitCollection];
-    [self applyThemeColors];
+- (void)dealloc {
+    [self.bridgePollTimer invalidate];
+    [self.noticeClearTimer invalidate];
+    [self.deleteRepeatTimer invalidate];
+}
+
+#pragma mark - Button Builders
+
+- (void)applyPadding:(UIEdgeInsets)insets toButton:(UIButton *)btn {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    btn.contentEdgeInsets = insets;
+#pragma clang diagnostic pop
+}
+
+- (UIButton *)makePillButtonWithFontSize:(CGFloat)fontSize weight:(UIFontWeight)weight {
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+    btn.translatesAutoresizingMaskIntoConstraints = NO;
+    btn.titleLabel.font = [UIFont systemFontOfSize:fontSize weight:weight];
+    btn.titleLabel.lineBreakMode = NSLineBreakByClipping;
+    btn.titleLabel.numberOfLines = 1;
+    btn.layer.cornerCurve = kCACornerCurveContinuous;
+    [btn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [btn setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    return btn;
 }
 
 #pragma mark - UI Construction
 
-- (void)setupUI {
-    self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+- (void)buildUI {
+    // 1. Top Navigation & Mode Row
+    self.topBarView = [[UIView alloc] init];
+    self.topBarView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:self.topBarView];
 
-    // Swipe right/left to return to Gboard native keyboard
-    UISwipeGestureRecognizer *swipeLeft = [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(switchToManualTapped)];
-    swipeLeft.direction = UISwipeGestureRecognizerDirectionLeft;
-    [self addGestureRecognizer:swipeLeft];
-
-    UISwipeGestureRecognizer *swipeRight = [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(switchToManualTapped)];
-    swipeRight.direction = UISwipeGestureRecognizerDirectionRight;
-    [self addGestureRecognizer:swipeRight];
-
-    // 1. Top Toolbar
-    _toolbarView = [[UIView alloc] initWithFrame:CGRectZero];
-    [self addSubview:_toolbarView];
-
-    _manualToggleBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    _manualToggleBtn.layer.cornerRadius = 13.0;
-    _manualToggleBtn.layer.masksToBounds = YES;
-    [self configureButton:_manualToggleBtn symbolName:@"keyboard" title:@"手打" fontSize:12 weight:UIFontWeightSemibold spacing:4];
-    [_manualToggleBtn addTarget:self action:@selector(switchToManualTapped) forControlEvents:UIControlEventTouchUpInside];
-    [_toolbarView addSubview:_manualToggleBtn];
-
-    _modeScrollView = [[UIScrollView alloc] initWithFrame:CGRectZero];
-    _modeScrollView.showsHorizontalScrollIndicator = NO;
-    [_toolbarView addSubview:_modeScrollView];
-
-    _modeButtons = [NSMutableArray array];
-    for (NSInteger m = TypelessVoiceModeDictate; m <= TypelessVoiceModeHelpWrite; m++) {
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-        btn.tag = m;
-        btn.layer.cornerRadius = 12.0;
-        btn.layer.masksToBounds = YES;
-        [btn setTitle:[TypelessConfig titleForMode:(TypelessVoiceMode)m] forState:UIControlStateNormal];
-        [btn addTarget:self action:@selector(modeTabTapped:) forControlEvents:UIControlEventTouchUpInside];
-        [_modeScrollView addSubview:btn];
-        [_modeButtons addObject:btn];
-    }
-
-    _undoBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    self.keyboardBackBtn = [self makePillButtonWithFontSize:12.5 weight:UIFontWeightSemibold];
+    self.keyboardBackBtn.backgroundColor = [TypelessOverlayView surfaceCardColor];
+    [self.keyboardBackBtn setTitleColor:[TypelessOverlayView primaryTextColor] forState:UIControlStateNormal];
+    self.keyboardBackBtn.layer.cornerRadius = 15.0;
+    self.keyboardBackBtn.layer.borderWidth = 0.5;
+    self.keyboardBackBtn.layer.borderColor = [TypelessOverlayView borderHairlineColor].CGColor;
+    [self applyPadding:UIEdgeInsetsMake(0, 10, 0, 10) toButton:self.keyboardBackBtn];
     if (@available(iOS 13.0, *)) {
-        UIImage *img = [UIImage systemImageNamed:@"arrow.uturn.backward.circle.fill"];
-        [_undoBtn setImage:img forState:UIControlStateNormal];
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightSemibold];
+        [self.keyboardBackBtn setImage:[UIImage systemImageNamed:@"keyboard.chevron.compact.down" withConfiguration:cfg] forState:UIControlStateNormal];
+        self.keyboardBackBtn.tintColor = [TypelessOverlayView accentBlue];
+        [self.keyboardBackBtn setTitle:@" 键盘" forState:UIControlStateNormal];
     } else {
-        [_undoBtn setTitle:@"↶" forState:UIControlStateNormal];
+        [self.keyboardBackBtn setTitle:@"⌨️ 键盘" forState:UIControlStateNormal];
     }
-    _undoBtn.tintColor = [UIColor systemOrangeColor];
-    [_undoBtn addTarget:self action:@selector(undoTapped) forControlEvents:UIControlEventTouchUpInside];
-    [_toolbarView addSubview:_undoBtn];
+    [self.keyboardBackBtn addTarget:self action:@selector(onBackToKeyboardTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.topBarView addSubview:self.keyboardBackBtn];
 
-    _modelPillBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    _modelPillBtn.layer.cornerRadius = 12.0;
-    _modelPillBtn.layer.masksToBounds = YES;
-    [_modelPillBtn addTarget:self action:@selector(openSettingsTapped) forControlEvents:UIControlEventTouchUpInside];
-    [_toolbarView addSubview:_modelPillBtn];
+    self.keepAlivePillBtn = [self makePillButtonWithFontSize:11.5 weight:UIFontWeightSemibold];
+    self.keepAlivePillBtn.layer.cornerRadius = 14.0;
+    [self applyPadding:UIEdgeInsetsMake(0, 18, 0, 10) toButton:self.keepAlivePillBtn];
+    [self.keepAlivePillBtn addTarget:self action:@selector(onKeepAlivePillTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.topBarView addSubview:self.keepAlivePillBtn];
 
-    _toolbarDivider = [[UIView alloc] initWithFrame:CGRectZero];
-    [self addSubview:_toolbarDivider];
+    self.keepAliveDotView = [[UIView alloc] init];
+    self.keepAliveDotView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.keepAliveDotView.layer.cornerRadius = 3.5;
+    self.keepAliveDotView.userInteractionEnabled = NO;
+    [self.keepAlivePillBtn addSubview:self.keepAliveDotView];
 
-    // 2. Accessory Hint Row
-    _accessoryHintLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    _accessoryHintLabel.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightRegular];
-    _accessoryHintLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    [self addSubview:_accessoryHintLabel];
+    self.modeScrollView = [[UIScrollView alloc] init];
+    self.modeScrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.modeScrollView.showsHorizontalScrollIndicator = NO;
+    self.modeScrollView.alwaysBounceHorizontal = YES;
+    [self.topBarView addSubview:self.modeScrollView];
 
-    _translateLangPill = [UIButton buttonWithType:UIButtonTypeCustom];
-    _translateLangPill.layer.cornerRadius = 11.5;
-    _translateLangPill.layer.masksToBounds = YES;
-    _translateLangPill.titleLabel.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightMedium];
-    [_translateLangPill addTarget:self action:@selector(cycleTranslateLangTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self addSubview:_translateLangPill];
+    self.modeStackView = [[UIStackView alloc] init];
+    self.modeStackView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.modeStackView.axis = UILayoutConstraintAxisHorizontal;
+    self.modeStackView.alignment = UIStackViewAlignmentCenter;
+    self.modeStackView.spacing = 6.0;
+    [self.modeScrollView addSubview:self.modeStackView];
 
-    // 3a. Center Idle View
-    _idleContainer = [[UIView alloc] initWithFrame:CGRectZero];
-    [self addSubview:_idleContainer];
+    NSArray<NSNumber *> *modes = @[
+        @(TypelessVoiceModeDictate),
+        @(TypelessVoiceModeEdit),
+        @(TypelessVoiceModeTranslate),
+        @(TypelessVoiceModeHelpWrite)
+    ];
+    for (NSNumber *m in modes) {
+        TypelessVoiceMode mode = (TypelessVoiceMode)[m integerValue];
+        UIButton *pill = [self makePillButtonWithFontSize:12.5 weight:UIFontWeightSemibold];
+        pill.tag = mode;
+        pill.layer.cornerRadius = 15.0;
+        [self applyPadding:UIEdgeInsetsMake(0, 12, 0, 12) toButton:pill];
+        [pill setTitle:[TypelessConfig titleForMode:mode] forState:UIControlStateNormal];
+        [pill addTarget:self action:@selector(onModePillTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [pill.heightAnchor constraintEqualToConstant:30.0].active = YES;
+        [self.modeStackView addArrangedSubview:pill];
+        [self.modeButtons addObject:pill];
+    }
 
-    _bigMicButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    _bigMicButton.layer.cornerRadius = 39.0;
-    _bigMicButton.layer.masksToBounds = NO;
-    _bigMicButton.layer.shadowColor = [UIColor blackColor].CGColor;
-    _bigMicButton.layer.shadowOffset = CGSizeMake(0, 2);
-    _bigMicButton.layer.shadowRadius = 6;
-    _bigMicButton.layer.shadowOpacity = 0.08;
-    [_bigMicButton addTarget:self action:@selector(startRecordingTapped) forControlEvents:UIControlEventTouchUpInside];
-    [_idleContainer addSubview:_bigMicButton];
+    // 2. Dynamic Context / Quick Action Chips (Row 2)
+    self.chipScrollView = [[UIScrollView alloc] init];
+    self.chipScrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.chipScrollView.showsHorizontalScrollIndicator = NO;
+    self.chipScrollView.alwaysBounceHorizontal = YES;
+    [self addSubview:self.chipScrollView];
 
-    _bigMicIconView = [[UIImageView alloc] initWithFrame:CGRectZero];
-    _bigMicIconView.contentMode = UIViewContentModeScaleAspectFit;
-    _bigMicIconView.userInteractionEnabled = NO;
+    self.chipStackView = [[UIStackView alloc] init];
+    self.chipStackView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.chipStackView.axis = UILayoutConstraintAxisHorizontal;
+    self.chipStackView.alignment = UIStackViewAlignmentCenter;
+    self.chipStackView.spacing = 6.0;
+    [self.chipScrollView addSubview:self.chipStackView];
+
+    // 3. Center Stage Container (Card + Mic Dock + inline History overlay)
+    self.centerStageContainer = [[UIView alloc] init];
+    self.centerStageContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:self.centerStageContainer];
+
+    self.statusCardView = [[UIView alloc] init];
+    self.statusCardView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.statusCardView.backgroundColor = [TypelessOverlayView surfaceCardColor];
+    self.statusCardView.layer.cornerRadius = 14.0;
+    self.statusCardView.layer.cornerCurve = kCACornerCurveContinuous;
+    self.statusCardView.layer.borderWidth = 0.8;
+    self.statusCardView.layer.borderColor = [TypelessOverlayView borderHairlineColor].CGColor;
+    [self.centerStageContainer addSubview:self.statusCardView];
+
+    self.statusBadgeLabel = [[UILabel alloc] init];
+    self.statusBadgeLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.statusBadgeLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightBold];
+    self.statusBadgeLabel.textColor = [TypelessOverlayView accentBlue];
+    [self.statusBadgeLabel setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisVertical];
+    [self.statusCardView addSubview:self.statusBadgeLabel];
+
+    self.transcriptLabel = [[UILabel alloc] init];
+    self.transcriptLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.transcriptLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular];
+    self.transcriptLabel.textColor = [TypelessOverlayView primaryTextColor];
+    self.transcriptLabel.numberOfLines = 0;
+    self.transcriptLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    self.transcriptLabel.adjustsFontSizeToFitWidth = YES;
+    self.transcriptLabel.minimumScaleFactor = 0.84;
+    [self.statusCardView addSubview:self.transcriptLabel];
+
+    self.cardActionBtn = [self makePillButtonWithFontSize:11.5 weight:UIFontWeightSemibold];
+    self.cardActionBtn.backgroundColor = [TypelessOverlayView accentBlue];
+    [self.cardActionBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    self.cardActionBtn.layer.cornerRadius = 12.0;
+    self.cardActionBtn.hidden = YES;
+    [self applyPadding:UIEdgeInsetsMake(0, 10, 0, 10) toButton:self.cardActionBtn];
+    [self.cardActionBtn addTarget:self action:@selector(onCardPrimaryActionTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.statusCardView addSubview:self.cardActionBtn];
+
+    self.cardSecondaryBtn = [self makePillButtonWithFontSize:11.5 weight:UIFontWeightSemibold];
+    self.cardSecondaryBtn.backgroundColor = [TypelessOverlayView chipInactiveColor];
+    [self.cardSecondaryBtn setTitleColor:[TypelessOverlayView primaryTextColor] forState:UIControlStateNormal];
+    self.cardSecondaryBtn.layer.cornerRadius = 12.0;
+    self.cardSecondaryBtn.hidden = YES;
+    [self applyPadding:UIEdgeInsetsMake(0, 10, 0, 10) toButton:self.cardSecondaryBtn];
+    [self.cardSecondaryBtn addTarget:self action:@selector(onCardSecondaryActionTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.statusCardView addSubview:self.cardSecondaryBtn];
+
+    // Inline History Drawer (hidden until toggled via "最近" chip)
+    self.historyContainerView = [[UIView alloc] init];
+    self.historyContainerView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.historyContainerView.backgroundColor = [TypelessOverlayView surfaceCardColor];
+    self.historyContainerView.layer.cornerRadius = 14.0;
+    self.historyContainerView.layer.cornerCurve = kCACornerCurveContinuous;
+    self.historyContainerView.layer.borderWidth = 0.8;
+    self.historyContainerView.layer.borderColor = [TypelessOverlayView borderHairlineColor].CGColor;
+    self.historyContainerView.hidden = YES;
+    [self.centerStageContainer addSubview:self.historyContainerView];
+
+    UIView *histHeader = [[UIView alloc] init];
+    histHeader.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.historyContainerView addSubview:histHeader];
+
+    UILabel *histTitle = [[UILabel alloc] init];
+    histTitle.translatesAutoresizingMaskIntoConstraints = NO;
+    histTitle.text = @"最近上屏记录（点选即可快速插入）";
+    histTitle.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightSemibold];
+    histTitle.textColor = [TypelessOverlayView secondaryTextColor];
+    [histHeader addSubview:histTitle];
+
+    UIButton *histClose = [self makePillButtonWithFontSize:11.5 weight:UIFontWeightSemibold];
+    [histClose setTitle:@"完成" forState:UIControlStateNormal];
+    [histClose setTitleColor:[TypelessOverlayView accentBlue] forState:UIControlStateNormal];
+    histClose.backgroundColor = [[TypelessOverlayView accentBlue] colorWithAlphaComponent:0.12];
+    histClose.layer.cornerRadius = 10.0;
+    [self applyPadding:UIEdgeInsetsMake(2, 9, 2, 9) toButton:histClose];
+    [histClose addTarget:self action:@selector(onToggleHistoryTapped) forControlEvents:UIControlEventTouchUpInside];
+    [histHeader addSubview:histClose];
+
+    UIScrollView *histScroll = [[UIScrollView alloc] init];
+    histScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    histScroll.showsVerticalScrollIndicator = YES;
+    [self.historyContainerView addSubview:histScroll];
+
+    self.historyListStack = [[UIStackView alloc] init];
+    self.historyListStack.translatesAutoresizingMaskIntoConstraints = NO;
+    self.historyListStack.axis = UILayoutConstraintAxisVertical;
+    self.historyListStack.spacing = 6.0;
+    [histScroll addSubview:self.historyListStack];
+
+    // Mic Control Dock
+    self.micDockView = [[UIView alloc] init];
+    self.micDockView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.centerStageContainer addSubview:self.micDockView];
+
+    self.micHaloView = [[UIView alloc] init];
+    self.micHaloView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.micHaloView.layer.cornerRadius = 32.0;
+    self.micHaloView.backgroundColor = [[TypelessOverlayView accentBlue] colorWithAlphaComponent:0.18];
+    self.micHaloView.alpha = 0.0;
+    self.micHaloView.userInteractionEnabled = NO;
+    [self.micDockView addSubview:self.micHaloView];
+
+    self.micOrbBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    self.micOrbBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    self.micOrbBtn.layer.cornerRadius = 27.0;
+    self.micOrbBtn.backgroundColor = [TypelessOverlayView accentBlue];
+    self.micOrbBtn.layer.shadowColor = [TypelessOverlayView accentBlue].CGColor;
+    self.micOrbBtn.layer.shadowOpacity = 0.28;
+    self.micOrbBtn.layer.shadowRadius = 8.0;
+    self.micOrbBtn.layer.shadowOffset = CGSizeMake(0, 3);
     if (@available(iOS 13.0, *)) {
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:30 weight:UIImageSymbolWeightMedium];
-        _bigMicIconView.image = [UIImage systemImageNamed:@"mic" withConfiguration:cfg];
-    }
-    [_bigMicButton addSubview:_bigMicIconView];
-
-    _idleTitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    _idleTitleLabel.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightSemibold];
-    _idleTitleLabel.textAlignment = NSTextAlignmentCenter;
-    [_idleContainer addSubview:_idleTitleLabel];
-
-    _idleSubtitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    _idleSubtitleLabel.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightRegular];
-    _idleSubtitleLabel.textAlignment = NSTextAlignmentCenter;
-    [_idleContainer addSubview:_idleSubtitleLabel];
-
-    // 3b. Center Recording View
-    _recordingContainer = [[UIView alloc] initWithFrame:CGRectZero];
-    [self addSubview:_recordingContainer];
-
-    _waveContainer = [[UIView alloc] initWithFrame:CGRectZero];
-    [_recordingContainer addSubview:_waveContainer];
-
-    _waveBars = [NSMutableArray array];
-    for (int i = 0; i < 9; i++) {
-        UIView *b = [[UIView alloc] initWithFrame:CGRectZero];
-        b.backgroundColor = [UIColor colorWithRed:1.0 green:0.23 blue:0.19 alpha:1.0];
-        b.layer.cornerRadius = 2.5;
-        b.layer.masksToBounds = YES;
-        [_waveContainer addSubview:b];
-        [_waveBars addObject:b];
-    }
-
-    _partialTextLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    _partialTextLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
-    _partialTextLabel.textAlignment = NSTextAlignmentCenter;
-    _partialTextLabel.numberOfLines = 2;
-    [_recordingContainer addSubview:_partialTextLabel];
-
-    _recCancelBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    _recCancelBtn.layer.cornerRadius = 18.0;
-    [self configureButton:_recCancelBtn symbolName:@"xmark" title:@"取消" fontSize:14 weight:UIFontWeightMedium spacing:5];
-    [_recCancelBtn addTarget:self action:@selector(cancelRecordingTapped) forControlEvents:UIControlEventTouchUpInside];
-    [_recordingContainer addSubview:_recCancelBtn];
-
-    _recDoneBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    _recDoneBtn.layer.cornerRadius = 18.0;
-    _recDoneBtn.backgroundColor = [UIColor colorWithRed:1.0 green:0.23 blue:0.19 alpha:1.0];
-    [self configureButton:_recDoneBtn symbolName:@"stop.fill" title:@"完成 (0.0s)" fontSize:14 weight:UIFontWeightSemibold spacing:6];
-    [_recDoneBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    _recDoneBtn.tintColor = [UIColor whiteColor];
-    [_recDoneBtn addTarget:self action:@selector(finishRecordingTapped) forControlEvents:UIControlEventTouchUpInside];
-    [_recordingContainer addSubview:_recDoneBtn];
-
-    // 3c. Center Processing / Error View
-    _statusContainer = [[UIView alloc] initWithFrame:CGRectZero];
-    [self addSubview:_statusContainer];
-
-    if (@available(iOS 13.0, *)) {
-        _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+        UIImageSymbolConfiguration *sym = [UIImageSymbolConfiguration configurationWithPointSize:21 weight:UIImageSymbolWeightSemibold];
+        [self.micOrbBtn setImage:[UIImage systemImageNamed:@"mic.fill" withConfiguration:sym] forState:UIControlStateNormal];
+        self.micOrbBtn.tintColor = [UIColor whiteColor];
     } else {
-        _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleGray];
+        [self.micOrbBtn setTitle:@"🎙" forState:UIControlStateNormal];
     }
-    _spinner.hidesWhenStopped = YES;
-    [_statusContainer addSubview:_spinner];
+    [self.micOrbBtn addTarget:self action:@selector(onMicOrbTapped) forControlEvents:UIControlEventTouchUpInside];
+    UILongPressGestureRecognizer *holdToTalk = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(onMicOrbLongPressed:)];
+    holdToTalk.minimumPressDuration = 0.28;
+    [self.micOrbBtn addGestureRecognizer:holdToTalk];
+    [self.micDockView addSubview:self.micOrbBtn];
 
-    _statusTitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    _statusTitleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightMedium];
-    _statusTitleLabel.textAlignment = NSTextAlignmentCenter;
-    _statusTitleLabel.numberOfLines = 3;
-    [_statusContainer addSubview:_statusTitleLabel];
+    if (@available(iOS 13.0, *)) {
+        self.aiSpinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    } else {
+        self.aiSpinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
+    }
+    self.aiSpinner.translatesAutoresizingMaskIntoConstraints = NO;
+    self.aiSpinner.color = [UIColor whiteColor];
+    self.aiSpinner.hidesWhenStopped = YES;
+    self.aiSpinner.userInteractionEnabled = NO;
+    [self.micOrbBtn addSubview:self.aiSpinner];
 
-    _statusActionBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    _statusActionBtn.layer.cornerRadius = 14.0;
-    _statusActionBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    [_statusActionBtn addTarget:self action:@selector(statusActionTapped) forControlEvents:UIControlEventTouchUpInside];
-    [_statusContainer addSubview:_statusActionBtn];
+    // Symmetrical 10-bar Equalizer Waveform flanking Mic Orb
+    self.leftWaveStack = [[UIStackView alloc] init];
+    self.leftWaveStack.translatesAutoresizingMaskIntoConstraints = NO;
+    self.leftWaveStack.axis = UILayoutConstraintAxisHorizontal;
+    self.leftWaveStack.alignment = UIStackViewAlignmentCenter;
+    self.leftWaveStack.spacing = 4.0;
+    [self.micDockView addSubview:self.leftWaveStack];
 
-    // 4. Bottom Utility Key Row
-    _bottomBar = [[UIView alloc] initWithFrame:CGRectZero];
-    [self addSubview:_bottomBar];
+    self.rightWaveStack = [[UIStackView alloc] init];
+    self.rightWaveStack.translatesAutoresizingMaskIntoConstraints = NO;
+    self.rightWaveStack.axis = UILayoutConstraintAxisHorizontal;
+    self.rightWaveStack.alignment = UIStackViewAlignmentCenter;
+    self.rightWaveStack.spacing = 4.0;
+    [self.micDockView addSubview:self.rightWaveStack];
 
-    _pinyinBackKey = [self makeBottomKeyWithSymbol:@"keyboard" title:@"拼音" fontSize:13 weight:UIFontWeightMedium];
-    [_pinyinBackKey addTarget:self action:@selector(switchToManualTapped) forControlEvents:UIControlEventTouchUpInside];
-    [_bottomBar addSubview:_pinyinBackKey];
+    for (NSInteger i = 0; i < 10; i++) {
+        UIView *bar = [[UIView alloc] init];
+        bar.translatesAutoresizingMaskIntoConstraints = NO;
+        bar.layer.cornerRadius = 1.8;
+        bar.backgroundColor = [TypelessOverlayView accentBlue];
+        bar.alpha = 0.28;
+        [bar.widthAnchor constraintEqualToConstant:3.6].active = YES;
+        [bar.heightAnchor constraintEqualToConstant:24.0].active = YES;
+        bar.transform = CGAffineTransformMakeScale(1.0, 0.25);
+        [self.waveBars addObject:bar];
+        if (i < 5) {
+            [self.leftWaveStack addArrangedSubview:bar];
+        } else {
+            [self.rightWaveStack addArrangedSubview:bar];
+        }
+    }
 
-    _spaceKey = [self makeBottomKeyWithSymbol:nil title:@"空格" fontSize:14 weight:UIFontWeightRegular];
-    [_spaceKey addTarget:self action:@selector(spaceTapped) forControlEvents:UIControlEventTouchUpInside];
-    [_bottomBar addSubview:_spaceKey];
+    self.cancelBtn = [self makePillButtonWithFontSize:12.5 weight:UIFontWeightSemibold];
+    self.cancelBtn.backgroundColor = [TypelessOverlayView chipInactiveColor];
+    [self.cancelBtn setTitle:@"✕ 取消" forState:UIControlStateNormal];
+    [self.cancelBtn setTitleColor:[TypelessOverlayView primaryTextColor] forState:UIControlStateNormal];
+    self.cancelBtn.layer.cornerRadius = 16.0;
+    self.cancelBtn.hidden = YES;
+    [self applyPadding:UIEdgeInsetsMake(0, 12, 0, 12) toButton:self.cancelBtn];
+    [self.cancelBtn addTarget:self action:@selector(onCancelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.micDockView addSubview:self.cancelBtn];
 
-    _backspaceKey = [self makeBottomKeyWithSymbol:@"delete.left" title:@"" fontSize:16 weight:UIFontWeightRegular];
-    [_backspaceKey addTarget:self action:@selector(backspaceTouchDown) forControlEvents:UIControlEventTouchDown];
-    [_backspaceKey addTarget:self action:@selector(backspaceTouchUp) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
-    [_bottomBar addSubview:_backspaceKey];
+    self.finishBtn = [self makePillButtonWithFontSize:12.5 weight:UIFontWeightSemibold];
+    self.finishBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.68 blue:0.38 alpha:1.0];
+    [self.finishBtn setTitle:@"✓ 完成" forState:UIControlStateNormal];
+    [self.finishBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    self.finishBtn.layer.cornerRadius = 16.0;
+    self.finishBtn.hidden = YES;
+    [self applyPadding:UIEdgeInsetsMake(0, 12, 0, 12) toButton:self.finishBtn];
+    [self.finishBtn addTarget:self action:@selector(onFinishTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.micDockView addSubview:self.finishBtn];
 
-    _returnKey = [self makeBottomKeyWithSymbol:nil title:@"换行" fontSize:14 weight:UIFontWeightSemibold];
-    [_returnKey addTarget:self action:@selector(returnTapped) forControlEvents:UIControlEventTouchUpInside];
-    [_bottomBar addSubview:_returnKey];
+    self.timerLabel = [[UILabel alloc] init];
+    self.timerLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.timerLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.5 weight:UIFontWeightSemibold];
+    self.timerLabel.textColor = [TypelessOverlayView secondaryTextColor];
+    self.timerLabel.text = @"00:00";
+    self.timerLabel.hidden = YES;
+    [self.micDockView addSubview:self.timerLabel];
 
-    [self applyThemeColors];
+    self.micHintLabel = [[UILabel alloc] init];
+    self.micHintLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.micHintLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightMedium];
+    self.micHintLabel.textColor = [TypelessOverlayView secondaryTextColor];
+    self.micHintLabel.textAlignment = NSTextAlignmentRight;
+    self.micHintLabel.adjustsFontSizeToFitWidth = YES;
+    self.micHintLabel.minimumScaleFactor = 0.8;
+    [self.micDockView addSubview:self.micHintLabel];
+
+    // 4. Bottom Keycap Bar
+    self.bottomBarView = [[UIView alloc] init];
+    self.bottomBarView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:self.bottomBarView];
+
+    self.pinyinBtn = [self makeKeycapButton:@"拼音" bgColor:[TypelessOverlayView chipInactiveColor] textColor:[TypelessOverlayView primaryTextColor]];
+    [self.pinyinBtn addTarget:self action:@selector(onBackToKeyboardTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.bottomBarView addSubview:self.pinyinBtn];
+
+    self.spaceBtn = [self makeKeycapButton:@"空格" bgColor:[TypelessOverlayView keycapColor] textColor:[TypelessOverlayView primaryTextColor]];
+    [self.spaceBtn addTarget:self action:@selector(onSpaceTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.bottomBarView addSubview:self.spaceBtn];
+
+    self.backspaceBtn = [self makeKeycapButton:@"⌫" bgColor:[TypelessOverlayView chipInactiveColor] textColor:[TypelessOverlayView primaryTextColor]];
+    self.backspaceBtn.titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightRegular];
+    [self.backspaceBtn addTarget:self action:@selector(onBackspaceTapped) forControlEvents:UIControlEventTouchUpInside];
+    UILongPressGestureRecognizer *delHold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(onBackspaceLongPressed:)];
+    delHold.minimumPressDuration = 0.32;
+    [self.backspaceBtn addGestureRecognizer:delHold];
+    [self.bottomBarView addSubview:self.backspaceBtn];
+
+    self.returnBtn = [self makeKeycapButton:@"换行" bgColor:[TypelessOverlayView accentBlue] textColor:[UIColor whiteColor]];
+    [self.returnBtn addTarget:self action:@selector(onReturnTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.bottomBarView addSubview:self.returnBtn];
+
+    // Auto Layout Constraints
+    [NSLayoutConstraint activateConstraints:@[
+        // Row 1: Top bar
+        [self.topBarView.topAnchor constraintEqualToAnchor:self.topAnchor constant:6.0],
+        [self.topBarView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:10.0],
+        [self.topBarView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-10.0],
+        [self.topBarView.heightAnchor constraintEqualToConstant:34.0],
+
+        [self.keyboardBackBtn.leadingAnchor constraintEqualToAnchor:self.topBarView.leadingAnchor],
+        [self.keyboardBackBtn.centerYAnchor constraintEqualToAnchor:self.topBarView.centerYAnchor],
+        [self.keyboardBackBtn.heightAnchor constraintEqualToConstant:30.0],
+
+        [self.keepAlivePillBtn.trailingAnchor constraintEqualToAnchor:self.topBarView.trailingAnchor],
+        [self.keepAlivePillBtn.centerYAnchor constraintEqualToAnchor:self.topBarView.centerYAnchor],
+        [self.keepAlivePillBtn.heightAnchor constraintEqualToConstant:28.0],
+
+        [self.keepAliveDotView.leadingAnchor constraintEqualToAnchor:self.keepAlivePillBtn.leadingAnchor constant:8.0],
+        [self.keepAliveDotView.centerYAnchor constraintEqualToAnchor:self.keepAlivePillBtn.centerYAnchor],
+        [self.keepAliveDotView.widthAnchor constraintEqualToConstant:7.0],
+        [self.keepAliveDotView.heightAnchor constraintEqualToConstant:7.0],
+
+        [self.modeScrollView.leadingAnchor constraintEqualToAnchor:self.keyboardBackBtn.trailingAnchor constant:6.0],
+        [self.modeScrollView.trailingAnchor constraintEqualToAnchor:self.keepAlivePillBtn.leadingAnchor constant:-6.0],
+        [self.modeScrollView.topAnchor constraintEqualToAnchor:self.topBarView.topAnchor],
+        [self.modeScrollView.bottomAnchor constraintEqualToAnchor:self.topBarView.bottomAnchor],
+
+        [self.modeStackView.leadingAnchor constraintEqualToAnchor:self.modeScrollView.contentLayoutGuide.leadingAnchor],
+        [self.modeStackView.trailingAnchor constraintEqualToAnchor:self.modeScrollView.contentLayoutGuide.trailingAnchor],
+        [self.modeStackView.topAnchor constraintEqualToAnchor:self.modeScrollView.contentLayoutGuide.topAnchor],
+        [self.modeStackView.bottomAnchor constraintEqualToAnchor:self.modeScrollView.contentLayoutGuide.bottomAnchor],
+        [self.modeStackView.heightAnchor constraintEqualToAnchor:self.modeScrollView.frameLayoutGuide.heightAnchor],
+
+        // Row 2: Context / Quick-action Chips
+        [self.chipScrollView.topAnchor constraintEqualToAnchor:self.topBarView.bottomAnchor constant:5.0],
+        [self.chipScrollView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:10.0],
+        [self.chipScrollView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-10.0],
+        [self.chipScrollView.heightAnchor constraintEqualToConstant:28.0],
+
+        [self.chipStackView.leadingAnchor constraintEqualToAnchor:self.chipScrollView.contentLayoutGuide.leadingAnchor],
+        [self.chipStackView.trailingAnchor constraintEqualToAnchor:self.chipScrollView.contentLayoutGuide.trailingAnchor],
+        [self.chipStackView.topAnchor constraintEqualToAnchor:self.chipScrollView.contentLayoutGuide.topAnchor],
+        [self.chipStackView.bottomAnchor constraintEqualToAnchor:self.chipScrollView.contentLayoutGuide.bottomAnchor],
+        [self.chipStackView.heightAnchor constraintEqualToAnchor:self.chipScrollView.frameLayoutGuide.heightAnchor],
+
+        // Row 4: Bottom Keycap Bar
+        [self.bottomBarView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:8.0],
+        [self.bottomBarView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-8.0],
+        [self.bottomBarView.bottomAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.bottomAnchor constant:-5.0],
+        [self.bottomBarView.heightAnchor constraintEqualToConstant:38.0],
+
+        [self.pinyinBtn.leadingAnchor constraintEqualToAnchor:self.bottomBarView.leadingAnchor],
+        [self.pinyinBtn.topAnchor constraintEqualToAnchor:self.bottomBarView.topAnchor],
+        [self.pinyinBtn.bottomAnchor constraintEqualToAnchor:self.bottomBarView.bottomAnchor],
+        [self.pinyinBtn.widthAnchor constraintEqualToConstant:62.0],
+
+        [self.returnBtn.trailingAnchor constraintEqualToAnchor:self.bottomBarView.trailingAnchor],
+        [self.returnBtn.topAnchor constraintEqualToAnchor:self.bottomBarView.topAnchor],
+        [self.returnBtn.bottomAnchor constraintEqualToAnchor:self.bottomBarView.bottomAnchor],
+        [self.returnBtn.widthAnchor constraintEqualToConstant:72.0],
+
+        [self.backspaceBtn.trailingAnchor constraintEqualToAnchor:self.returnBtn.leadingAnchor constant:-6.0],
+        [self.backspaceBtn.topAnchor constraintEqualToAnchor:self.bottomBarView.topAnchor],
+        [self.backspaceBtn.bottomAnchor constraintEqualToAnchor:self.bottomBarView.bottomAnchor],
+        [self.backspaceBtn.widthAnchor constraintEqualToConstant:58.0],
+
+        [self.spaceBtn.leadingAnchor constraintEqualToAnchor:self.pinyinBtn.trailingAnchor constant:6.0],
+        [self.spaceBtn.trailingAnchor constraintEqualToAnchor:self.backspaceBtn.leadingAnchor constant:-6.0],
+        [self.spaceBtn.topAnchor constraintEqualToAnchor:self.bottomBarView.topAnchor],
+        [self.spaceBtn.bottomAnchor constraintEqualToAnchor:self.bottomBarView.bottomAnchor],
+
+        // Row 3: Center Stage Container
+        [self.centerStageContainer.topAnchor constraintEqualToAnchor:self.chipScrollView.bottomAnchor constant:5.0],
+        [self.centerStageContainer.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:10.0],
+        [self.centerStageContainer.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-10.0],
+        [self.centerStageContainer.bottomAnchor constraintEqualToAnchor:self.bottomBarView.topAnchor constant:-5.0],
+
+        // Mic Dock pinned to bottom of Center Stage
+        [self.micDockView.leadingAnchor constraintEqualToAnchor:self.centerStageContainer.leadingAnchor],
+        [self.micDockView.trailingAnchor constraintEqualToAnchor:self.centerStageContainer.trailingAnchor],
+        [self.micDockView.bottomAnchor constraintEqualToAnchor:self.centerStageContainer.bottomAnchor],
+        [self.micDockView.heightAnchor constraintEqualToConstant:60.0],
+
+        [self.micOrbBtn.centerXAnchor constraintEqualToAnchor:self.micDockView.centerXAnchor],
+        [self.micOrbBtn.centerYAnchor constraintEqualToAnchor:self.micDockView.centerYAnchor],
+        [self.micOrbBtn.widthAnchor constraintEqualToConstant:54.0],
+        [self.micOrbBtn.heightAnchor constraintEqualToConstant:54.0],
+
+        [self.micHaloView.centerXAnchor constraintEqualToAnchor:self.micOrbBtn.centerXAnchor],
+        [self.micHaloView.centerYAnchor constraintEqualToAnchor:self.micOrbBtn.centerYAnchor],
+        [self.micHaloView.widthAnchor constraintEqualToConstant:64.0],
+        [self.micHaloView.heightAnchor constraintEqualToConstant:64.0],
+
+        [self.aiSpinner.centerXAnchor constraintEqualToAnchor:self.micOrbBtn.centerXAnchor],
+        [self.aiSpinner.centerYAnchor constraintEqualToAnchor:self.micOrbBtn.centerYAnchor],
+
+        [self.leftWaveStack.trailingAnchor constraintEqualToAnchor:self.micOrbBtn.leadingAnchor constant:-12.0],
+        [self.leftWaveStack.centerYAnchor constraintEqualToAnchor:self.micOrbBtn.centerYAnchor],
+
+        [self.rightWaveStack.leadingAnchor constraintEqualToAnchor:self.micOrbBtn.trailingAnchor constant:12.0],
+        [self.rightWaveStack.centerYAnchor constraintEqualToAnchor:self.micOrbBtn.centerYAnchor],
+
+        [self.cancelBtn.leadingAnchor constraintEqualToAnchor:self.micDockView.leadingAnchor],
+        [self.cancelBtn.centerYAnchor constraintEqualToAnchor:self.micOrbBtn.centerYAnchor],
+        [self.cancelBtn.heightAnchor constraintEqualToConstant:32.0],
+
+        [self.timerLabel.trailingAnchor constraintEqualToAnchor:self.leftWaveStack.leadingAnchor constant:-8.0],
+        [self.timerLabel.centerYAnchor constraintEqualToAnchor:self.micOrbBtn.centerYAnchor],
+
+        [self.finishBtn.trailingAnchor constraintEqualToAnchor:self.micDockView.trailingAnchor],
+        [self.finishBtn.centerYAnchor constraintEqualToAnchor:self.micOrbBtn.centerYAnchor],
+        [self.finishBtn.heightAnchor constraintEqualToConstant:32.0],
+
+        [self.micHintLabel.trailingAnchor constraintEqualToAnchor:self.micDockView.trailingAnchor],
+        [self.micHintLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.rightWaveStack.trailingAnchor constant:6.0],
+        [self.micHintLabel.centerYAnchor constraintEqualToAnchor:self.micOrbBtn.centerYAnchor],
+
+        // Status Card fills space above Mic Dock cleanly
+        [self.statusCardView.topAnchor constraintEqualToAnchor:self.centerStageContainer.topAnchor],
+        [self.statusCardView.leadingAnchor constraintEqualToAnchor:self.centerStageContainer.leadingAnchor],
+        [self.statusCardView.trailingAnchor constraintEqualToAnchor:self.centerStageContainer.trailingAnchor],
+        [self.statusCardView.bottomAnchor constraintEqualToAnchor:self.micDockView.topAnchor constant:-5.0],
+
+        self.badgeFullTrailingConstraint = [self.statusBadgeLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.statusCardView.trailingAnchor constant:-11.0];
+        self.badgeErrorTrailingConstraint = [self.statusBadgeLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.cardSecondaryBtn.leadingAnchor constant:-6.0];
+
+        [self.statusBadgeLabel.topAnchor constraintEqualToAnchor:self.statusCardView.topAnchor constant:7.0],
+        [self.statusBadgeLabel.leadingAnchor constraintEqualToAnchor:self.statusCardView.leadingAnchor constant:11.0],
+        self.badgeFullTrailingConstraint,
+
+        [self.cardActionBtn.topAnchor constraintEqualToAnchor:self.statusCardView.topAnchor constant:6.0],
+        [self.cardActionBtn.trailingAnchor constraintEqualToAnchor:self.statusCardView.trailingAnchor constant:-9.0],
+        [self.cardActionBtn.heightAnchor constraintEqualToConstant:24.0],
+
+        [self.cardSecondaryBtn.centerYAnchor constraintEqualToAnchor:self.cardActionBtn.centerYAnchor],
+        [self.cardSecondaryBtn.trailingAnchor constraintEqualToAnchor:self.cardActionBtn.leadingAnchor constant:-6.0],
+        [self.cardSecondaryBtn.heightAnchor constraintEqualToConstant:24.0],
+
+        [self.transcriptLabel.topAnchor constraintEqualToAnchor:self.statusBadgeLabel.bottomAnchor constant:3.0],
+        [self.transcriptLabel.leadingAnchor constraintEqualToAnchor:self.statusCardView.leadingAnchor constant:11.0],
+        [self.transcriptLabel.trailingAnchor constraintEqualToAnchor:self.statusCardView.trailingAnchor constant:-11.0],
+        [self.transcriptLabel.bottomAnchor constraintLessThanOrEqualToAnchor:self.statusCardView.bottomAnchor constant:-6.0],
+
+        // Inline History Container overlays full centerStageContainer when active
+        [self.historyContainerView.topAnchor constraintEqualToAnchor:self.centerStageContainer.topAnchor],
+        [self.historyContainerView.leadingAnchor constraintEqualToAnchor:self.centerStageContainer.leadingAnchor],
+        [self.historyContainerView.trailingAnchor constraintEqualToAnchor:self.centerStageContainer.trailingAnchor],
+        [self.historyContainerView.bottomAnchor constraintEqualToAnchor:self.centerStageContainer.bottomAnchor],
+
+        [histHeader.topAnchor constraintEqualToAnchor:self.historyContainerView.topAnchor constant:8.0],
+        [histHeader.leadingAnchor constraintEqualToAnchor:self.historyContainerView.leadingAnchor constant:10.0],
+        [histHeader.trailingAnchor constraintEqualToAnchor:self.historyContainerView.trailingAnchor constant:-10.0],
+        [histHeader.heightAnchor constraintEqualToConstant:24.0],
+
+        [histTitle.leadingAnchor constraintEqualToAnchor:histHeader.leadingAnchor],
+        [histTitle.centerYAnchor constraintEqualToAnchor:histHeader.centerYAnchor],
+        [histClose.trailingAnchor constraintEqualToAnchor:histHeader.trailingAnchor],
+        [histClose.centerYAnchor constraintEqualToAnchor:histHeader.centerYAnchor],
+
+        [histScroll.topAnchor constraintEqualToAnchor:histHeader.bottomAnchor constant:6.0],
+        [histScroll.leadingAnchor constraintEqualToAnchor:self.historyContainerView.leadingAnchor constant:10.0],
+        [histScroll.trailingAnchor constraintEqualToAnchor:self.historyContainerView.trailingAnchor constant:-10.0],
+        [histScroll.bottomAnchor constraintEqualToAnchor:self.historyContainerView.bottomAnchor constant:-8.0],
+
+        [self.historyListStack.topAnchor constraintEqualToAnchor:histScroll.contentLayoutGuide.topAnchor],
+        [self.historyListStack.leadingAnchor constraintEqualToAnchor:histScroll.contentLayoutGuide.leadingAnchor],
+        [self.historyListStack.trailingAnchor constraintEqualToAnchor:histScroll.contentLayoutGuide.trailingAnchor],
+        [self.historyListStack.bottomAnchor constraintEqualToAnchor:histScroll.contentLayoutGuide.bottomAnchor],
+        [self.historyListStack.widthAnchor constraintEqualToAnchor:histScroll.frameLayoutGuide.widthAnchor]
+    ]];
 }
 
-- (UIButton *)makeBottomKeyWithSymbol:(nullable NSString *)sym title:(NSString *)title fontSize:(CGFloat)size weight:(UIFontWeight)weight {
+- (UIButton *)makeKeycapButton:(NSString *)title bgColor:(UIColor *)bg textColor:(UIColor *)tc {
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-    btn.layer.cornerRadius = 7.0;
+    btn.translatesAutoresizingMaskIntoConstraints = NO;
+    btn.backgroundColor = bg;
+    [btn setTitle:title forState:UIControlStateNormal];
+    [btn setTitleColor:tc forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightMedium];
+    btn.layer.cornerRadius = 8.0;
+    btn.layer.cornerCurve = kCACornerCurveContinuous;
     btn.layer.shadowColor = [UIColor blackColor].CGColor;
-    btn.layer.shadowOffset = CGSizeMake(0, 1.0);
-    btn.layer.shadowRadius = 0.4;
-    btn.layer.shadowOpacity = 0.25;
-    btn.layer.masksToBounds = NO;
-    [self configureButton:btn symbolName:sym title:title fontSize:size weight:weight spacing:4];
+    btn.layer.shadowOpacity = 0.14;
+    btn.layer.shadowOffset = CGSizeMake(0, 1);
+    btn.layer.shadowRadius = 0.6;
     return btn;
 }
 
-- (void)configureButton:(UIButton *)btn symbolName:(nullable NSString *)sym title:(NSString *)title fontSize:(CGFloat)size weight:(UIFontWeight)weight spacing:(CGFloat)spacing {
-    btn.titleLabel.font = [UIFont systemFontOfSize:size weight:weight];
-    [btn setTitle:title forState:UIControlStateNormal];
-    if (sym && sym.length > 0) {
-        if (@available(iOS 13.0, *)) {
-            UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:size weight:UIImageSymbolWeightMedium];
-            UIImage *img = [UIImage systemImageNamed:sym withConfiguration:cfg];
-            [btn setImage:img forState:UIControlStateNormal];
-            if (title.length > 0) {
-                btn.imageEdgeInsets = UIEdgeInsetsMake(0, -spacing / 2.0, 0, spacing / 2.0);
-                btn.titleEdgeInsets = UIEdgeInsetsMake(0, spacing / 2.0, 0, -spacing / 2.0);
-            }
-        }
-    }
-}
-
-#pragma mark - Layout
-
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    CGFloat w = self.bounds.size.width;
-    CGFloat h = self.bounds.size.height;
-    if (w <= 0 || h <= 0) return;
-
-    // 1. Top Toolbar
-    CGFloat tbH = 38.0;
-    _toolbarView.frame = CGRectMake(0, 0, w, tbH);
-    _toolbarDivider.frame = CGRectMake(0, tbH, w, 0.5);
-
-    _manualToggleBtn.frame = CGRectMake(8, 6, 62, 26);
-
-    CGFloat rightEdge = w - 8;
-    _modelPillBtn.frame = CGRectMake(rightEdge - 66, 6, 66, 26);
-    rightEdge -= 70;
-
-    if (!_undoBtn.hidden) {
-        _undoBtn.frame = CGRectMake(rightEdge - 26, 6, 26, 26);
-        rightEdge -= 30;
-    }
-
-    CGFloat scrollX = 76;
-    CGFloat scrollW = MAX(40, rightEdge - scrollX - 4);
-    _modeScrollView.frame = CGRectMake(scrollX, 0, scrollW, tbH);
-
-    CGFloat mx = 0;
-    for (UIButton *b in _modeButtons) {
-        b.frame = CGRectMake(mx, 7, 46, 24);
-        mx += 50;
-    }
-    _modeScrollView.contentSize = CGSizeMake(mx, tbH);
-
-    // 2. Accessory Hint Row
-    CGFloat accY = tbH + 6;
-    _accessoryHintLabel.frame = CGRectMake(12, accY, w - 24, 20);
-    _translateLangPill.frame = CGRectMake(12, accY - 1, 168, 23);
-
-    // 4. Bottom Key Row
-    CGFloat bottomH = 38.0;
-    CGFloat bottomPad = 6.0;
-    _bottomBar.frame = CGRectMake(8, h - bottomH - bottomPad, w - 16, bottomH);
-    CGFloat barW = _bottomBar.bounds.size.width;
-    CGFloat gap = 6.0;
-    CGFloat pinyinW = 70.0;
-    CGFloat backW = 54.0;
-    CGFloat retW = 70.0;
-    CGFloat spaceW = MAX(60, barW - pinyinW - backW - retW - gap * 3);
-
-    _pinyinBackKey.frame = CGRectMake(0, 0, pinyinW, bottomH);
-    _spaceKey.frame = CGRectMake(pinyinW + gap, 0, spaceW, bottomH);
-    _backspaceKey.frame = CGRectMake(pinyinW + gap + spaceW + gap, 0, backW, bottomH);
-    _returnKey.frame = CGRectMake(barW - retW, 0, retW, bottomH);
-
-    // 3. Center Focal Zone
-    CGFloat centerTop = accY + 22;
-    CGFloat centerBottom = h - bottomH - bottomPad - 6;
-    CGFloat centerH = MAX(90, centerBottom - centerTop);
-    CGRect centerFrame = CGRectMake(0, centerTop, w, centerH);
-
-    _idleContainer.frame = centerFrame;
-    _recordingContainer.frame = centerFrame;
-    _statusContainer.frame = centerFrame;
-
-    // Idle Layout
-    CGFloat micSize = MIN(78.0, centerH * 0.56);
-    _bigMicButton.layer.cornerRadius = micSize / 2.0;
-    CGFloat totalIdleH = micSize + 44;
-    CGFloat idleStartY = MAX(2, (centerH - totalIdleH) / 2.0);
-    _bigMicButton.frame = CGRectMake((w - micSize) / 2.0, idleStartY, micSize, micSize);
-    CGFloat iconDim = micSize * 0.44;
-    _bigMicIconView.frame = CGRectMake((micSize - iconDim) / 2.0, (micSize - iconDim) / 2.0, iconDim, iconDim);
-    _idleTitleLabel.frame = CGRectMake(16, idleStartY + micSize + 8, w - 32, 20);
-    _idleSubtitleLabel.frame = CGRectMake(16, idleStartY + micSize + 30, w - 32, 16);
-
-    // Recording Layout
-    CGFloat waveW = 9 * 5 + 8 * 5;
-    CGFloat recStartY = MAX(4, (centerH - 116) / 2.0);
-    _waveContainer.frame = CGRectMake((w - waveW) / 2.0, recStartY, waveW, 40);
-    for (int i = 0; i < (int)_waveBars.count; i++) {
-        UIView *b = _waveBars[i];
-        CGFloat bh = b.frame.size.height > 4 ? b.frame.size.height : 10;
-        b.frame = CGRectMake(i * 10.0, (40.0 - bh) / 2.0, 5.0, bh);
-    }
-    _partialTextLabel.frame = CGRectMake(18, recStartY + 42, w - 36, 32);
-    CGFloat btnRowY = recStartY + 78;
-    _recCancelBtn.frame = CGRectMake((w - 224) / 2.0, btnRowY, 82, 36);
-    _recDoneBtn.frame = CGRectMake((w - 224) / 2.0 + 92, btnRowY, 132, 36);
-
-    // Status / Error Layout
-    CGFloat statStartY = MAX(6, (centerH - 96) / 2.0);
-    _spinner.center = CGPointMake(w / 2.0, statStartY + 14);
-    _statusTitleLabel.frame = CGRectMake(20, statStartY + 30, w - 40, 40);
-    _statusActionBtn.frame = CGRectMake((w - 96) / 2.0, statStartY + 74, 96, 28);
-
-    if (_settingsView) {
-        _settingsView.frame = self.bounds;
-    }
-}
-
-#pragma mark - Theme & State Sync
-
-- (void)applyThemeColors {
-    BOOL dark = [self isDark];
-    self.backgroundColor = dark ? [UIColor colorWithRed:0.11 green:0.11 blue:0.12 alpha:1.0]
-                                : [UIColor colorWithRed:0.824 green:0.835 blue:0.863 alpha:1.0];
-
-    _toolbarDivider.backgroundColor = dark ? [UIColor colorWithWhite:1.0 alpha:0.12]
-                                           : [UIColor colorWithWhite:0.0 alpha:0.12];
-
-    UIColor *blueAccent = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1.0];
-    _manualToggleBtn.backgroundColor = [blueAccent colorWithAlphaComponent:0.15];
-    [_manualToggleBtn setTitleColor:blueAccent forState:UIControlStateNormal];
-    _manualToggleBtn.tintColor = blueAccent;
-
-    TypelessConfig *cfg = [TypelessConfig sharedConfig];
-    for (UIButton *b in _modeButtons) {
-        BOOL active = (b.tag == cfg.voiceMode);
-        if (active) {
-            b.backgroundColor = blueAccent;
-            [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-            b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-        } else {
-            b.backgroundColor = [UIColor clearColor];
-            [b setTitleColor:(dark ? [UIColor colorWithWhite:0.9 alpha:1.0] : [UIColor colorWithWhite:0.1 alpha:1.0])
-                    forState:UIControlStateNormal];
-            b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-        }
-    }
-
-    if ([cfg hasValidApiKey]) {
-        UIColor *greenAccent = [UIColor colorWithRed:0.18 green:0.72 blue:0.42 alpha:1.0];
-        _modelPillBtn.backgroundColor = [greenAccent colorWithAlphaComponent:0.15];
-        [self configureButton:_modelPillBtn symbolName:@"checkmark.circle.fill" title:@"模型" fontSize:11 weight:UIFontWeightSemibold spacing:3];
-        [_modelPillBtn setTitleColor:greenAccent forState:UIControlStateNormal];
-        _modelPillBtn.tintColor = greenAccent;
-    } else {
-        UIColor *orangeAccent = [UIColor systemOrangeColor];
-        _modelPillBtn.backgroundColor = [orangeAccent colorWithAlphaComponent:0.16];
-        [self configureButton:_modelPillBtn symbolName:@"slider.horizontal.3" title:@"模型" fontSize:11 weight:UIFontWeightSemibold spacing:3];
-        [_modelPillBtn setTitleColor:orangeAccent forState:UIControlStateNormal];
-        _modelPillBtn.tintColor = orangeAccent;
-    }
-
-    _accessoryHintLabel.textColor = dark ? [UIColor colorWithWhite:0.65 alpha:1.0] : [UIColor colorWithWhite:0.42 alpha:1.0];
-    _translateLangPill.backgroundColor = [blueAccent colorWithAlphaComponent:0.14];
-    [_translateLangPill setTitleColor:blueAccent forState:UIControlStateNormal];
-
-    // Big Mic Circle matching the soft lavender-blue aura in screenshot
-    _bigMicButton.backgroundColor = dark ? [UIColor colorWithRed:0.25 green:0.32 blue:0.65 alpha:0.38]
-                                         : [UIColor colorWithRed:0.46 green:0.52 blue:0.86 alpha:0.28];
-    _bigMicIconView.tintColor = blueAccent;
-
-    _idleTitleLabel.textColor = dark ? [UIColor whiteColor] : [UIColor blackColor];
-    _idleSubtitleLabel.textColor = dark ? [UIColor colorWithWhite:0.55 alpha:1.0] : [UIColor colorWithWhite:0.52 alpha:1.0];
-    _partialTextLabel.textColor = dark ? [UIColor whiteColor] : [UIColor colorWithWhite:0.15 alpha:1.0];
-
-    UIColor *keyBg = dark ? [UIColor colorWithWhite:0.32 alpha:1.0] : [UIColor whiteColor];
-    UIColor *specKeyBg = dark ? [UIColor colorWithWhite:0.21 alpha:1.0] : [UIColor colorWithRed:0.675 green:0.698 blue:0.745 alpha:1.0];
-    UIColor *keyText = dark ? [UIColor whiteColor] : [UIColor blackColor];
-
-    _recCancelBtn.backgroundColor = keyBg;
-    [_recCancelBtn setTitleColor:keyText forState:UIControlStateNormal];
-    _recCancelBtn.tintColor = keyText;
-
-    _pinyinBackKey.backgroundColor = specKeyBg;
-    [_pinyinBackKey setTitleColor:keyText forState:UIControlStateNormal];
-    _pinyinBackKey.tintColor = keyText;
-
-    _spaceKey.backgroundColor = keyBg;
-    [_spaceKey setTitleColor:keyText forState:UIControlStateNormal];
-
-    _backspaceKey.backgroundColor = specKeyBg;
-    [_backspaceKey setTitleColor:keyText forState:UIControlStateNormal];
-    _backspaceKey.tintColor = keyText;
-
-    _returnKey.backgroundColor = blueAccent;
-    [_returnKey setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-
-    _statusTitleLabel.textColor = dark ? [UIColor colorWithWhite:0.9 alpha:1.0] : [UIColor colorWithWhite:0.2 alpha:1.0];
-}
+#pragma mark - State Refresh
 
 - (void)refreshStateUI {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
-        TypelessConfig *cfg = [TypelessConfig sharedConfig];
-        NSString *modeTitle = [TypelessConfig titleForMode:cfg.voiceMode];
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self refreshStateUI];
+        });
+        return;
+    }
 
-        self.undoBtn.hidden = !mgr.canUndoLastInsert;
-        [self.returnKey setTitle:[mgr currentReturnKeyTitle] forState:UIControlStateNormal];
+    TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
+    TypelessConfig *cfg = [TypelessConfig sharedConfig];
+    [cfg load];
 
-        // Accessory hint
-        if (cfg.voiceMode == TypelessVoiceModeTranslate) {
-            self.translateLangPill.hidden = NO;
-            self.accessoryHintLabel.hidden = YES;
-            [self.translateLangPill setTitle:[NSString stringWithFormat:@"🌐 目标语言: %@ ▾", cfg.targetLanguage ?: @"English"]
-                                    forState:UIControlStateNormal];
+    if (mgr.state != TypelessSessionStateError) {
+        self.hasActiveError = NO;
+        self.currentErrorMessage = nil;
+    }
+
+    // Return key & keep-alive pill
+    [self.returnBtn setTitle:[mgr currentReturnKeyTitle] forState:UIControlStateNormal];
+    [self updateKeepAlivePillAppearance];
+
+    // Mode pill highlight
+    for (UIButton *pill in self.modeButtons) {
+        BOOL active = (pill.tag == cfg.voiceMode);
+        if (active) {
+            pill.backgroundColor = [TypelessOverlayView accentBlue];
+            [pill setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         } else {
-            self.translateLangPill.hidden = YES;
-            self.accessoryHintLabel.hidden = NO;
-
-            if (![mgr hasFullAccess]) {
-                self.accessoryHintLabel.text = @"请在「系统设置 → 键盘 → Gboard」开启允许完全访问";
-            } else if (cfg.voiceMode == TypelessVoiceModeEdit) {
-                NSString *sel = [mgr currentSelectedTextPreview];
-                if (sel.length > 0) {
-                    self.accessoryHintLabel.text = [NSString stringWithFormat:@"已选中 %lu 字，点击麦克风口述改写指令", (unsigned long)sel.length];
-                } else {
-                    self.accessoryHintLabel.text = @"可直接口述文本，AI 自动润色精简与排版";
-                }
-            } else if (cfg.voiceMode == TypelessVoiceModeHelpWrite) {
-                self.accessoryHintLabel.text = @"口述收件人/要点/语气，AI 直接帮写完整内容";
-            } else if ([cfg hasValidApiKey]) {
-                NSString *asrDesc = cfg.useAppleASR ? @"Apple听写" : (cfg.asrModel.length > 0 ? cfg.asrModel : @"Whisper");
-                self.accessoryHintLabel.text = [NSString stringWithFormat:@"已连接 AI：%@ · %@ (支持智能断句去口癖)", asrDesc, cfg.llmModel];
-            } else {
-                self.accessoryHintLabel.text = @"免配置 Apple 本地语音就绪 · 点右上角「模型」可配 AI";
-            }
+            pill.backgroundColor = [TypelessOverlayView chipInactiveColor];
+            [pill setTitleColor:[TypelessOverlayView primaryTextColor] forState:UIControlStateNormal];
         }
+    }
 
-        // Toggle center panels
-        TypelessSessionState st = mgr.state;
-        self.idleContainer.hidden = (st != TypelessSessionStateIdle);
-        self.recordingContainer.hidden = (st != TypelessSessionStateRecording);
-        self.statusContainer.hidden = (st != TypelessSessionStateTranscribing && st != TypelessSessionStateProcessingAI && st != TypelessSessionStateError);
+    // Dynamic Row 2 Chips
+    [self rebuildContextChipStripWithConfig:cfg manager:mgr];
 
-        if (st == TypelessSessionStateIdle) {
-            [self.spinner stopAnimating];
-            self.idleTitleLabel.text = [NSString stringWithFormat:@"点击开始「%@」", modeTitle];
-            if (self.transientNotice.length > 0) {
-                self.idleSubtitleLabel.text = self.transientNotice;
+    // Inline history toggle visibility
+    self.historyContainerView.hidden = !self.showingHistoryDrawer;
+    if (self.showingHistoryDrawer) {
+        [self rebuildHistoryDrawerWithConfig:cfg];
+    }
+
+    [self applyVisualStateForManager:mgr config:cfg];
+}
+
+- (void)updateKeepAlivePillAppearance {
+    BOOL alive = [[TypelessHostBridge sharedBridge] isHostBridgeAlive];
+    if (alive) {
+        self.keepAliveDotView.backgroundColor = [UIColor colorWithRed:0.16 green:0.78 blue:0.42 alpha:1.0];
+        self.keepAlivePillBtn.backgroundColor = [[UIColor colorWithRed:0.16 green:0.78 blue:0.42 alpha:1.0] colorWithAlphaComponent:0.15];
+        [self.keepAlivePillBtn setTitle:@"免切" forState:UIControlStateNormal];
+        [self.keepAlivePillBtn setTitleColor:[UIColor colorWithRed:0.12 green:0.65 blue:0.35 alpha:1.0] forState:UIControlStateNormal];
+    } else {
+        self.keepAliveDotView.backgroundColor = [UIColor colorWithRed:0.96 green:0.55 blue:0.12 alpha:1.0];
+        self.keepAlivePillBtn.backgroundColor = [[UIColor colorWithRed:0.96 green:0.55 blue:0.12 alpha:1.0] colorWithAlphaComponent:0.15];
+        [self.keepAlivePillBtn setTitle:@"保活" forState:UIControlStateNormal];
+        [self.keepAlivePillBtn setTitleColor:[UIColor colorWithRed:0.90 green:0.46 blue:0.08 alpha:1.0] forState:UIControlStateNormal];
+    }
+}
+
+- (void)rebuildContextChipStripWithConfig:(TypelessConfig *)cfg manager:(TypelessVoiceManager *)mgr {
+    for (UIView *v in [self.chipStackView.arrangedSubviews copy]) {
+        [self.chipStackView removeArrangedSubview:v];
+        [v removeFromSuperview];
+    }
+
+    void (^addChip)(NSString *, BOOL, BOOL, SEL, NSInteger) = ^(NSString *title, BOOL selected, BOOL accent, SEL action, NSInteger tag) {
+        UIButton *chip = [self makePillButtonWithFontSize:11.5 weight:selected ? UIFontWeightSemibold : UIFontWeightMedium];
+        chip.tag = tag;
+        chip.layer.cornerRadius = 13.0;
+        [self applyPadding:UIEdgeInsetsMake(0, 10, 0, 10) toButton:chip];
+        [chip setTitle:title forState:UIControlStateNormal];
+        [chip.heightAnchor constraintEqualToConstant:26.0].active = YES;
+
+        if (accent) {
+            chip.backgroundColor = [[TypelessOverlayView accentBlue] colorWithAlphaComponent:0.14];
+            [chip setTitleColor:[TypelessOverlayView accentBlue] forState:UIControlStateNormal];
+        } else if (selected) {
+            chip.backgroundColor = [TypelessOverlayView primaryTextColor];
+            [chip setTitleColor:[TypelessOverlayView surfaceCardColor] forState:UIControlStateNormal];
+        } else {
+            chip.backgroundColor = [TypelessOverlayView surfaceCardColor];
+            [chip setTitleColor:[TypelessOverlayView secondaryTextColor] forState:UIControlStateNormal];
+            chip.layer.borderWidth = 0.5;
+            chip.layer.borderColor = [TypelessOverlayView borderHairlineColor].CGColor;
+        }
+        if (action) {
+            [chip addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+        }
+        [self.chipStackView addArrangedSubview:chip];
+    };
+
+    // Contextual utility chips first when idle & actionable
+    if (mgr.state == TypelessSessionStateIdle) {
+        if (mgr.canUndoLastInsert) {
+            addChip(@"↺ 撤销", NO, YES, @selector(onUndoChipTapped), 0);
+        }
+        BOOL canReprocess = (cfg.lastRawTranscript.length > 0 || mgr.liveRecognizedPreview.length > 0) &&
+                            [cfg hasValidLlmConfig] && cfg.llmModel.length > 0;
+        if (canReprocess) {
+            addChip(@"✨ 重写上句", NO, YES, @selector(onReprocessChipTapped), 0);
+        }
+        if (cfg.lastProcessedResult.length > 0 || mgr.liveRecognizedPreview.length > 0) {
+            addChip(@"📋 复制", NO, NO, @selector(onCopyChipTapped), 0);
+        }
+        if (cfg.recentHistory.count > 0) {
+            NSString *histTitle = self.showingHistoryDrawer ? @"✕ 关闭历史" : @"🕘 历史";
+            addChip(histTitle, self.showingHistoryDrawer, NO, @selector(onToggleHistoryTapped), 0);
+        }
+    }
+
+    // Mode-specific interactive chips
+    if (cfg.voiceMode == TypelessVoiceModeTranslate) {
+        for (NSString *lang in [TypelessConfig supportedTargetLanguages]) {
+            BOOL selected = [lang isEqualToString:cfg.targetLanguage];
+            NSInteger idx = [[TypelessConfig supportedTargetLanguages] indexOfObject:lang];
+            addChip(lang, selected, NO, @selector(onLanguageChipTapped:), idx);
+        }
+    } else {
+        if (cfg.voiceMode == TypelessVoiceModeEdit) {
+            NSString *sel = [mgr currentSelectedTextPreview];
+            NSString *selBadge = sel.length > 0
+                ? [NSString stringWithFormat:@"📎 已选「%@」", sel.length > 10 ? [[sel substringToIndex:10] stringByAppendingString:@"…"] : sel]
+                : @"📎 请先选中待改文本";
+            addChip(selBadge, sel.length > 0, NO, nil, 0);
+        }
+        NSArray<NSNumber *> *styles = @[
+            @(TypelessPolishStyleSmart),
+            @(TypelessPolishStyleConcise),
+            @(TypelessPolishStyleFormal),
+            @(TypelessPolishStyleLight)
+        ];
+        for (NSNumber *s in styles) {
+            TypelessPolishStyle st = (TypelessPolishStyle)[s integerValue];
+            addChip([TypelessConfig titleForPolishStyle:st], cfg.polishStyle == st, NO, @selector(onStyleChipTapped:), st);
+        }
+    }
+}
+
+- (void)rebuildHistoryDrawerWithConfig:(TypelessConfig *)cfg {
+    for (UIView *v in [self.historyListStack.arrangedSubviews copy]) {
+        [self.historyListStack removeArrangedSubview:v];
+        [v removeFromSuperview];
+    }
+
+    NSArray<NSString *> *items = cfg.recentHistory;
+    if (items.count == 0) {
+        UILabel *empty = [[UILabel alloc] init];
+        empty.text = @"暂无语音上屏历史记录";
+        empty.font = [UIFont systemFontOfSize:12.5];
+        empty.textColor = [TypelessOverlayView secondaryTextColor];
+        empty.textAlignment = NSTextAlignmentCenter;
+        [self.historyListStack addArrangedSubview:empty];
+        return;
+    }
+
+    for (NSUInteger i = 0; i < items.count; i++) {
+        NSString *text = items[i];
+        UIButton *row = [UIButton buttonWithType:UIButtonTypeCustom];
+        row.tag = (NSInteger)i;
+        row.backgroundColor = [TypelessOverlayView chipInactiveColor];
+        row.layer.cornerRadius = 10.0;
+        row.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+        [self applyPadding:UIEdgeInsetsMake(7, 10, 7, 10) toButton:row];
+        NSString *preview = [NSString stringWithFormat:@"%lu. %@", (unsigned long)(i + 1), text];
+        [row setTitle:preview forState:UIControlStateNormal];
+        [row setTitleColor:[TypelessOverlayView primaryTextColor] forState:UIControlStateNormal];
+        row.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
+        row.titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        [row.heightAnchor constraintGreaterThanOrEqualToConstant:32.0].active = YES;
+        [row addTarget:self action:@selector(onHistoryRowTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [self.historyListStack addArrangedSubview:row];
+    }
+}
+
+- (void)applyVisualStateForManager:(TypelessVoiceManager *)mgr config:(TypelessConfig *)cfg {
+    TypelessSessionState st = mgr.state;
+    BOOL isRec = (st == TypelessSessionStateRecording);
+    BOOL isBusy = (st == TypelessSessionStateTranscribing || st == TypelessSessionStateProcessingAI);
+    BOOL isErr = (st == TypelessSessionStateError && self.hasActiveError && self.currentErrorMessage.length > 0);
+
+    // Card inline action buttons default hidden unless error or actionable state
+    self.cardActionBtn.hidden = !isErr;
+    self.cardSecondaryBtn.hidden = !isErr;
+    self.badgeFullTrailingConstraint.active = !isErr;
+    self.badgeErrorTrailingConstraint.active = isErr;
+    self.transcriptLabel.lineBreakMode = isRec ? NSLineBreakByTruncatingHead : NSLineBreakByTruncatingTail;
+
+    if (isErr) {
+        self.statusCardView.layer.borderColor = [UIColor colorWithRed:0.90 green:0.26 blue:0.24 alpha:0.65].CGColor;
+        self.statusBadgeLabel.text = @"需要注意";
+        self.statusBadgeLabel.textColor = [UIColor colorWithRed:0.86 green:0.22 blue:0.20 alpha:1.0];
+        self.transcriptLabel.text = self.currentErrorMessage;
+        self.transcriptLabel.textColor = [TypelessOverlayView primaryTextColor];
+
+        BOOL needKeepAliveOrSettings =
+            [self.currentErrorMessage containsString:@"保活"] ||
+            [self.currentErrorMessage containsString:@"561145187"] ||
+            [self.currentErrorMessage containsString:@"主 App"] ||
+            [self.currentErrorMessage containsString:@"权限"] ||
+            [self.currentErrorMessage containsString:@"访问"];
+
+        if (needKeepAliveOrSettings) {
+            [self.cardActionBtn setTitle:@"开启保活" forState:UIControlStateNormal];
+            self.cardActionBtn.hidden = NO;
+            [self.cardSecondaryBtn setTitle:@"重试" forState:UIControlStateNormal];
+            self.cardSecondaryBtn.hidden = NO;
+        } else {
+            [self.cardActionBtn setTitle:@"重试录音" forState:UIControlStateNormal];
+            self.cardActionBtn.hidden = NO;
+            [self.cardSecondaryBtn setTitle:@"打开主App" forState:UIControlStateNormal];
+            self.cardSecondaryBtn.hidden = NO;
+        }
+    } else {
+        self.statusCardView.layer.borderColor = [TypelessOverlayView borderHairlineColor].CGColor;
+        if (isRec) {
+            self.statusBadgeLabel.text = [NSString stringWithFormat:@"● 正在聆听 · %@", [TypelessConfig titleForMode:cfg.voiceMode]];
+            self.statusBadgeLabel.textColor = [UIColor colorWithRed:0.92 green:0.24 blue:0.22 alpha:1.0];
+            NSString *live = mgr.liveRecognizedPreview;
+            if ([cfg shouldUseWhisperAPI]) {
+                self.transcriptLabel.text = @"正在高保真录音，点击「✓ 完成」或松手立即识别并智能输出…";
+                self.transcriptLabel.textColor = [TypelessOverlayView secondaryTextColor];
             } else {
-                self.idleSubtitleLabel.text = @"左右滑动或点击「手打」切回 Gboard 原生键盘";
+                self.transcriptLabel.text = live.length > 0 ? live : @"请自然说出你想输入的内容，完成后点「✓ 完成」…";
+                self.transcriptLabel.textColor = live.length > 0 ? [TypelessOverlayView primaryTextColor] : [TypelessOverlayView secondaryTextColor];
             }
-        } else if (st == TypelessSessionStateRecording) {
-            [self.spinner stopAnimating];
-            self.transientNotice = nil;
-            self.partialTextLabel.text = [cfg shouldUseWhisperAPI] ? @"正在高清录音，请说话..." : @"正在倾听，请说话...";
-            [self configureButton:self.recDoneBtn symbolName:@"stop.fill" title:@"完成 (0.0s)" fontSize:14 weight:UIFontWeightSemibold spacing:6];
         } else if (st == TypelessSessionStateTranscribing) {
-            [self.spinner startAnimating];
-            self.statusTitleLabel.text = @"正在转写语音...";
-            self.statusActionBtn.hidden = NO;
-            [self.statusActionBtn setTitle:@"取消" forState:UIControlStateNormal];
-            self.statusActionBtn.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.18];
-            [self.statusActionBtn setTitleColor:self.statusTitleLabel.textColor forState:UIControlStateNormal];
+            self.statusBadgeLabel.text = @"语音识别中…";
+            self.statusBadgeLabel.textColor = [TypelessOverlayView accentBlue];
+            self.transcriptLabel.text = mgr.liveRecognizedPreview.length > 0 ? mgr.liveRecognizedPreview : @"正在提取语音内容…";
+            self.transcriptLabel.textColor = [TypelessOverlayView primaryTextColor];
         } else if (st == TypelessSessionStateProcessingAI) {
-            [self.spinner startAnimating];
-            self.statusTitleLabel.text = [NSString stringWithFormat:@"AI 正在执行「%@」...", modeTitle];
-            self.statusActionBtn.hidden = NO;
-            [self.statusActionBtn setTitle:@"取消" forState:UIControlStateNormal];
-            self.statusActionBtn.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.18];
-            [self.statusActionBtn setTitleColor:self.statusTitleLabel.textColor forState:UIControlStateNormal];
-        } else if (st == TypelessSessionStateError) {
-            [self.spinner stopAnimating];
-            self.statusActionBtn.hidden = NO;
-            [self.statusActionBtn setTitle:@"重新尝试" forState:UIControlStateNormal];
-            self.statusActionBtn.backgroundColor = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1.0];
-            [self.statusActionBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        }
+            self.statusBadgeLabel.text = [NSString stringWithFormat:@"AI 处理中（%@）…", [TypelessConfig titleForPolishStyle:cfg.polishStyle]];
+            self.statusBadgeLabel.textColor = [UIColor colorWithRed:0.45 green:0.32 blue:0.90 alpha:1.0];
+            self.transcriptLabel.text = mgr.liveRecognizedPreview.length > 0 ? mgr.liveRecognizedPreview : @"正在按所选模式优化表达…";
+            self.transcriptLabel.textColor = [TypelessOverlayView primaryTextColor];
+        } else {
+            // Idle
+            if (self.noticeOverrideText.length > 0) {
+                self.statusBadgeLabel.text = @"✓ 完成";
+                self.statusBadgeLabel.textColor = [UIColor colorWithRed:0.14 green:0.68 blue:0.38 alpha:1.0];
+                self.transcriptLabel.text = self.noticeOverrideText;
+                self.transcriptLabel.textColor = [TypelessOverlayView primaryTextColor];
+            } else {
+                NSString *sub = (cfg.voiceMode == TypelessVoiceModeTranslate)
+                    ? [NSString stringWithFormat:@"%@ · 目标：%@", [TypelessConfig titleForMode:cfg.voiceMode], cfg.targetLanguage]
+                    : [NSString stringWithFormat:@"%@ · %@", [TypelessConfig titleForMode:cfg.voiceMode], [TypelessConfig titleForPolishStyle:cfg.polishStyle]];
+                self.statusBadgeLabel.text = sub;
+                self.statusBadgeLabel.textColor = [TypelessOverlayView accentBlue];
 
-        [self applyThemeColors];
-        [self setNeedsLayout];
-    });
+                NSString *prev = cfg.lastProcessedResult;
+                if (prev.length > 0) {
+                    self.transcriptLabel.text = [NSString stringWithFormat:@"上次：%@", prev];
+                    self.transcriptLabel.textColor = [TypelessOverlayView secondaryTextColor];
+                } else {
+                    self.transcriptLabel.text = @"轻点下方蓝键开始说话，或长按对讲（松手即上屏）";
+                    self.transcriptLabel.textColor = [TypelessOverlayView secondaryTextColor];
+                }
+            }
+        }
+    }
+
+    // Mic Dock Appearance
+    self.cancelBtn.hidden = !(isRec || isBusy);
+    self.finishBtn.hidden = !isRec;
+    self.timerLabel.hidden = !isRec;
+    self.micHintLabel.hidden = (isRec || isBusy);
+
+    if (isBusy) {
+        self.micOrbBtn.backgroundColor = [UIColor colorWithRed:0.45 green:0.32 blue:0.90 alpha:1.0];
+        if (@available(iOS 13.0, *)) {
+            [self.micOrbBtn setImage:nil forState:UIControlStateNormal];
+        } else {
+            [self.micOrbBtn setTitle:@"" forState:UIControlStateNormal];
+        }
+        [self.aiSpinner startAnimating];
+        [self stopPulseAnimation];
+        [self resetWaveBars];
+    } else if (isRec) {
+        [self.aiSpinner stopAnimating];
+        self.micOrbBtn.backgroundColor = [UIColor colorWithRed:0.92 green:0.22 blue:0.22 alpha:1.0];
+        if (@available(iOS 13.0, *)) {
+            UIImageSymbolConfiguration *sym = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightBold];
+            [self.micOrbBtn setImage:[UIImage systemImageNamed:@"stop.fill" withConfiguration:sym] forState:UIControlStateNormal];
+        }
+        [self startPulseAnimation];
+    } else {
+        [self.aiSpinner stopAnimating];
+        self.micOrbBtn.backgroundColor = [TypelessOverlayView accentBlue];
+        if (@available(iOS 13.0, *)) {
+            UIImageSymbolConfiguration *sym = [UIImageSymbolConfiguration configurationWithPointSize:21 weight:UIImageSymbolWeightSemibold];
+            [self.micOrbBtn setImage:[UIImage systemImageNamed:@"mic.fill" withConfiguration:sym] forState:UIControlStateNormal];
+        }
+        self.timerLabel.text = @"00:00";
+        self.micHintLabel.text = [cfg shouldUseWhisperAPI] ? @"Whisper 引擎" : @"系统识别";
+        [self stopPulseAnimation];
+        [self resetWaveBars];
+    }
+}
+
+#pragma mark - Animations & Live Telemetry
+
+- (void)startPulseAnimation {
+    self.micHaloView.alpha = 1.0;
+    if ([self.micHaloView.layer animationForKey:@"pulse"]) return;
+    CABasicAnimation *scale = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+    scale.fromValue = @(0.96);
+    scale.toValue = @(1.26);
+    CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    fade.fromValue = @(0.65);
+    fade.toValue = @(0.05);
+    CAAnimationGroup *grp = [CAAnimationGroup animation];
+    grp.animations = @[scale, fade];
+    grp.duration = 1.1;
+    grp.repeatCount = HUGE_VALF;
+    [self.micHaloView.layer addAnimation:grp forKey:@"pulse"];
+}
+
+- (void)stopPulseAnimation {
+    [self.micHaloView.layer removeAnimationForKey:@"pulse"];
+    self.micHaloView.alpha = 0.0;
+}
+
+- (void)resetWaveBars {
+    for (UIView *bar in self.waveBars) {
+        bar.backgroundColor = [TypelessOverlayView accentBlue];
+        bar.alpha = 0.25;
+        bar.transform = CGAffineTransformMakeScale(1.0, 0.22);
+    }
 }
 
 - (void)updateAudioLevel:(CGFloat)level elapsedSeconds:(NSTimeInterval)elapsed {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self configureButton:self.recDoneBtn
-                   symbolName:@"stop.fill"
-                        title:[NSString stringWithFormat:@"完成 (%.1fs)", elapsed]
-                     fontSize:14
-                       weight:UIFontWeightSemibold
-                      spacing:6];
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self updateAudioLevel:level elapsedSeconds:elapsed];
+        });
+        return;
+    }
+    NSInteger mins = (NSInteger)(elapsed / 60.0);
+    NSInteger secs = (NSInteger)elapsed % 60;
+    self.timerLabel.text = [NSString stringWithFormat:@"%02ld:%02ld", (long)mins, (long)secs];
 
-        if (level >= 0) {
-            static const CGFloat weights[9] = {0.35, 0.55, 0.78, 0.95, 1.0, 0.95, 0.78, 0.55, 0.35};
-            CGFloat clamped = MAX(0.06, MIN(1.0, level));
-            [UIView animateWithDuration:0.08 animations:^{
-                for (int i = 0; i < (int)self.waveBars.count; i++) {
-                    CGFloat h = MAX(8.0, MIN(40.0, 8.0 + clamped * 32.0 * weights[i]));
-                    UIView *b = self.waveBars[i];
-                    CGRect r = b.frame;
-                    r.size.height = h;
-                    r.origin.y = (40.0 - h) / 2.0;
-                    b.frame = r;
-                }
-            }];
-        }
-    });
+    if (level < 0) return;
+    CGFloat base = MAX(0.18, MIN(1.0, level));
+    UIColor *activeRed = [UIColor colorWithRed:0.94 green:0.26 blue:0.25 alpha:1.0];
+    for (NSUInteger i = 0; i < self.waveBars.count; i++) {
+        UIView *bar = self.waveBars[i];
+        CGFloat distFromCenter = (i < 5) ? (CGFloat)(4 - i) : (CGFloat)(i - 5);
+        CGFloat weight = MAX(0.35, 1.0 - distFromCenter * 0.14);
+        CGFloat jitter = ((arc4random_uniform(30) / 100.0) - 0.12);
+        CGFloat s = MAX(0.22, MIN(1.0, base * weight + jitter));
+        bar.backgroundColor = activeRed;
+        bar.alpha = 0.88;
+        bar.transform = CGAffineTransformMakeScale(1.0, s);
+    }
 }
 
 - (void)updatePartialTranscript:(NSString *)text {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (text.length > 0) {
-            self.partialTextLabel.text = text;
-        }
-    });
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self updatePartialTranscript:text];
+        });
+        return;
+    }
+    if (text.length == 0 || self.hasActiveError) return;
+    self.transcriptLabel.text = text;
+    self.transcriptLabel.textColor = [TypelessOverlayView primaryTextColor];
 }
 
 - (void)showErrorStatus:(NSString *)message {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self refreshStateUI];
-        self.statusTitleLabel.text = message ?: @"发生未知错误";
-        self.statusTitleLabel.textColor = [UIColor systemOrangeColor];
-
-        if ([message containsString:@"561145187"] || [message containsString:@"保活"]) {
-            self.errorActionKind = 1;
-            [self.statusActionBtn setTitle:@"开启后台语音保活" forState:UIControlStateNormal];
-        } else if ([message containsString:@"完全访问"] || [message containsString:@"系统设置"] || [message containsString:@"权限"]) {
-            self.errorActionKind = 2;
-            [self.statusActionBtn setTitle:@"前往系统设置" forState:UIControlStateNormal];
-        } else {
-            self.errorActionKind = 0;
-            [self.statusActionBtn setTitle:@"重新尝试" forState:UIControlStateNormal];
-        }
-    });
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self showErrorStatus:message];
+        });
+        return;
+    }
+    [self.noticeClearTimer invalidate];
+    self.noticeClearTimer = nil;
+    self.noticeOverrideText = nil;
+    self.showingHistoryDrawer = NO;
+    self.hasActiveError = YES;
+    self.currentErrorMessage = message.length > 0 ? message : @"发生未知异常，请重试";
+    [self refreshStateUI];
 }
 
 - (void)showSuccessNotice:(NSString *)message {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self.transientNotice = message;
-        self.idleSubtitleLabel.text = message ?: @"";
-        __weak typeof(self) weakSelf = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if ([weakSelf.transientNotice isEqualToString:message]) {
-                weakSelf.transientNotice = nil;
-                [weakSelf refreshStateUI];
-            }
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self showSuccessNotice:message];
         });
-    });
+        return;
+    }
+    self.hasActiveError = NO;
+    self.currentErrorMessage = nil;
+    self.noticeOverrideText = message;
+    self.noticeToken += 1;
+    NSUInteger myToken = self.noticeToken;
+    [self refreshStateUI];
+
+    [self.noticeClearTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    self.noticeClearTimer = [NSTimer scheduledTimerWithTimeInterval:3.0 repeats:NO block:^(NSTimer * _Nonnull timer) {
+        __strong typeof(weakSelf) s = weakSelf;
+        if (!s || myToken != s.noticeToken) return;
+        s.noticeOverrideText = nil;
+        [s refreshStateUI];
+    }];
 }
 
 #pragma mark - Actions
 
-- (void)switchToManualTapped {
+- (void)onBackToKeyboardTapped {
+    [self.haptic impactOccurred];
     [[TypelessVoiceManager sharedManager] dismissVoiceOverlayAnimated:YES];
 }
 
-- (void)modeTabTapped:(UIButton *)sender {
+- (void)onKeepAlivePillTapped {
+    [self.haptic impactOccurred];
+    if ([[TypelessHostBridge sharedBridge] isHostBridgeAlive]) {
+        [self showSuccessNotice:@"免切后台通道正常运行中（可在主App管理）"];
+    } else {
+        [[TypelessHostBridge sharedBridge] openHostKeepAliveFromViewController:[TypelessVoiceManager sharedManager].activeInputViewController];
+    }
+}
+
+- (void)onModePillTapped:(UIButton *)sender {
+    [self.haptic impactOccurred];
     TypelessConfig *cfg = [TypelessConfig sharedConfig];
     cfg.voiceMode = (TypelessVoiceMode)sender.tag;
     [cfg save];
+    self.showingHistoryDrawer = NO;
     [self refreshStateUI];
 }
 
-- (void)cycleTranslateLangTapped {
+- (void)onStyleChipTapped:(UIButton *)sender {
+    [self.haptic impactOccurred];
     TypelessConfig *cfg = [TypelessConfig sharedConfig];
-    NSArray<NSString *> *langs = [TypelessConfig supportedTargetLanguages];
-    NSUInteger idx = [langs indexOfObject:cfg.targetLanguage ?: @"English"];
-    NSUInteger nextIdx = (idx == NSNotFound) ? 0 : (idx + 1) % langs.count;
-    cfg.targetLanguage = langs[nextIdx];
+    cfg.polishStyle = (TypelessPolishStyle)sender.tag;
     [cfg save];
+    self.showingHistoryDrawer = NO;
     [self refreshStateUI];
 }
 
-- (void)undoTapped {
+- (void)onLanguageChipTapped:(UIButton *)sender {
+    [self.haptic impactOccurred];
+    NSArray<NSString *> *langs = [TypelessConfig supportedTargetLanguages];
+    if (sender.tag >= 0 && (NSUInteger)sender.tag < langs.count) {
+        TypelessConfig *cfg = [TypelessConfig sharedConfig];
+        cfg.targetLanguage = langs[(NSUInteger)sender.tag];
+        [cfg save];
+        self.showingHistoryDrawer = NO;
+        [self refreshStateUI];
+    }
+}
+
+- (void)onUndoChipTapped {
     [[TypelessVoiceManager sharedManager] undoLastInsert];
 }
 
-- (void)openSettingsTapped {
-    [[TypelessConfig sharedConfig] load];
-    if (!_settingsView) {
-        _settingsView = [[TypelessSettingsView alloc] initWithFrame:self.bounds];
-        _settingsView.delegate = self;
-    } else {
-        _settingsView.frame = self.bounds;
-        [_settingsView reloadConfig];
-    }
-    _settingsView.alpha = 0.0;
-    [self addSubview:_settingsView];
-    [self bringSubviewToFront:_settingsView];
-    [UIView animateWithDuration:0.18 animations:^{
-        self.settingsView.alpha = 1.0;
-    }];
+- (void)onReprocessChipTapped {
+    self.showingHistoryDrawer = NO;
+    [[TypelessVoiceManager sharedManager] reprocessLastResult];
 }
 
-- (void)startRecordingTapped {
-    [[TypelessVoiceManager sharedManager] startRecording];
+- (void)onCopyChipTapped {
+    [[TypelessVoiceManager sharedManager] copyLastResultToPasteboard];
 }
 
-- (void)cancelRecordingTapped {
-    [[TypelessVoiceManager sharedManager] cancelRecordingAndReset];
-}
-
-- (void)finishRecordingTapped {
-    [[TypelessVoiceManager sharedManager] finishRecordingAndProcess];
-}
-
-- (void)statusActionTapped {
-    TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
-    if (mgr.state == TypelessSessionStateError) {
-        if (self.errorActionKind == 1) {
-            [[TypelessHostBridge sharedBridge] openHostKeepAliveFromViewController:mgr.activeInputViewController];
-            [mgr cancelRecordingAndReset];
-            return;
-        }
-        if (self.errorActionKind == 2) {
-            NSURL *settingsURL = [NSURL URLWithString:UIApplicationOpenSettingsURLString];
-            if (settingsURL) {
-                UIResponder *resp = mgr.activeInputViewController;
-                while (resp) {
-                    if ([resp isKindOfClass:[UIApplication class]]) {
-                        [(UIApplication *)resp openURL:settingsURL options:@{} completionHandler:nil];
-                        break;
-                    }
-                    resp = [resp nextResponder];
-                }
-                if (!resp && mgr.activeInputViewController.extensionContext) {
-                    [mgr.activeInputViewController.extensionContext openURL:settingsURL completionHandler:nil];
-                }
-            }
-            [mgr cancelRecordingAndReset];
-            return;
-        }
-        [mgr startRecording];
-    } else {
-        [mgr cancelRecordingAndReset];
-    }
-}
-
-#pragma mark - Bottom Utility Key Handlers
-
-- (void)spaceTapped {
-    [[TypelessVoiceManager sharedManager] insertSpace];
-}
-
-- (void)backspaceTouchDown {
-    [[TypelessVoiceManager sharedManager] deleteBackwardStep];
-    [_backspaceRepeatTimer invalidate];
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (weakSelf.backspaceKey.isHighlighted) {
-            weakSelf.backspaceRepeatTimer = [NSTimer scheduledTimerWithTimeInterval:0.085 repeats:YES block:^(NSTimer * _Nonnull timer) {
-                if (weakSelf.backspaceKey.isHighlighted) {
-                    [[TypelessVoiceManager sharedManager] deleteBackwardStep];
-                } else {
-                    [timer invalidate];
-                    weakSelf.backspaceRepeatTimer = nil;
-                }
-            }];
-        }
-    });
-}
-
-- (void)backspaceTouchUp {
-    [_backspaceRepeatTimer invalidate];
-    _backspaceRepeatTimer = nil;
-}
-
-- (void)returnTapped {
-    [[TypelessVoiceManager sharedManager] insertReturn];
-}
-
-#pragma mark - TypelessSettingsViewDelegate
-
-- (void)typelessSettingsDidSave {
-    [self typelessSettingsDidClose];
+- (void)onToggleHistoryTapped {
+    [self.haptic impactOccurred];
+    self.showingHistoryDrawer = !self.showingHistoryDrawer;
     [self refreshStateUI];
 }
 
-- (void)typelessSettingsDidClose {
-    if (_settingsView) {
-        [UIView animateWithDuration:0.18 animations:^{
-            self.settingsView.alpha = 0.0;
-        } completion:^(BOOL finished) {
-            [self.settingsView removeFromSuperview];
-        }];
+- (void)onHistoryRowTapped:(UIButton *)sender {
+    TypelessConfig *cfg = [TypelessConfig sharedConfig];
+    if (sender.tag >= 0 && (NSUInteger)sender.tag < cfg.recentHistory.count) {
+        NSString *item = cfg.recentHistory[(NSUInteger)sender.tag];
+        self.showingHistoryDrawer = NO;
+        [[TypelessVoiceManager sharedManager] insertHistoryText:item];
     }
+}
+
+- (void)onCardPrimaryActionTapped {
+    [self.haptic impactOccurred];
+    TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
+    if ([self.cardActionBtn.currentTitle containsString:@"保活"]) {
+        [[TypelessHostBridge sharedBridge] openHostKeepAliveFromViewController:mgr.activeInputViewController];
+    } else {
+        [mgr retryAfterError];
+    }
+}
+
+- (void)onCardSecondaryActionTapped {
+    [self.haptic impactOccurred];
+    TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
+    if ([self.cardSecondaryBtn.currentTitle containsString:@"重试"]) {
+        [mgr retryAfterError];
+    } else {
+        [[TypelessHostBridge sharedBridge] openHostKeepAliveFromViewController:mgr.activeInputViewController];
+    }
+}
+
+- (void)onMicOrbTapped {
+    TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
+    if (mgr.isRecording) {
+        [mgr finishRecordingAndProcess];
+    } else if (mgr.state == TypelessSessionStateIdle || mgr.state == TypelessSessionStateError) {
+        self.showingHistoryDrawer = NO;
+        [mgr startRecording];
+    }
+}
+
+- (void)onMicOrbLongPressed:(UILongPressGestureRecognizer *)gr {
+    TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
+    if (gr.state == UIGestureRecognizerStateBegan) {
+        if (!mgr.isRecording && (mgr.state == TypelessSessionStateIdle || mgr.state == TypelessSessionStateError)) {
+            self.showingHistoryDrawer = NO;
+            [mgr startRecording];
+        }
+    } else if (gr.state == UIGestureRecognizerStateEnded || gr.state == UIGestureRecognizerStateCancelled) {
+        if (mgr.isRecording) {
+            [mgr finishRecordingAndProcess];
+        }
+    }
+}
+
+- (void)onCancelTapped {
+    [[TypelessVoiceManager sharedManager] cancelRecordingAndReset];
+}
+
+- (void)onFinishTapped {
+    [[TypelessVoiceManager sharedManager] finishRecordingAndProcess];
+}
+
+- (void)onSpaceTapped {
+    [[TypelessVoiceManager sharedManager] insertSpace];
+}
+
+- (void)onBackspaceTapped {
+    [self.haptic impactOccurred];
+    [[TypelessVoiceManager sharedManager] deleteBackwardStep];
+}
+
+- (void)onBackspaceLongPressed:(UILongPressGestureRecognizer *)gr {
+    if (gr.state == UIGestureRecognizerStateBegan) {
+        [self.deleteRepeatTimer invalidate];
+        self.deleteRepeatTimer = [NSTimer scheduledTimerWithTimeInterval:0.085 repeats:YES block:^(NSTimer * _Nonnull timer) {
+            [[TypelessVoiceManager sharedManager] deleteBackwardStep];
+        }];
+    } else if (gr.state == UIGestureRecognizerStateEnded || gr.state == UIGestureRecognizerStateCancelled) {
+        [self.deleteRepeatTimer invalidate];
+        self.deleteRepeatTimer = nil;
+    }
+}
+
+- (void)onReturnTapped {
+    [[TypelessVoiceManager sharedManager] insertReturn];
 }
 
 @end

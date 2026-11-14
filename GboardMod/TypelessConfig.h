@@ -9,21 +9,40 @@ typedef NS_ENUM(NSInteger, TypelessVoiceMode) {
     TypelessVoiceModeHelpWrite = 3
 };
 
+typedef NS_ENUM(NSInteger, TypelessPolishStyle) {
+    TypelessPolishStyleSmart = 0,
+    TypelessPolishStyleConcise = 1,
+    TypelessPolishStyleFormal = 2,
+    TypelessPolishStyleLight = 3
+};
+
 @interface TypelessConfig : NSObject
 
 + (instancetype)sharedConfig;
 + (NSString *)titleForMode:(TypelessVoiceMode)mode;
 + (NSArray<NSString *> *)supportedTargetLanguages;
++ (NSString *)titleForPolishStyle:(TypelessPolishStyle)style;
 
 @property (nonatomic, assign) TypelessVoiceMode voiceMode;
 @property (nonatomic, copy) NSString *targetLanguage;
+@property (nonatomic, assign) TypelessPolishStyle polishStyle;
+@property (nonatomic, assign) BOOL pipKeepAliveEnabled;
 
+// Separated Voice Model (ASR) configuration
+@property (nonatomic, copy) NSString *asrBaseURL;
+@property (nonatomic, copy) NSString *asrApiKey;
+@property (nonatomic, copy) NSString *asrModel;
+@property (nonatomic, assign) BOOL useAppleASR;
+
+// Separated Text Model (LLM) configuration
+@property (nonatomic, copy) NSString *llmBaseURL;
+@property (nonatomic, copy) NSString *llmApiKey;
+@property (nonatomic, copy) NSString *llmModel;
+@property (nonatomic, assign) BOOL smartDictationCleanup;
+
+// Backward compatibility aliases mapped to LLM (with ASR fallback on read)
 @property (nonatomic, copy) NSString *baseURL;
 @property (nonatomic, copy) NSString *apiKey;
-@property (nonatomic, copy) NSString *asrModel;
-@property (nonatomic, copy) NSString *llmModel;
-@property (nonatomic, assign) BOOL useAppleASR;
-@property (nonatomic, assign) BOOL smartDictationCleanup;
 
 @property (nonatomic, copy) NSString *customPromptDictate;
 @property (nonatomic, copy) NSString *customPromptEdit;
@@ -34,12 +53,27 @@ typedef NS_ENUM(NSInteger, TypelessVoiceMode) {
 @property (nonatomic, copy) NSString *customPrompt;
 @property (nonatomic, assign) BOOL isAIPolish;
 
+// Session & recent result helpers for interactive overlay
+@property (nonatomic, copy) NSString *lastRawTranscript;
+@property (nonatomic, copy) NSString *lastProcessedResult;
+@property (nonatomic, copy) NSArray<NSString *> *recentHistory;
+
 - (NSString *)promptForMode:(TypelessVoiceMode)mode;
+- (NSString *)effectivePromptForMode:(TypelessVoiceMode)mode;
+- (BOOL)hasValidAsrConfig;
+- (BOOL)hasValidLlmConfig;
 - (BOOL)hasValidApiKey;
 - (BOOL)shouldUseWhisperAPI;
+
 - (BOOL)hasSharedAppGroup;
+- (nullable NSString *)detectedAppGroupIdentifier;
 - (nullable NSString *)sharedAppGroupPath;
 - (NSString *)sharedConfigDirectory;
+
+- (void)recordHistoryResult:(NSString *)result rawText:(nullable NSString *)rawText;
+- (NSDictionary<NSString *, id> *)exportConfigDictionary;
+- (BOOL)applyConfigDictionary:(NSDictionary<NSString *, id> *)dict persist:(BOOL)persist;
+
 - (void)load;
 - (void)save;
 - (void)resetToDefaults;

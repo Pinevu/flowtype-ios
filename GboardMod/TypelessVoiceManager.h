@@ -20,6 +20,7 @@ typedef NS_ENUM(NSInteger, TypelessSessionState) {
 @property (nonatomic, readonly) BOOL isRecording;
 @property (nonatomic, readonly) BOOL canUndoLastInsert;
 @property (nonatomic, readonly) BOOL isOverlayVisible;
+@property (nonatomic, readonly, copy) NSString *liveRecognizedPreview;
 
 - (void)presentVoiceOverlayInViewController:(nullable UIInputViewController *)viewController;
 - (void)presentVoiceOverlayInViewController:(nullable UIInputViewController *)viewController autoStart:(BOOL)autoStart;
@@ -28,13 +29,20 @@ typedef NS_ENUM(NSInteger, TypelessSessionState) {
 - (void)startRecording;
 - (void)finishRecordingAndProcess;
 - (void)cancelRecordingAndReset;
+- (void)retryAfterError;
 - (void)quickMicTapped:(nullable id)sender;
 
-// Keyboard Utility Key Actions
+// Post-dictation & interactive actions
+- (void)reprocessLastResult;
+- (void)insertHistoryText:(NSString *)text;
+- (void)copyLastResultToPasteboard;
+
+// Bottom bar actions
 - (void)insertSpace;
 - (void)deleteBackwardStep;
 - (void)insertReturn;
 - (void)undoLastInsert;
+
 - (NSString *)currentReturnKeyTitle;
 - (NSString *)currentSelectedTextPreview;
 - (BOOL)hasFullAccess;

@@ -3,6 +3,7 @@
 #import "TypelessOverlayView.h"
 #import "TypelessHostBridge.h"
 #import <Speech/Speech.h>
+#import <objc/message.h>
 
 @interface TypelessVoiceManager () <AVAudioRecorderDelegate>
 
@@ -24,7 +25,7 @@
 @property (nonatomic, assign) BOOL speechDidFinishFinal;
 @property (nonatomic, copy, nullable) void (^pendingSpeechFinalBlock)(NSString *text);
 
-// Session & Undo
+// Session, Reprocess & Undo
 @property (nonatomic, assign) NSUInteger sessionToken;
 @property (nonatomic, copy) NSString *capturedSelectionText;
 @property (nonatomic, assign) NSUInteger lastInsertedCharCount;
@@ -66,6 +67,11 @@
 
 - (BOOL)isOverlayVisible {
     return self.overlayView != nil && self.overlayView.superview != nil;
+}
+
+- (NSString *)liveRecognizedPreview {
+    if (self.liveRecognizedText.length > 0) return self.liveRecognizedText;
+    return [TypelessConfig sharedConfig].lastProcessedResult ?: @"";
 }
 
 - (BOOL)hasFullAccess {
@@ -123,6 +129,17 @@
     self.activeInputViewController = viewController;
     [[TypelessConfig sharedConfig] load];
 
+    // Non-blocking loopback sync so config changes in host take effect without AppGroup
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        if ([[TypelessHostBridge sharedBridge] syncConfigFromHostIfNeeded]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (self.isOverlayVisible && self.state != TypelessSessionStateError) {
+                    [self.overlayView refreshStateUI];
+                }
+            });
+        }
+    });
+
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             if (!self.overlayView) {
@@ -138,7 +155,11 @@
             [viewController.view bringSubviewToFront:self.overlayView];
 
             if (!autoStart) {
-                self.state = TypelessSessionStateIdle;
+                if (self.state != TypelessSessionStateRecording &&
+                    self.state != TypelessSessionStateTranscribing &&
+                    self.state != TypelessSessionStateProcessingAI) {
+                    self.state = TypelessSessionStateIdle;
+                }
                 [self.overlayView refreshStateUI];
             }
 
@@ -184,14 +205,25 @@
         return @"请先在「系统设置 → 键盘 → Gboard」开启允许完全访问";
     }
     if (err && (err.code == 561145187 || err.code == 561015905 || [err.localizedDescription containsString:@"561145187"])) {
-        return @"iOS 18 限制键盘直接录音（561145187），请点击下方开启后台保活";
+        return @"iOS 18 限制键盘直接录音（561145187），请点下方开启后台语音保活";
     }
-    return err.localizedDescription ?: fallback;
+    return err.localizedDescription.length > 0 ? err.localizedDescription : fallback;
+}
+
+- (void)retryAfterError {
+    self.state = TypelessSessionStateIdle;
+    [self startRecording];
 }
 
 - (void)startRecording {
     [self.haptic impactOccurred];
+    TypelessHostBridge *bridge = [TypelessHostBridge sharedBridge];
+    BOOL bridgeAlive = [bridge isHostBridgeAlive];
+    if (bridgeAlive) {
+        [bridge syncConfigFromHostIfNeeded];
+    }
     [[TypelessConfig sharedConfig] load];
+
     [self stopAudioCaptureOnly];
     self.sessionToken += 1;
     NSUInteger token = self.sessionToken;
@@ -208,11 +240,13 @@
         return;
     }
 
-    if ([[TypelessHostBridge sharedBridge] isHostBridgeAlive]) {
+    if (bridgeAlive) {
         [self beginAudioCaptureForToken:token];
         return;
     }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     AVAudioSession *session = [AVAudioSession sharedInstance];
     AVAudioSessionRecordPermission perm = [session recordPermission];
     if (perm == AVAudioSessionRecordPermissionDenied) {
@@ -234,6 +268,7 @@
         }];
         return;
     }
+#pragma clang diagnostic pop
 
     [self beginAudioCaptureForToken:token];
 }
@@ -270,11 +305,14 @@
 
 - (void)startWhisperAudioRecorder {
     @try {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         AVAudioSession *session = [AVAudioSession sharedInstance];
         NSError *catErr = nil;
         [session setCategory:AVAudioSessionCategoryPlayAndRecord
                  withOptions:AVAudioSessionCategoryOptionMixWithOthers | AVAudioSessionCategoryOptionDefaultToSpeaker | AVAudioSessionCategoryOptionAllowBluetooth
                        error:&catErr];
+#pragma clang diagnostic pop
         [session setActive:YES error:&catErr];
         if (catErr) {
             self.state = TypelessSessionStateError;
@@ -326,28 +364,32 @@
         Class sfClass = NSClassFromString(@"SFSpeechRecognizer");
         if (!sfClass) {
             self.state = TypelessSessionStateError;
-            [self.overlayView showErrorStatus:@"系统 Speech 框架不可用，请在右上角「模型」填写 Whisper Key"];
+            [self.overlayView showErrorStatus:@"系统 Speech 框架不可用，请在主 App「设置」中配置语音模型"];
             return;
         }
 
-        SFSpeechRecognizerAuthorizationStatus status = [sfClass authorizationStatus];
+        SFSpeechRecognizerAuthorizationStatus status =
+            ((SFSpeechRecognizerAuthorizationStatus (*)(id, SEL))objc_msgSend)(sfClass, @selector(authorizationStatus));
         if (status == SFSpeechRecognizerAuthorizationStatusDenied || status == SFSpeechRecognizerAuthorizationStatusRestricted) {
             self.state = TypelessSessionStateError;
-            [self.overlayView showErrorStatus:@"语音识别权限已关闭，请前往设置开启或在「模型」填写 Whisper API Key"];
+            [self.overlayView showErrorStatus:@"系统语音识别权限已关闭，请开启或前往主 App 配置 Whisper 模型"];
             return;
         }
         if (status == SFSpeechRecognizerAuthorizationStatusNotDetermined) {
-            [sfClass requestAuthorization:^(SFSpeechRecognizerAuthorizationStatus newStatus) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    if (token != self.sessionToken) return;
-                    if (newStatus == SFSpeechRecognizerAuthorizationStatusAuthorized) {
-                        [self runAppleSpeechEngineForToken:token];
-                    } else {
-                        self.state = TypelessSessionStateError;
-                        [self.overlayView showErrorStatus:@"未获得系统语音识别授权，可在右上角「模型」配置 Whisper API"];
-                    }
+            ((void (*)(id, SEL, void (^)(SFSpeechRecognizerAuthorizationStatus)))objc_msgSend)(
+                sfClass,
+                @selector(requestAuthorization:),
+                ^(SFSpeechRecognizerAuthorizationStatus newStatus) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (token != self.sessionToken) return;
+                        if (newStatus == SFSpeechRecognizerAuthorizationStatusAuthorized) {
+                            [self runAppleSpeechEngineForToken:token];
+                        } else {
+                            self.state = TypelessSessionStateError;
+                            [self.overlayView showErrorStatus:@"未获得系统语音识别授权，可在主 App「设置」配置 Whisper 模型"];
+                        }
+                    });
                 });
-            }];
             return;
         }
 
@@ -361,11 +403,14 @@
 - (void)runAppleSpeechEngineForToken:(NSUInteger)token {
     if (token != self.sessionToken) return;
     @try {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         AVAudioSession *session = [AVAudioSession sharedInstance];
         NSError *actErr = nil;
         [session setCategory:AVAudioSessionCategoryPlayAndRecord
                  withOptions:AVAudioSessionCategoryOptionMixWithOthers | AVAudioSessionCategoryOptionDefaultToSpeaker | AVAudioSessionCategoryOptionAllowBluetooth
                        error:&actErr];
+#pragma clang diagnostic pop
         if (!actErr) {
             [session setActive:YES error:&actErr];
         }
@@ -384,7 +429,7 @@
         }
         if (!self.speechRecognizer || !self.speechRecognizer.isAvailable) {
             self.state = TypelessSessionStateError;
-            [self.overlayView showErrorStatus:@"系统语音识别暂不可用，请检查网络或配置自定义 Whisper API"];
+            [self.overlayView showErrorStatus:@"系统语音识别暂不可用，请在主 App「设置」改用自定义语音模型"];
             return;
         }
 
@@ -454,7 +499,6 @@
             return;
         }
 
-        // Also update elapsed timer smoothly even during silence
         self.meterTimer = [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer * _Nonnull timer) {
             __strong typeof(weakSelf) strongSelf = weakSelf;
             if (!strongSelf || strongSelf.state != TypelessSessionStateRecording) return;
@@ -523,7 +567,12 @@
     if (self.state != TypelessSessionStateRecording) return;
 
     NSUInteger token = self.sessionToken;
+    TypelessHostBridge *bridge = [TypelessHostBridge sharedBridge];
+    if ([bridge isHostBridgeAlive]) {
+        [bridge syncConfigFromHostIfNeeded];
+    }
     TypelessConfig *cfg = [TypelessConfig sharedConfig];
+    [cfg load];
 
     if (self.meterTimer) {
         [self.meterTimer invalidate];
@@ -536,7 +585,7 @@
         [self.overlayView refreshStateUI];
 
         __weak typeof(self) weakSelf = self;
-        [[TypelessHostBridge sharedBridge] stopRemoteRecordingWithCompletion:^(NSString * _Nullable wavPath, NSString * _Nullable errorMessage) {
+        [bridge stopRemoteRecordingWithCompletion:^(NSString * _Nullable wavPath, NSString * _Nullable errorMessage) {
             __strong typeof(weakSelf) strongSelf = weakSelf;
             if (!strongSelf || token != strongSelf.sessionToken) return;
             if (errorMessage || wavPath.length == 0) {
@@ -563,22 +612,28 @@
             } else {
                 Class sfClass = NSClassFromString(@"SFSpeechRecognizer");
                 Class reqClass = NSClassFromString(@"SFSpeechURLRecognitionRequest");
-                if (!sfClass || !reqClass || [sfClass authorizationStatus] != SFSpeechRecognizerAuthorizationStatusAuthorized) {
+                SFSpeechRecognizerAuthorizationStatus sfStatus = sfClass ?
+                    ((SFSpeechRecognizerAuthorizationStatus (*)(id, SEL))objc_msgSend)(sfClass, @selector(authorizationStatus)) :
+                    SFSpeechRecognizerAuthorizationStatusNotDetermined;
+                if (!sfClass || !reqClass || sfStatus != SFSpeechRecognizerAuthorizationStatusAuthorized) {
+                    [[NSFileManager defaultManager] removeItemAtURL:wavURL error:nil];
                     strongSelf.state = TypelessSessionStateError;
-                    [strongSelf.overlayView showErrorStatus:@"未授权 Apple 语音识别，请在「模型」配置 Whisper API Key 或开启权限"];
+                    [strongSelf.overlayView showErrorStatus:@"未授权 Apple 语音识别，请在主 App 开启权限或配置语音模型"];
                     return;
                 }
                 SFSpeechRecognizer *rec = [[sfClass alloc] initWithLocale:[NSLocale localeWithLocaleIdentifier:@"zh-CN"]];
                 if (!rec) rec = [[sfClass alloc] initWithLocale:[NSLocale currentLocale]];
                 if (!rec || !rec.isAvailable) {
+                    [[NSFileManager defaultManager] removeItemAtURL:wavURL error:nil];
                     strongSelf.state = TypelessSessionStateError;
-                    [strongSelf.overlayView showErrorStatus:@"系统语音识别暂不可用，请改用 Whisper API"];
+                    [strongSelf.overlayView showErrorStatus:@"系统语音识别暂不可用，请在主 App 改用自定义语音模型"];
                     return;
                 }
                 SFSpeechURLRecognitionRequest *req = [[reqClass alloc] initWithURL:wavURL];
                 [rec recognitionTaskWithRequest:req resultHandler:^(SFSpeechRecognitionResult * _Nullable result, NSError * _Nullable err) {
                     if (!result && !err) return;
                     if (err || (result && result.isFinal)) {
+                        [[NSFileManager defaultManager] removeItemAtURL:wavURL error:nil];
                         NSString *text = result ? result.bestTranscription.formattedString : @"";
                         dispatch_async(dispatch_get_main_queue(), ^{
                             __strong typeof(weakSelf) s2 = weakSelf;
@@ -621,7 +676,6 @@
             });
         }];
     } else {
-        // Apple Speech: stop engine & flush endAudio, wait briefly for final word before cancelling
         if (self.speechAudioEngine) {
             @try {
                 [self.speechAudioEngine.inputNode removeTapOnBus:0];
@@ -672,11 +726,22 @@
 }
 
 - (void)handleTranscribedText:(NSString *)rawText config:(TypelessConfig *)cfg token:(NSUInteger)token {
-    BOOL shouldCallLLM = [cfg hasValidApiKey] && cfg.llmModel.length > 0 &&
-                         (cfg.voiceMode != TypelessVoiceModeDictate || cfg.smartDictationCleanup);
+    self.liveRecognizedText = rawText;
+    [self.overlayView updatePartialTranscript:rawText];
 
-    if (!shouldCallLLM) {
-        [self commitRecognizedResult:rawText];
+    BOOL wantsLLM = (cfg.voiceMode != TypelessVoiceModeDictate || cfg.smartDictationCleanup);
+    BOOL hasLlm = [cfg hasValidLlmConfig] && cfg.llmModel.length > 0;
+
+    if (!wantsLLM) {
+        [self commitRecognizedResult:rawText rawText:rawText replaceCount:0 preserveSelection:NO notice:@"已上屏原声听写"];
+        return;
+    }
+
+    if (!hasLlm) {
+        NSString *notice = (cfg.voiceMode == TypelessVoiceModeDictate)
+            ? @"已直接上屏（前往主 App 配置文本大模型可开启 AI 润色）"
+            : @"未配置文本大模型，已直接上屏原始识别文本";
+        [self commitRecognizedResult:rawText rawText:rawText replaceCount:0 preserveSelection:NO notice:notice];
         return;
     }
 
@@ -691,13 +756,76 @@
         dispatch_async(dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) strongSelf = weakSelf;
             if (!strongSelf || token != strongSelf.sessionToken) return;
-            NSString *finalText = (polishedText && polishedText.length > 0) ? polishedText : rawText;
-            [strongSelf commitRecognizedResult:finalText];
+            BOOL fallbackUsed = (llmError != nil || polishedText.length == 0);
+            NSString *finalText = fallbackUsed ? rawText : polishedText;
+            NSString *notice = fallbackUsed
+                ? @"文本大模型暂未响应，已上屏原始识别文本"
+                : @"已上屏（可点下方重写、复制或撤销）";
+            [strongSelf commitRecognizedResult:finalText rawText:rawText replaceCount:0 preserveSelection:NO notice:notice];
         });
     }];
 }
 
-- (void)commitRecognizedResult:(NSString *)text {
+- (void)reprocessLastResult {
+    TypelessConfig *cfg = [TypelessConfig sharedConfig];
+    [cfg load];
+
+    if (self.state == TypelessSessionStateRecording ||
+        self.state == TypelessSessionStateTranscribing ||
+        self.state == TypelessSessionStateProcessingAI) {
+        return;
+    }
+
+    NSString *sourceRaw = cfg.lastRawTranscript.length > 0 ? cfg.lastRawTranscript : self.liveRecognizedText;
+    if (sourceRaw.length == 0) {
+        sourceRaw = cfg.lastProcessedResult ?: @"";
+    }
+    if (sourceRaw.length == 0) {
+        [self.overlayView showErrorStatus:@"暂无可重写内容，请先语音输入一段话"];
+        return;
+    }
+    if (![cfg hasValidLlmConfig] || cfg.llmModel.length == 0) {
+        [self.overlayView showErrorStatus:@"尚未配置文本大模型（LLM），请前往 Gboard 主 App 设置"];
+        return;
+    }
+
+    [self.haptic impactOccurred];
+    self.sessionToken += 1;
+    NSUInteger token = self.sessionToken;
+    NSUInteger replaceCount = self.lastInsertedCharCount;
+
+    self.liveRecognizedText = sourceRaw;
+    self.state = TypelessSessionStateProcessingAI;
+    [self.overlayView refreshStateUI];
+
+    __weak typeof(self) weakSelf = self;
+    [self requestLLMPolishWithRawText:sourceRaw
+                        selectedText:self.capturedSelectionText
+                              config:cfg
+                   completionHandler:^(NSString * _Nullable polishedText, NSError * _Nullable llmError) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf || token != strongSelf.sessionToken) return;
+            if (llmError || polishedText.length == 0) {
+                strongSelf.state = TypelessSessionStateError;
+                [strongSelf.overlayView showErrorStatus:llmError.localizedDescription ?: @"AI 重写失败，请检查文本模型配置"];
+                return;
+            }
+            NSString *notice = replaceCount > 0 ? @"已按当前模式/风格原地重写" : @"已完成 AI 重写并插入";
+            [strongSelf commitRecognizedResult:polishedText
+                                       rawText:sourceRaw
+                                  replaceCount:replaceCount
+                             preserveSelection:YES
+                                        notice:notice];
+        });
+    }];
+}
+
+- (void)commitRecognizedResult:(NSString *)text
+                       rawText:(nullable NSString *)rawText
+                  replaceCount:(NSUInteger)replaceCount
+             preserveSelection:(BOOL)preserveSelection
+                        notice:(NSString *)notice {
     if (text.length == 0) {
         self.state = TypelessSessionStateIdle;
         [self.overlayView refreshStateUI];
@@ -707,7 +835,14 @@
     @try {
         id<UITextDocumentProxy> proxy = self.activeInputViewController.textDocumentProxy;
         if (proxy) {
-            self.lastReplacedSelectionText = self.capturedSelectionText ?: @"";
+            if (replaceCount > 0) {
+                for (NSUInteger i = 0; i < replaceCount; i++) {
+                    [proxy deleteBackward];
+                }
+            }
+            if (!preserveSelection) {
+                self.lastReplacedSelectionText = self.capturedSelectionText ?: @"";
+            }
             self.lastInsertedCharCount = [self countGraphemeClustersInString:text];
             [proxy insertText:text];
         }
@@ -715,9 +850,12 @@
         NSLog(@"[TypelessVoiceManager] Error inserting text: %@", e);
     }
 
+    self.liveRecognizedText = text;
+    [[TypelessConfig sharedConfig] recordHistoryResult:text rawText:rawText ?: text];
+
     self.state = TypelessSessionStateIdle;
     [self.overlayView refreshStateUI];
-    [self.overlayView showSuccessNotice:@"已上屏（可点右上角撤销或继续说话）"];
+    [self.overlayView showSuccessNotice:notice ?: @"已上屏"];
 }
 
 - (NSUInteger)countGraphemeClustersInString:(NSString *)str {
@@ -730,7 +868,7 @@
     return count;
 }
 
-#pragma mark - Network Requests
+#pragma mark - Network Requests (Separate ASR & LLM)
 
 - (void)requestWhisperTranscriptionWithFileURL:(NSURL *)fileURL
                                         config:(TypelessConfig *)config
@@ -740,29 +878,39 @@
         [[NSFileManager defaultManager] removeItemAtURL:fileURL error:nil];
     }
     if (!audioData || audioData.length == 0) {
-        if (completionHandler) completionHandler(nil, [NSError errorWithDomain:@"Typeless" code:-2 userInfo:@{NSLocalizedDescriptionKey: @"录音数据为空"}]);
+        if (completionHandler) {
+            completionHandler(nil, [NSError errorWithDomain:@"Typeless" code:-2 userInfo:@{NSLocalizedDescriptionKey: @"录音数据为空"}]);
+        }
         return;
     }
 
-    NSString *cleanBase = [config.baseURL stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
+    NSString *cleanBase = [config.asrBaseURL stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
     NSString *endpoint = [cleanBase stringByAppendingString:@"/audio/transcriptions"];
     NSURL *url = [NSURL URLWithString:endpoint];
     if (!url) {
-        if (completionHandler) completionHandler(nil, [NSError errorWithDomain:@"Typeless" code:-3 userInfo:@{NSLocalizedDescriptionKey: @"无效的 API 地址"}]);
+        if (completionHandler) {
+            completionHandler(nil, [NSError errorWithDomain:@"Typeless" code:-3 userInfo:@{NSLocalizedDescriptionKey: @"语音模型接口地址无效"}]);
+        }
         return;
     }
 
+    BOOL isWav = [fileURL.pathExtension.lowercaseString isEqualToString:@"wav"];
+    NSString *uploadFilename = isWav ? @"recording.wav" : @"recording.m4a";
+    NSString *uploadMime = isWav ? @"audio/wav" : @"audio/m4a";
+
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.HTTPMethod = @"POST";
-    req.timeoutInterval = 25.0;
-    [req setValue:[NSString stringWithFormat:@"Bearer %@", config.apiKey] forHTTPHeaderField:@"Authorization"];
+    req.timeoutInterval = 30.0;
+    if (config.asrApiKey.length > 0) {
+        [req setValue:[NSString stringWithFormat:@"Bearer %@", config.asrApiKey] forHTTPHeaderField:@"Authorization"];
+    }
 
     NSString *boundary = [NSString stringWithFormat:@"Boundary-%@", [[NSUUID UUID] UUIDString]];
     [req setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", boundary] forHTTPHeaderField:@"Content-Type"];
 
     NSMutableData *body = [NSMutableData data];
-    [body appendData:[[NSString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n%@\r\n", boundary, config.asrModel ?: @"whisper-1"] dataUsingEncoding:NSUTF8StringEncoding]];
-    [body appendData:[[NSString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"file\"; filename=\"recording.m4a\"\r\nContent-Type: audio/m4a\r\n\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
+    [body appendData:[[NSString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n%@\r\n", boundary, config.asrModel.length > 0 ? config.asrModel : @"whisper-1"] dataUsingEncoding:NSUTF8StringEncoding]];
+    [body appendData:[[NSString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"file\"; filename=\"%@\"\r\nContent-Type: %@\r\n\r\n", boundary, uploadFilename, uploadMime] dataUsingEncoding:NSUTF8StringEncoding]];
     [body appendData:audioData];
     [body appendData:[[NSString stringWithFormat:@"\r\n--%@--\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
     req.HTTPBody = body;
@@ -772,21 +920,31 @@
             if (completionHandler) completionHandler(nil, error);
             return;
         }
+        NSInteger statusCode = [response isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)response).statusCode : 0;
         @try {
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data ?: [NSData data] options:0 error:nil];
-            NSString *transcription = json[@"text"];
+            NSString *transcription = [json isKindOfClass:[NSDictionary class]] ? json[@"text"] : nil;
             if ([transcription isKindOfClass:[NSString class]] && transcription.length > 0) {
                 if (completionHandler) completionHandler(transcription, nil);
             } else {
                 NSString *errMsg = nil;
-                if ([json[@"error"] isKindOfClass:[NSDictionary class]]) {
+                if ([json isKindOfClass:[NSDictionary class]] && [json[@"error"] isKindOfClass:[NSDictionary class]]) {
                     errMsg = json[@"error"][@"message"];
                 }
-                if (!errMsg) errMsg = @"语音接口未返回有效内容（纯对话接口请开启 Apple 本地听写）";
-                if (completionHandler) completionHandler(nil, [NSError errorWithDomain:@"Typeless" code:-4 userInfo:@{NSLocalizedDescriptionKey: errMsg}]);
+                if (errMsg.length == 0 && statusCode >= 400) {
+                    errMsg = [NSString stringWithFormat:@"语音接口错误 HTTP %ld，请检查语音模型名称或 Key", (long)statusCode];
+                }
+                if (errMsg.length == 0) {
+                    errMsg = @"语音接口未返回有效文本，请前往主 App 测试语音模型连接";
+                }
+                if (completionHandler) {
+                    completionHandler(nil, [NSError errorWithDomain:@"Typeless" code:-4 userInfo:@{NSLocalizedDescriptionKey: errMsg}]);
+                }
             }
         } @catch (NSException *e) {
-            if (completionHandler) completionHandler(nil, [NSError errorWithDomain:@"Typeless" code:-5 userInfo:@{NSLocalizedDescriptionKey: @"解析语音响应失败"}]);
+            if (completionHandler) {
+                completionHandler(nil, [NSError errorWithDomain:@"Typeless" code:-5 userInfo:@{NSLocalizedDescriptionKey: @"解析语音接口响应失败"}]);
+            }
         }
     }];
     [task resume];
@@ -796,15 +954,16 @@
                        selectedText:(NSString *)selectedText
                              config:(TypelessConfig *)config
                   completionHandler:(void (^)(NSString * _Nullable polishedText, NSError * _Nullable error))completionHandler {
-    NSString *cleanBase = [config.baseURL stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
+    NSString *cleanBase = [config.llmBaseURL stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
     NSString *endpoint = [cleanBase stringByAppendingString:@"/chat/completions"];
     NSURL *url = [NSURL URLWithString:endpoint];
     if (!url) {
-        if (completionHandler) completionHandler(rawText, nil);
+        NSError *err = [NSError errorWithDomain:@"Typeless" code:-10 userInfo:@{NSLocalizedDescriptionKey: @"文本模型接口地址无效"}];
+        if (completionHandler) completionHandler(nil, err);
         return;
     }
 
-    NSString *systemPrompt = [config promptForMode:config.voiceMode];
+    NSString *systemPrompt = [config effectivePromptForMode:config.voiceMode];
     NSString *userContent = rawText;
     if (config.voiceMode == TypelessVoiceModeEdit && selectedText.length > 0) {
         userContent = [NSString stringWithFormat:@"【待修改文本】\n%@\n\n【语音修改指令】\n%@", selectedText, rawText];
@@ -814,12 +973,14 @@
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.HTTPMethod = @"POST";
-    req.timeoutInterval = 25.0;
-    [req setValue:[NSString stringWithFormat:@"Bearer %@", config.apiKey] forHTTPHeaderField:@"Authorization"];
+    req.timeoutInterval = 30.0;
+    if (config.llmApiKey.length > 0) {
+        [req setValue:[NSString stringWithFormat:@"Bearer %@", config.llmApiKey] forHTTPHeaderField:@"Authorization"];
+    }
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
 
     NSDictionary *payload = @{
-        @"model": config.llmModel ?: @"gpt-4o-mini",
+        @"model": config.llmModel.length > 0 ? config.llmModel : @"gpt-4o-mini",
         @"messages": @[
             @{@"role": @"system", @"content": systemPrompt},
             @{@"role": @"user", @"content": userContent}
@@ -830,30 +991,72 @@
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
         if (error) {
-            if (completionHandler) completionHandler(rawText, nil);
+            if (completionHandler) completionHandler(nil, error);
             return;
         }
+        NSInteger statusCode = [response isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)response).statusCode : 0;
         @try {
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data ?: [NSData data] options:0 error:nil];
-            NSArray *choices = json[@"choices"];
+            NSArray *choices = [json isKindOfClass:[NSDictionary class]] ? json[@"choices"] : nil;
             NSString *content = nil;
             if ([choices isKindOfClass:[NSArray class]] && choices.count > 0) {
-                content = choices.firstObject[@"message"][@"content"];
+                id msg = choices.firstObject[@"message"];
+                if ([msg isKindOfClass:[NSDictionary class]]) {
+                    content = msg[@"content"];
+                }
             }
             if ([content isKindOfClass:[NSString class]] && content.length > 0) {
                 NSString *trimmed = [content stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
                 if (completionHandler) completionHandler(trimmed, nil);
             } else {
-                if (completionHandler) completionHandler(rawText, nil);
+                NSString *errMsg = nil;
+                if ([json isKindOfClass:[NSDictionary class]] && [json[@"error"] isKindOfClass:[NSDictionary class]]) {
+                    errMsg = json[@"error"][@"message"];
+                }
+                if (errMsg.length == 0 && statusCode >= 400) {
+                    errMsg = [NSString stringWithFormat:@"文本模型错误 HTTP %ld", (long)statusCode];
+                }
+                NSError *apiErr = [NSError errorWithDomain:@"Typeless" code:-11 userInfo:@{NSLocalizedDescriptionKey: errMsg ?: @"文本模型未返回有效文本"}];
+                if (completionHandler) completionHandler(nil, apiErr);
             }
         } @catch (NSException *e) {
-            if (completionHandler) completionHandler(rawText, nil);
+            NSError *parseErr = [NSError errorWithDomain:@"Typeless" code:-12 userInfo:@{NSLocalizedDescriptionKey: @"解析文本模型响应失败"}];
+            if (completionHandler) completionHandler(nil, parseErr);
         }
     }];
     [task resume];
 }
 
-#pragma mark - Bottom Key Actions & Undo
+#pragma mark - Interactive Helpers, Bottom Key Actions & Undo
+
+- (void)insertHistoryText:(NSString *)text {
+    if (text.length == 0) return;
+    [self.haptic impactOccurred];
+    @try {
+        id<UITextDocumentProxy> proxy = self.activeInputViewController.textDocumentProxy;
+        if (proxy) {
+            self.lastReplacedSelectionText = @"";
+            self.lastInsertedCharCount = [self countGraphemeClustersInString:text];
+            [proxy insertText:text];
+        }
+    } @catch (NSException *e) {}
+    self.liveRecognizedText = text;
+    self.state = TypelessSessionStateIdle;
+    [self.overlayView refreshStateUI];
+    [self.overlayView showSuccessNotice:@"已从最近历史插入"];
+}
+
+- (void)copyLastResultToPasteboard {
+    [self.haptic impactOccurred];
+    TypelessConfig *cfg = [TypelessConfig sharedConfig];
+    NSString *target = self.liveRecognizedText.length > 0 ? self.liveRecognizedText : cfg.lastProcessedResult;
+    if (target.length == 0) {
+        [self.overlayView showErrorStatus:@"暂无可复制的识别或润色文本"];
+        return;
+    }
+    [UIPasteboard generalPasteboard].string = target;
+    [self.overlayView showSuccessNotice:@"已复制文本到剪贴板"];
+}
 
 - (void)insertSpace {
     [self.haptic impactOccurred];

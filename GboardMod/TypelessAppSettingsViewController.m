@@ -1,484 +1,1053 @@
 #import "TypelessAppSettingsViewController.h"
 #import "TypelessConfig.h"
 #import "TypelessHostBridge.h"
-#import <objc/runtime.h>
+#import <AVFoundation/AVFoundation.h>
+#import <AVKit/AVKit.h>
+#import <Speech/Speech.h>
 
-static UIColor *TypelessSecondaryLabelColor(void) {
-    if (@available(iOS 13.0, *)) {
-        return [UIColor secondaryLabelColor];
-    }
-    return [UIColor grayColor];
-}
-
-@interface TypelessAppSettingsViewController () <UITextFieldDelegate>
-
+@interface TypelessAppSettingsViewController () <UITextFieldDelegate, UITextViewDelegate>
 @property (nonatomic, strong) UIScrollView *scrollView;
-@property (nonatomic, strong) UIView *contentView;
+@property (nonatomic, strong) UIStackView *contentStack;
 
-@property (nonatomic, strong) UILabel *bridgeStatusLabel;
-@property (nonatomic, strong) UILabel *syncStatusLabel;
-@property (nonatomic, strong) UIButton *bridgeToggleBtn;
+// Status & Keep-Alive card
+@property (nonatomic, strong) UIView *statusDot;
+@property (nonatomic, strong) UILabel *statusTitleLabel;
+@property (nonatomic, strong) UILabel *statusDetailLabel;
+@property (nonatomic, strong) UISwitch *keepAliveSwitch;
+@property (nonatomic, strong) UISwitch *pipSwitch;
+@property (nonatomic, strong) NSTimer *statusRefreshTimer;
 
+// Separated ASR (Voice) card
 @property (nonatomic, strong) UISegmentedControl *asrEngineSegment;
-@property (nonatomic, strong) UITextField *urlField;
-@property (nonatomic, strong) UITextField *keyField;
-@property (nonatomic, strong) UITextField *asrField;
-@property (nonatomic, strong) UITextField *llmField;
+@property (nonatomic, strong) UIStackView *asrCloudContainer;
+@property (nonatomic, strong) UITextField *asrUrlField;
+@property (nonatomic, strong) UITextField *asrKeyField;
+@property (nonatomic, strong) UITextField *asrModelField;
+@property (nonatomic, strong) UILabel *asrTestResultLabel;
+
+// Separated LLM (Text) card
+@property (nonatomic, strong) UITextField *llmUrlField;
+@property (nonatomic, strong) UITextField *llmKeyField;
+@property (nonatomic, strong) UITextField *llmModelField;
+@property (nonatomic, strong) UISwitch *smartCleanupSwitch;
+@property (nonatomic, strong) UILabel *llmTestResultLabel;
+
+// Prompt card
+@property (nonatomic, strong) UISegmentedControl *promptModeSegment;
 @property (nonatomic, strong) UITextView *promptTextView;
-
-@property (nonatomic, strong) UIButton *testBtn;
-@property (nonatomic, strong) UIActivityIndicatorView *testSpinner;
-@property (nonatomic, strong) UILabel *testResultLabel;
-
+@property (nonatomic, copy) NSMutableArray<NSString *> *draftPrompts;
+@property (nonatomic, assign) NSInteger activePromptIndex;
 @end
 
 @implementation TypelessAppSettingsViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"AI 语音与模型配置";
-    self.view.backgroundColor = [self backgroundColorForTheme];
+    [[TypelessConfig sharedConfig] load];
+    TypelessConfig *cfg = [TypelessConfig sharedConfig];
 
-    [self setupNavigationItem];
-    [self setupScrollView];
-    [self reloadConfigValues];
-    [self refreshKeepAliveUI];
+    self.draftPrompts = [NSMutableArray arrayWithObjects:
+                         [cfg promptForMode:TypelessVoiceModeDictate],
+                         [cfg promptForMode:TypelessVoiceModeEdit],
+                         [cfg promptForMode:TypelessVoiceModeTranslate],
+                         [cfg promptForMode:TypelessVoiceModeHelpWrite],
+                         nil];
+    self.activePromptIndex = 0;
 
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(refreshKeepAliveUI)
-                                                 name:@"TypelessHostKeepAliveChanged"
-                                               object:nil];
+    if (@available(iOS 13.0, *)) {
+        self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    } else {
+        self.view.backgroundColor = [UIColor colorWithRed:0.95 green:0.95 blue:0.97 alpha:1.0];
+    }
 
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self.view action:@selector(endEditing:)];
+    [self setupNavigationBar];
+    [self setupScrollLayout];
+    [self buildKeepAliveSection];
+    [self buildAsrSection];
+    [self buildLlmSection];
+    [self buildPromptSection];
+    [self buildFooterActions];
+    [self loadConfigIntoUI];
+
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(dismissKeyboard)];
     tap.cancelsTouchesInView = NO;
     [self.view addGestureRecognizer:tap];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillChange:) name:UIKeyboardWillShowNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillChange:) name:UIKeyboardWillHideNotification object:nil];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    if (self.navigationController) {
-        [self.navigationController setNavigationBarHidden:NO animated:animated];
-    }
-    [[TypelessConfig sharedConfig] load];
-    [self reloadConfigValues];
-    [self refreshKeepAliveUI];
+    [self refreshBridgeStatusUI];
+    [self.statusRefreshTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    self.statusRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer * _Nonnull timer) {
+        [weakSelf refreshBridgeStatusUI];
+    }];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self.statusRefreshTimer invalidate];
+    self.statusRefreshTimer = nil;
 }
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
-- (UIColor *)backgroundColorForTheme {
+#pragma mark - Navigation & Safe Scroll Layout
+
+- (void)setupNavigationBar {
+    self.title = @"Typeless AI 设置";
     if (@available(iOS 13.0, *)) {
-        return [UIColor systemGroupedBackgroundColor];
+        UINavigationBarAppearance *appearance = [[UINavigationBarAppearance alloc] init];
+        [appearance configureWithDefaultBackground];
+        appearance.backgroundColor = [UIColor systemGroupedBackgroundColor];
+        self.navigationController.navigationBar.standardAppearance = appearance;
+        self.navigationController.navigationBar.scrollEdgeAppearance = appearance;
     }
-    return [UIColor colorWithRed:0.94 green:0.94 blue:0.96 alpha:1.0];
+
+    UIBarButtonItem *closeBtn = [[UIBarButtonItem alloc] initWithTitle:@"完成"
+                                                                 style:UIBarButtonItemStylePlain
+                                                                target:self
+                                                                action:@selector(closeTapped)];
+    self.navigationItem.leftBarButtonItem = closeBtn;
+
+    UIBarButtonItem *saveBtn = [[UIBarButtonItem alloc] initWithTitle:@"保存"
+                                                                style:UIBarButtonItemStyleDone
+                                                               target:self
+                                                               action:@selector(saveTapped)];
+    saveBtn.tintColor = [UIColor colorWithRed:0.15 green:0.39 blue:0.92 alpha:1.0];
+    self.navigationItem.rightBarButtonItem = saveBtn;
 }
 
-- (UIColor *)cardBackgroundColorForTheme {
+- (void)setupScrollLayout {
+    self.scrollView = [[UIScrollView alloc] initWithFrame:CGRectZero];
+    self.scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.scrollView.alwaysBounceVertical = YES;
+    self.scrollView.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
+    [self.view addSubview:self.scrollView];
+
+    self.contentStack = [[UIStackView alloc] initWithFrame:CGRectZero];
+    self.contentStack.translatesAutoresizingMaskIntoConstraints = NO;
+    self.contentStack.axis = UILayoutConstraintAxisVertical;
+    self.contentStack.spacing = 16.0;
+    self.contentStack.alignment = UIStackViewAlignmentFill;
+    [self.scrollView addSubview:self.contentStack];
+
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.scrollView.topAnchor constraintEqualToAnchor:safe.topAnchor],
+        [self.scrollView.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [self.scrollView.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [self.scrollView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+
+        [self.contentStack.topAnchor constraintEqualToAnchor:self.scrollView.topAnchor constant:12.0],
+        [self.contentStack.leadingAnchor constraintEqualToAnchor:self.scrollView.leadingAnchor constant:16.0],
+        [self.contentStack.trailingAnchor constraintEqualToAnchor:self.scrollView.trailingAnchor constant:-16.0],
+        [self.contentStack.bottomAnchor constraintEqualToAnchor:self.scrollView.bottomAnchor constant:-28.0],
+        [self.contentStack.widthAnchor constraintEqualToAnchor:self.scrollView.widthAnchor constant:-32.0],
+    ]];
+}
+
+#pragma mark - Reusable UI Builders
+
+- (UIView *)addSectionHeader:(NSString *)title subtitle:(nullable NSString *)subtitle {
+    UIStackView *hdr = [[UIStackView alloc] init];
+    hdr.axis = UILayoutConstraintAxisHorizontal;
+    hdr.alignment = UIStackViewAlignmentCenter;
+    hdr.distribution = UIStackViewDistributionEqualSpacing;
+    hdr.layoutMargins = UIEdgeInsetsMake(4, 4, 0, 4);
+    hdr.layoutMarginsRelativeArrangement = YES;
+
+    UILabel *lbl = [[UILabel alloc] init];
+    lbl.text = title;
+    lbl.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightSemibold];
+    if (@available(iOS 13.0, *)) lbl.textColor = [UIColor secondaryLabelColor];
+    [hdr addArrangedSubview:lbl];
+
+    if (subtitle.length > 0) {
+        UILabel *sub = [[UILabel alloc] init];
+        sub.text = subtitle;
+        sub.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+        if (@available(iOS 13.0, *)) sub.textColor = [UIColor tertiaryLabelColor];
+        [hdr addArrangedSubview:sub];
+    }
+
+    [self.contentStack addArrangedSubview:hdr];
+    return hdr;
+}
+
+- (UIStackView *)makeCardStack {
+    UIView *card = [[UIView alloc] init];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.layer.cornerRadius = 16.0;
     if (@available(iOS 13.0, *)) {
-        return [UIColor secondarySystemGroupedBackgroundColor];
+        card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    } else {
+        card.backgroundColor = [UIColor whiteColor];
     }
-    return [UIColor whiteColor];
+
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 12.0;
+    [card addSubview:stack];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:card.topAnchor constant:14.0],
+        [stack.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14.0],
+        [stack.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14.0],
+        [stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-14.0],
+    ]];
+
+    [self.contentStack addArrangedSubview:card];
+    return stack;
 }
 
-- (void)setupNavigationItem {
-    if (self.navigationController.viewControllers.count <= 1) {
-        self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭"
-                                                                                 style:UIBarButtonItemStylePlain
-                                                                                target:self
-                                                                                action:@selector(closeModalAction)];
+- (UIView *)makeHairline {
+    UIView *line = [[UIView alloc] init];
+    line.translatesAutoresizingMaskIntoConstraints = NO;
+    if (@available(iOS 13.0, *)) {
+        line.backgroundColor = [UIColor separatorColor];
+    } else {
+        line.backgroundColor = [UIColor colorWithWhite:0.88 alpha:1.0];
     }
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"保存"
-                                                                              style:UIBarButtonItemStyleDone
-                                                                             target:self
-                                                                             action:@selector(saveAction)];
+    [line.heightAnchor constraintEqualToConstant:1.0 / [UIScreen mainScreen].scale].active = YES;
+    return line;
 }
 
-- (void)closeModalAction {
+- (UIView *)makeIconBadge:(NSString *)sfSymbol color:(UIColor *)bg {
+    UIView *box = [[UIView alloc] init];
+    box.translatesAutoresizingMaskIntoConstraints = NO;
+    box.backgroundColor = bg;
+    box.layer.cornerRadius = 8.0;
+    [box.widthAnchor constraintEqualToConstant:30.0].active = YES;
+    [box.heightAnchor constraintEqualToConstant:30.0].active = YES;
+
+    if (@available(iOS 13.0, *)) {
+        UIImageView *iv = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:sfSymbol]];
+        iv.translatesAutoresizingMaskIntoConstraints = NO;
+        iv.tintColor = [UIColor whiteColor];
+        iv.contentMode = UIViewContentModeScaleAspectFit;
+        [box addSubview:iv];
+        [NSLayoutConstraint activateConstraints:@[
+            [iv.centerXAnchor constraintEqualToAnchor:box.centerXAnchor],
+            [iv.centerYAnchor constraintEqualToAnchor:box.centerYAnchor],
+            [iv.widthAnchor constraintEqualToConstant:17.0],
+            [iv.heightAnchor constraintEqualToConstant:17.0],
+        ]];
+    }
+    return box;
+}
+
+- (UIView *)makeSwitchRowTitle:(NSString *)title
+                      subtitle:(nullable NSString *)subtitle
+                      sfSymbol:(NSString *)sfSymbol
+                     iconColor:(UIColor *)iconColor
+                     outSwitch:(UISwitch * _Nonnull * _Nonnull)outSwitch
+                        action:(SEL)action {
+    UIStackView *row = [[UIStackView alloc] init];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.alignment = UIStackViewAlignmentCenter;
+    row.spacing = 12.0;
+
+    [row addArrangedSubview:[self makeIconBadge:sfSymbol color:iconColor]];
+
+    UIStackView *txtStack = [[UIStackView alloc] init];
+    txtStack.axis = UILayoutConstraintAxisVertical;
+    txtStack.spacing = 2.0;
+
+    UILabel *tLbl = [[UILabel alloc] init];
+    tLbl.text = title;
+    tLbl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+    [txtStack addArrangedSubview:tLbl];
+
+    if (subtitle.length > 0) {
+        UILabel *sLbl = [[UILabel alloc] init];
+        sLbl.text = subtitle;
+        sLbl.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+        sLbl.numberOfLines = 0;
+        if (@available(iOS 13.0, *)) sLbl.textColor = [UIColor secondaryLabelColor];
+        [txtStack addArrangedSubview:sLbl];
+    }
+
+    [row addArrangedSubview:txtStack];
+
+    UISwitch *sw = [[UISwitch alloc] init];
+    sw.onTintColor = [UIColor colorWithRed:0.15 green:0.39 blue:0.92 alpha:1.0];
+    [sw addTarget:self action:action forControlEvents:UIControlEventValueChanged];
+    [row addArrangedSubview:sw];
+    *outSwitch = sw;
+
+    return row;
+}
+
+- (UIView *)makeFieldRowWithLabel:(NSString *)label
+                      placeholder:(NSString *)placeholder
+                           secure:(BOOL)secure
+                         outField:(UITextField * _Nonnull * _Nonnull)outField {
+    UIStackView *box = [[UIStackView alloc] init];
+    box.axis = UILayoutConstraintAxisVertical;
+    box.spacing = 6.0;
+
+    UILabel *lbl = [[UILabel alloc] init];
+    lbl.text = label;
+    lbl.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
+    if (@available(iOS 13.0, *)) lbl.textColor = [UIColor secondaryLabelColor];
+    [box addArrangedSubview:lbl];
+
+    UIView *fieldWrap = [[UIView alloc] init];
+    fieldWrap.translatesAutoresizingMaskIntoConstraints = NO;
+    fieldWrap.layer.cornerRadius = 10.0;
+    if (@available(iOS 13.0, *)) {
+        fieldWrap.backgroundColor = [UIColor tertiarySystemFillColor];
+    } else {
+        fieldWrap.backgroundColor = [UIColor colorWithWhite:0.95 alpha:1.0];
+    }
+
+    UITextField *tf = [[UITextField alloc] init];
+    tf.translatesAutoresizingMaskIntoConstraints = NO;
+    tf.placeholder = placeholder;
+    tf.font = [UIFont systemFontOfSize:14 weight:UIFontWeightRegular];
+    tf.autocorrectionType = UITextAutocorrectionTypeNo;
+    tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    tf.returnKeyType = UIReturnKeyDone;
+    tf.secureTextEntry = secure;
+    tf.delegate = self;
+    [fieldWrap addSubview:tf];
+
+    UIButton *auxBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    auxBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    auxBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    [auxBtn setTitle:@"粘贴" forState:UIControlStateNormal];
+    auxBtn.tintColor = [UIColor colorWithRed:0.15 green:0.39 blue:0.92 alpha:1.0];
+    [auxBtn addTarget:self action:@selector(pasteIntoSiblingField:) forControlEvents:UIControlEventTouchUpInside];
+    [fieldWrap addSubview:auxBtn];
+
+    NSMutableArray<NSLayoutConstraint *> *constraints = [NSMutableArray arrayWithArray:@[
+        [fieldWrap.heightAnchor constraintEqualToConstant:40.0],
+        [tf.leadingAnchor constraintEqualToAnchor:fieldWrap.leadingAnchor constant:12.0],
+        [tf.topAnchor constraintEqualToAnchor:fieldWrap.topAnchor],
+        [tf.bottomAnchor constraintEqualToAnchor:fieldWrap.bottomAnchor],
+        [auxBtn.trailingAnchor constraintEqualToAnchor:fieldWrap.trailingAnchor constant:-10.0],
+        [auxBtn.centerYAnchor constraintEqualToAnchor:fieldWrap.centerYAnchor],
+    ]];
+
+    if (secure) {
+        UIButton *eyeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        eyeBtn.translatesAutoresizingMaskIntoConstraints = NO;
+        eyeBtn.tag = 7701;
+        if (@available(iOS 13.0, *)) {
+            [eyeBtn setImage:[UIImage systemImageNamed:@"eye"] forState:UIControlStateNormal];
+        } else {
+            [eyeBtn setTitle:@"显" forState:UIControlStateNormal];
+        }
+        eyeBtn.tintColor = [UIColor secondaryLabelColor];
+        [eyeBtn addTarget:self action:@selector(toggleSecureField:) forControlEvents:UIControlEventTouchUpInside];
+        [fieldWrap addSubview:eyeBtn];
+
+        [constraints addObjectsFromArray:@[
+            [eyeBtn.trailingAnchor constraintEqualToAnchor:auxBtn.leadingAnchor constant:-6.0],
+            [eyeBtn.centerYAnchor constraintEqualToAnchor:fieldWrap.centerYAnchor],
+            [eyeBtn.widthAnchor constraintEqualToConstant:26.0],
+            [tf.trailingAnchor constraintEqualToAnchor:eyeBtn.leadingAnchor constant:-6.0],
+        ]];
+    } else {
+        [constraints addObject:[tf.trailingAnchor constraintEqualToAnchor:auxBtn.leadingAnchor constant:-6.0]];
+    }
+
+    [NSLayoutConstraint activateConstraints:constraints];
+    [box addArrangedSubview:fieldWrap];
+    *outField = tf;
+    return box;
+}
+
+- (UIStackView *)makeChipRowWithTitles:(NSArray<NSString *> *)titles action:(SEL)action {
+    UIScrollView *sc = [[UIScrollView alloc] init];
+    sc.showsHorizontalScrollIndicator = NO;
+
+    UIStackView *row = [[UIStackView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.spacing = 8.0;
+    [sc addSubview:row];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [sc.heightAnchor constraintEqualToConstant:30.0],
+        [row.topAnchor constraintEqualToAnchor:sc.topAnchor],
+        [row.bottomAnchor constraintEqualToAnchor:sc.bottomAnchor],
+        [row.leadingAnchor constraintEqualToAnchor:sc.leadingAnchor],
+        [row.trailingAnchor constraintEqualToAnchor:sc.trailingAnchor],
+        [row.heightAnchor constraintEqualToAnchor:sc.heightAnchor],
+    ]];
+
+    for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+        btn.tag = i;
+        [btn setTitle:titles[i] forState:UIControlStateNormal];
+        btn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
+        btn.contentEdgeInsets = UIEdgeInsetsMake(4, 11, 4, 11);
+        btn.layer.cornerRadius = 8.0;
+        if (@available(iOS 13.0, *)) {
+            btn.backgroundColor = [UIColor tertiarySystemFillColor];
+            [btn setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
+        } else {
+            btn.backgroundColor = [UIColor colorWithWhite:0.93 alpha:1.0];
+        }
+        [btn addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+        [row addArrangedSubview:btn];
+    }
+
+    UIStackView *wrapper = [[UIStackView alloc] initWithArrangedSubviews:@[sc]];
+    wrapper.axis = UILayoutConstraintAxisVertical;
+    return wrapper;
+}
+
+- (UIButton *)makeTintedButton:(NSString *)title color:(UIColor *)tint bgAlpha:(CGFloat)alpha action:(SEL)action {
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    btn.translatesAutoresizingMaskIntoConstraints = NO;
+    [btn setTitle:title forState:UIControlStateNormal];
+    [btn setTitleColor:tint forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightSemibold];
+    btn.backgroundColor = [tint colorWithAlphaComponent:alpha];
+    btn.layer.cornerRadius = 10.0;
+    [btn.heightAnchor constraintEqualToConstant:38.0].active = YES;
+    [btn addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    return btn;
+}
+
+#pragma mark - Sections
+
+- (void)buildKeepAliveSection {
+    [self addSectionHeader:@"后台语音保活与权限" subtitle:@"免切 App 键盘直录"];
+    UIStackView *card = [self makeCardStack];
+
+    // Live status pill row
+    UIStackView *stRow = [[UIStackView alloc] init];
+    stRow.axis = UILayoutConstraintAxisHorizontal;
+    stRow.alignment = UIStackViewAlignmentTop;
+    stRow.spacing = 10.0;
+
+    self.statusDot = [[UIView alloc] init];
+    self.statusDot.translatesAutoresizingMaskIntoConstraints = NO;
+    self.statusDot.layer.cornerRadius = 5.0;
+    [self.statusDot.widthAnchor constraintEqualToConstant:10.0].active = YES;
+    [self.statusDot.heightAnchor constraintEqualToConstant:10.0].active = YES;
+
+    UIView *dotHolder = [[UIView alloc] init];
+    dotHolder.translatesAutoresizingMaskIntoConstraints = NO;
+    [dotHolder addSubview:self.statusDot];
+    [NSLayoutConstraint activateConstraints:@[
+        [dotHolder.widthAnchor constraintEqualToConstant:12.0],
+        [dotHolder.heightAnchor constraintEqualToConstant:18.0],
+        [self.statusDot.centerXAnchor constraintEqualToAnchor:dotHolder.centerXAnchor],
+        [self.statusDot.centerYAnchor constraintEqualToAnchor:dotHolder.centerYAnchor],
+    ]];
+
+    UIStackView *lblCol = [[UIStackView alloc] init];
+    lblCol.axis = UILayoutConstraintAxisVertical;
+    lblCol.spacing = 3.0;
+
+    self.statusTitleLabel = [[UILabel alloc] init];
+    self.statusTitleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+
+    self.statusDetailLabel = [[UILabel alloc] init];
+    self.statusDetailLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
+    self.statusDetailLabel.numberOfLines = 0;
+    if (@available(iOS 13.0, *)) self.statusDetailLabel.textColor = [UIColor secondaryLabelColor];
+
+    [lblCol addArrangedSubview:self.statusTitleLabel];
+    [lblCol addArrangedSubview:self.statusDetailLabel];
+    [stRow addArrangedSubview:dotHolder];
+    [stRow addArrangedSubview:lblCol];
+    [card addArrangedSubview:stRow];
+
+    [card addArrangedSubview:[self makeHairline]];
+
+    UISwitch *kaSw = nil;
+    [card addArrangedSubview:[self makeSwitchRowTitle:@"后台语音保活"
+                                             subtitle:@"保持主应用与 127.0.0.1 录音桥接在线"
+                                             sfSymbol:@"waveform.badge.mic"
+                                            iconColor:[UIColor colorWithRed:0.06 green:0.73 blue:0.51 alpha:1.0]
+                                            outSwitch:&kaSw
+                                               action:@selector(keepAliveSwitchChanged:)]];
+    self.keepAliveSwitch = kaSw;
+
+    [card addArrangedSubview:[self makeHairline]];
+
+    UISwitch *pipSw = nil;
+    [card addArrangedSubview:[self makeSwitchRowTitle:@"画中画 (PiP) 强力保活"
+                                             subtitle:@"切去微信/其他 App 时自动防系统挂起 (iOS 15+)"
+                                             sfSymbol:@"pip.fill"
+                                            iconColor:[UIColor colorWithRed:0.39 green:0.40 blue:0.95 alpha:1.0]
+                                            outSwitch:&pipSw
+                                               action:@selector(pipSwitchChanged:)]];
+    self.pipSwitch = pipSw;
+
+    UIStackView *btnRow = [[UIStackView alloc] init];
+    btnRow.axis = UILayoutConstraintAxisHorizontal;
+    btnRow.spacing = 10.0;
+    btnRow.distribution = UIStackViewDistributionFillEqually;
+
+    UIColor *blue = [UIColor colorWithRed:0.15 green:0.39 blue:0.92 alpha:1.0];
+    UIColor *emerald = [UIColor colorWithRed:0.02 green:0.59 blue:0.41 alpha:1.0];
+    [btnRow addArrangedSubview:[self makeTintedButton:@"授权麦克风/识别" color:emerald bgAlpha:0.12 action:@selector(requestPermissionsTapped)]];
+    [btnRow addArrangedSubview:[self makeTintedButton:@"诊断保活链路" color:blue bgAlpha:0.10 action:@selector(diagnoseBridgeTapped)]];
+    [card addArrangedSubview:btnRow];
+}
+
+- (void)buildAsrSection {
+    [self addSectionHeader:@"语音识别模型 (ASR)" subtitle:@"独立负责语音转文字"];
+    UIStackView *card = [self makeCardStack];
+
+    self.asrEngineSegment = [[UISegmentedControl alloc] initWithItems:@[@"Apple 本地识别", @"Whisper 云端 API"]];
+    [self.asrEngineSegment addTarget:self action:@selector(asrEngineChanged:) forControlEvents:UIControlEventValueChanged];
+    [card addArrangedSubview:self.asrEngineSegment];
+
+    self.asrCloudContainer = [[UIStackView alloc] init];
+    self.asrCloudContainer.axis = UILayoutConstraintAxisVertical;
+    self.asrCloudContainer.spacing = 10.0;
+
+    [self.asrCloudContainer addArrangedSubview:[self makeChipRowWithTitles:@[@"OpenAI", @"Groq", @"SiliconFlow", @"自定义"] action:@selector(asrPresetTapped:)]];
+
+    UITextField *urlF = nil, *keyF = nil, *modF = nil;
+    [self.asrCloudContainer addArrangedSubview:[self makeFieldRowWithLabel:@"语音 Base URL" placeholder:@"https://api.openai.com/v1" secure:NO outField:&urlF]];
+    [self.asrCloudContainer addArrangedSubview:[self makeFieldRowWithLabel:@"语音 API Key" placeholder:@"sk-..." secure:YES outField:&keyF]];
+    [self.asrCloudContainer addArrangedSubview:[self makeFieldRowWithLabel:@"语音 Model ID" placeholder:@"whisper-1" secure:NO outField:&modF]];
+    self.asrUrlField = urlF;
+    self.asrKeyField = keyF;
+    self.asrModelField = modF;
+
+    [self.asrCloudContainer addArrangedSubview:[self makeChipRowWithTitles:@[@"whisper-1", @"whisper-large-v3-turbo", @"FunAudioLLM/SenseVoiceSmall"] action:@selector(asrModelChipTapped:)]];
+
+    [card addArrangedSubview:self.asrCloudContainer];
+
+    UIColor *orange = [UIColor colorWithRed:0.85 green:0.47 blue:0.04 alpha:1.0];
+    [card addArrangedSubview:[self makeTintedButton:@"测试语音模型接口" color:orange bgAlpha:0.12 action:@selector(testAsrTapped)]];
+
+    self.asrTestResultLabel = [[UILabel alloc] init];
+    self.asrTestResultLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    self.asrTestResultLabel.numberOfLines = 0;
+    self.asrTestResultLabel.hidden = YES;
+    [card addArrangedSubview:self.asrTestResultLabel];
+}
+
+- (void)buildLlmSection {
+    UIStackView *hdr = (UIStackView *)[self addSectionHeader:@"文本处理模型 (LLM)" subtitle:nil];
+    UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [copyBtn setTitle:@"复用语音接口与 Key" forState:UIControlStateNormal];
+    copyBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
+    copyBtn.tintColor = [UIColor colorWithRed:0.15 green:0.39 blue:0.92 alpha:1.0];
+    [copyBtn addTarget:self action:@selector(copyAsrToLlmTapped) forControlEvents:UIControlEventTouchUpInside];
+    [hdr addArrangedSubview:copyBtn];
+
+    UIStackView *card = [self makeCardStack];
+
+    [card addArrangedSubview:[self makeChipRowWithTitles:@[@"OpenAI", @"DeepSeek", @"Groq", @"SiliconFlow"] action:@selector(llmPresetTapped:)]];
+
+    UITextField *urlF = nil, *keyF = nil, *modF = nil;
+    [card addArrangedSubview:[self makeFieldRowWithLabel:@"文本 Base URL" placeholder:@"https://api.openai.com/v1" secure:NO outField:&urlF]];
+    [card addArrangedSubview:[self makeFieldRowWithLabel:@"文本 API Key" placeholder:@"sk-..." secure:YES outField:&keyF]];
+    [card addArrangedSubview:[self makeFieldRowWithLabel:@"文本 Model ID" placeholder:@"gpt-4o-mini" secure:NO outField:&modF]];
+    self.llmUrlField = urlF;
+    self.llmKeyField = keyF;
+    self.llmModelField = modF;
+
+    [card addArrangedSubview:[self makeChipRowWithTitles:@[@"gpt-4o-mini", @"deepseek-chat", @"Qwen/Qwen2.5-7B-Instruct"] action:@selector(llmModelChipTapped:)]];
+
+    [card addArrangedSubview:[self makeHairline]];
+
+    UISwitch *cleanupSw = nil;
+    [card addArrangedSubview:[self makeSwitchRowTitle:@"听写后自动 AI 润色排版"
+                                             subtitle:@"关闭则「润色听写」只做原样语音上屏，改写/翻译/帮写仍用本模型"
+                                             sfSymbol:@"sparkles"
+                                            iconColor:[UIColor colorWithRed:0.55 green:0.36 blue:0.96 alpha:1.0]
+                                            outSwitch:&cleanupSw
+                                               action:@selector(smartCleanupChanged:)]];
+    self.smartCleanupSwitch = cleanupSw;
+
+    UIColor *blue = [UIColor colorWithRed:0.15 green:0.39 blue:0.92 alpha:1.0];
+    [card addArrangedSubview:[self makeTintedButton:@"测试文本模型连通性" color:blue bgAlpha:0.12 action:@selector(testLlmTapped)]];
+
+    self.llmTestResultLabel = [[UILabel alloc] init];
+    self.llmTestResultLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    self.llmTestResultLabel.numberOfLines = 0;
+    self.llmTestResultLabel.hidden = YES;
+    [card addArrangedSubview:self.llmTestResultLabel];
+}
+
+- (void)buildPromptSection {
+    [self addSectionHeader:@"各场景系统指令 (Prompt)" subtitle:@"按场景自动生效"];
+    UIStackView *card = [self makeCardStack];
+
+    self.promptModeSegment = [[UISegmentedControl alloc] initWithItems:@[@"润色听写", @"选中改写", @"实时翻译", @"AI 帮写"]];
+    self.promptModeSegment.selectedSegmentIndex = 0;
+    [self.promptModeSegment addTarget:self action:@selector(promptModeChanged:) forControlEvents:UIControlEventValueChanged];
+    [card addArrangedSubview:self.promptModeSegment];
+
+    self.promptTextView = [[UITextView alloc] init];
+    self.promptTextView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.promptTextView.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightRegular];
+    self.promptTextView.layer.cornerRadius = 10.0;
+    self.promptTextView.textContainerInset = UIEdgeInsetsMake(10, 10, 10, 10);
+    self.promptTextView.delegate = self;
+    if (@available(iOS 13.0, *)) {
+        self.promptTextView.backgroundColor = [UIColor tertiarySystemFillColor];
+    } else {
+        self.promptTextView.backgroundColor = [UIColor colorWithWhite:0.95 alpha:1.0];
+    }
+    [self.promptTextView.heightAnchor constraintEqualToConstant:112.0].active = YES;
+    [card addArrangedSubview:self.promptTextView];
+}
+
+- (void)buildFooterActions {
+    UIButton *saveBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    saveBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [saveBtn setTitle:@"保存全部设置" forState:UIControlStateNormal];
+    [saveBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    saveBtn.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
+    saveBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.39 blue:0.92 alpha:1.0];
+    saveBtn.layer.cornerRadius = 14.0;
+    [saveBtn.heightAnchor constraintEqualToConstant:48.0].active = YES;
+    [saveBtn addTarget:self action:@selector(saveTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.contentStack addArrangedSubview:saveBtn];
+
+    UIButton *resetBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [resetBtn setTitle:@"恢复默认配置" forState:UIControlStateNormal];
+    [resetBtn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
+    resetBtn.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    [resetBtn addTarget:self action:@selector(resetTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.contentStack addArrangedSubview:resetBtn];
+}
+
+#pragma mark - Load / Persist
+
+- (void)loadConfigIntoUI {
+    TypelessConfig *cfg = [TypelessConfig sharedConfig];
+    self.keepAliveSwitch.on = [TypelessHostBridge sharedBridge].isKeepAliveActive || [[NSUserDefaults standardUserDefaults] boolForKey:@"LintypeHostKeepAlivePref"];
+    self.pipSwitch.on = cfg.pipKeepAliveEnabled;
+
+    self.asrEngineSegment.selectedSegmentIndex = cfg.useAppleASR ? 0 : 1;
+    self.asrUrlField.text = cfg.asrBaseURL;
+    self.asrKeyField.text = cfg.asrApiKey;
+    self.asrModelField.text = cfg.asrModel;
+    [self updateAsrCloudVisibility];
+
+    self.llmUrlField.text = cfg.llmBaseURL;
+    self.llmKeyField.text = cfg.llmApiKey;
+    self.llmModelField.text = cfg.llmModel;
+    self.smartCleanupSwitch.on = cfg.smartDictationCleanup;
+
+    self.draftPrompts = [NSMutableArray arrayWithObjects:
+                         [cfg promptForMode:TypelessVoiceModeDictate],
+                         [cfg promptForMode:TypelessVoiceModeEdit],
+                         [cfg promptForMode:TypelessVoiceModeTranslate],
+                         [cfg promptForMode:TypelessVoiceModeHelpWrite],
+                         nil];
+    self.promptTextView.text = self.draftPrompts[self.activePromptIndex];
+    [self refreshBridgeStatusUI];
+}
+
+- (void)saveUIToConfig {
+    if (self.activePromptIndex >= 0 && self.activePromptIndex < (NSInteger)self.draftPrompts.count) {
+        self.draftPrompts[self.activePromptIndex] = self.promptTextView.text ?: @"";
+    }
+
+    TypelessConfig *cfg = [TypelessConfig sharedConfig];
+    cfg.pipKeepAliveEnabled = self.pipSwitch.on;
+    cfg.useAppleASR = (self.asrEngineSegment.selectedSegmentIndex == 0);
+    cfg.asrBaseURL = self.asrUrlField.text ?: @"";
+    cfg.asrApiKey = self.asrKeyField.text ?: @"";
+    cfg.asrModel = self.asrModelField.text ?: @"";
+
+    cfg.llmBaseURL = self.llmUrlField.text ?: @"";
+    cfg.llmApiKey = self.llmKeyField.text ?: @"";
+    cfg.llmModel = self.llmModelField.text ?: @"";
+    cfg.smartDictationCleanup = self.smartCleanupSwitch.on;
+
+    cfg.customPromptDictate = self.draftPrompts[0];
+    cfg.customPromptEdit = self.draftPrompts[1];
+    cfg.customPromptTranslate = self.draftPrompts[2];
+    cfg.customPromptHelpWrite = self.draftPrompts[3];
+    [cfg save];
+}
+
+- (void)refreshBridgeStatusUI {
+    TypelessHostBridge *bridge = [TypelessHostBridge sharedBridge];
+    TypelessConfig *cfg = [TypelessConfig sharedConfig];
+
+    BOOL active = bridge.isKeepAliveActive;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    BOOL micOK = ([[AVAudioSession sharedInstance] recordPermission] == AVAudioSessionRecordPermissionGranted);
+#pragma clang diagnostic pop
+
+    if (active && micOK) {
+        self.statusDot.backgroundColor = [UIColor colorWithRed:0.06 green:0.73 blue:0.51 alpha:1.0];
+        self.statusTitleLabel.text = bridge.isPipActive ? @"后台语音保活运行中 (PiP + 音频)" : @"后台语音保活运行中";
+    } else if (active) {
+        self.statusDot.backgroundColor = [UIColor colorWithRed:0.96 green:0.62 blue:0.04 alpha:1.0];
+        self.statusTitleLabel.text = @"保活已启动 · 待授权麦克风";
+    } else {
+        self.statusDot.backgroundColor = [UIColor colorWithRed:0.58 green:0.64 blue:0.72 alpha:1.0];
+        self.statusTitleLabel.text = @"后台语音保活未开启";
+    }
+
+    NSString *groupDesc = cfg.hasSharedAppGroup
+        ? [NSString stringWithFormat:@"AppGroup: %@", cfg.detectedAppGroupIdentifier ?: @"已共享"]
+        : @"无 AppGroup 权限（已自动启用 127.0.0.1 本地桥接）";
+    NSString *pipDesc = @"";
+    if (@available(iOS 15.0, *)) {
+        pipDesc = [AVPictureInPictureController isPictureInPictureSupported]
+            ? (bridge.isPipActive ? @"PiP 活跃" : @"PiP 就绪")
+            : @"设备不支持 PiP";
+    }
+    self.statusDetailLabel.text = [NSString stringWithFormat:@"麦克风：%@  ·  %@\n%@",
+                                   micOK ? @"已授权" : @"未授权",
+                                   pipDesc,
+                                   groupDesc];
+}
+
+- (void)updateAsrCloudVisibility {
+    BOOL isApple = (self.asrEngineSegment.selectedSegmentIndex == 0);
+    self.asrCloudContainer.alpha = isApple ? 0.55 : 1.0;
+    self.asrUrlField.enabled = !isApple;
+    self.asrKeyField.enabled = !isApple;
+    self.asrModelField.enabled = !isApple;
+}
+
+#pragma mark - Actions
+
+- (void)closeTapped {
+    [self dismissKeyboard];
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 
-- (void)setupScrollView {
-    _scrollView = [[UIScrollView alloc] initWithFrame:self.view.bounds];
-    _scrollView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    _scrollView.alwaysBounceVertical = YES;
-    [self.view addSubview:_scrollView];
-
-    _contentView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 0)];
-    [_scrollView addSubview:_contentView];
-
-    CGFloat y = 16.0;
-    CGFloat width = self.view.bounds.size.width;
-    CGFloat margin = 16.0;
-    CGFloat cardWidth = width - margin * 2;
-
-    // 0. Host Background Voice Keep-Alive & Cross-Process Sync Card
-    UIView *bridgeCard = [self createCardWithY:y width:cardWidth height:106];
-    UILabel *bTitle = [[UILabel alloc] initWithFrame:CGRectMake(14, 10, cardWidth - 130, 20)];
-    bTitle.text = @"🎙 iOS 18 后台语音保活";
-    bTitle.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
-    [bridgeCard addSubview:bTitle];
-
-    _bridgeStatusLabel = [[UILabel alloc] initWithFrame:CGRectMake(cardWidth - 114, 10, 100, 20)];
-    _bridgeStatusLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-    _bridgeStatusLabel.textAlignment = NSTextAlignmentRight;
-    [bridgeCard addSubview:_bridgeStatusLabel];
-
-    _syncStatusLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 33, cardWidth - 28, 28)];
-    _syncStatusLabel.font = [UIFont systemFontOfSize:11.5];
-    _syncStatusLabel.textColor = TypelessSecondaryLabelColor();
-    _syncStatusLabel.numberOfLines = 2;
-    [bridgeCard addSubview:_syncStatusLabel];
-
-    _bridgeToggleBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    _bridgeToggleBtn.frame = CGRectMake(14, 65, cardWidth - 28, 32);
-    _bridgeToggleBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    _bridgeToggleBtn.layer.cornerRadius = 8;
-    [_bridgeToggleBtn addTarget:self action:@selector(toggleKeepAliveAction) forControlEvents:UIControlEventTouchUpInside];
-    [bridgeCard addSubview:_bridgeToggleBtn];
-    y += 118;
-
-    // 1. Presets Section
-    UIView *presetCard = [self createCardWithY:y width:cardWidth height:90];
-    UILabel *pLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 10, cardWidth - 28, 18)];
-    pLabel.text = @"⚡ 快速预设 (一键填入主流接口与推荐模型)";
-    pLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    pLabel.textColor = [UIColor systemBlueColor];
-    [presetCard addSubview:pLabel];
-
-    NSArray *presets = @[@"OpenAI", @"Groq", @"DeepSeek", @"SiliconFlow"];
-    CGFloat btnW = (cardWidth - 28 - 24) / 4.0;
-    for (int i = 0; i < presets.count; i++) {
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-        btn.tag = 200 + i;
-        btn.frame = CGRectMake(14 + i * (btnW + 8), 38, btnW, 36);
-        [btn setTitle:presets[i] forState:UIControlStateNormal];
-        [btn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-        btn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.1];
-        btn.layer.cornerRadius = 8;
-        [btn addTarget:self action:@selector(presetTapped:) forControlEvents:UIControlEventTouchUpInside];
-        [presetCard addSubview:btn];
-    }
-    y += 102;
-
-    // 2. ASR Engine Section
-    UIView *engineCard = [self createCardWithY:y width:cardWidth height:82];
-    UILabel *eLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 10, cardWidth - 28, 18)];
-    eLabel.text = @"🎙 语音识别引擎 (ASR)";
-    eLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    [engineCard addSubview:eLabel];
-
-    _asrEngineSegment = [[UISegmentedControl alloc] initWithItems:@[@"Whisper 云端接口", @"Apple 本地听写 (推荐 DeepSeek)"]];
-    _asrEngineSegment.frame = CGRectMake(14, 38, cardWidth - 28, 32);
-    _asrEngineSegment.selectedSegmentIndex = 0;
-    [engineCard addSubview:_asrEngineSegment];
-    y += 94;
-
-    // 3. API Details Section
-    UIView *apiCard = [self createCardWithY:y width:cardWidth height:280];
-    UILabel *apiTitle = [[UILabel alloc] initWithFrame:CGRectMake(14, 10, cardWidth - 28, 18)];
-    apiTitle.text = @"🌐 模型服务与密钥配置";
-    apiTitle.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    [apiCard addSubview:apiTitle];
-
-    CGFloat curY = 36;
-    _urlField = [self addFieldToCard:apiCard y:&curY label:@"API 地址 (Base URL)" placeholder:@"https://api.openai.com/v1" width:cardWidth hasPaste:YES];
-    _keyField = [self addFieldToCard:apiCard y:&curY label:@"API Key (不填自动使用 Apple 听写)" placeholder:@"sk-..." width:cardWidth hasPaste:YES];
-    _keyField.secureTextEntry = YES;
-    _asrField = [self addFieldToCard:apiCard y:&curY label:@"语音识别模型 (ASR)" placeholder:@"whisper-1 / SenseVoiceSmall" width:cardWidth hasPaste:NO];
-    _llmField = [self addFieldToCard:apiCard y:&curY label:@"文本处理模型 (LLM)" placeholder:@"gpt-4o-mini / deepseek-chat" width:cardWidth hasPaste:NO];
-    y += 292;
-
-    // 4. Custom Prompt Section
-    UIView *promptCard = [self createCardWithY:y width:cardWidth height:130];
-    UILabel *promptTitle = [[UILabel alloc] initWithFrame:CGRectMake(14, 10, cardWidth - 28, 18)];
-    promptTitle.text = @"📝 AI 提示词要求 (Prompt)";
-    promptTitle.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    [promptCard addSubview:promptTitle];
-
-    _promptTextView = [[UITextView alloc] initWithFrame:CGRectMake(14, 34, cardWidth - 28, 84)];
-    _promptTextView.font = [UIFont systemFontOfSize:13];
-    _promptTextView.layer.cornerRadius = 8;
-    _promptTextView.layer.borderWidth = 0.6;
-    if (@available(iOS 13.0, *)) {
-        _promptTextView.layer.borderColor = [UIColor separatorColor].CGColor;
-        _promptTextView.backgroundColor = [UIColor tertiarySystemGroupedBackgroundColor];
-    } else {
-        _promptTextView.layer.borderColor = [UIColor colorWithWhite:0.8 alpha:1.0].CGColor;
-        _promptTextView.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1.0];
-    }
-    [promptCard addSubview:_promptTextView];
-    y += 142;
-
-    // 5. Test & Action Section
-    _testBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    _testBtn.frame = CGRectMake(margin, y, cardWidth, 44);
-    _testBtn.backgroundColor = [UIColor systemBlueColor];
-    _testBtn.layer.cornerRadius = 10;
-    [_testBtn setTitle:@"🔌 测试 API 连通性" forState:UIControlStateNormal];
-    [_testBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    _testBtn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-    [_testBtn addTarget:self action:@selector(testApiConnection) forControlEvents:UIControlEventTouchUpInside];
-    [_contentView addSubview:_testBtn];
-
-    _testSpinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
-    _testSpinner.center = CGPointMake(cardWidth - 30, 22);
-    _testSpinner.hidesWhenStopped = YES;
-    [_testBtn addSubview:_testSpinner];
-    y += 50;
-
-    _testResultLabel = [[UILabel alloc] initWithFrame:CGRectMake(margin, y, cardWidth, 40)];
-    _testResultLabel.font = [UIFont systemFontOfSize:12];
-    _testResultLabel.numberOfLines = 2;
-    _testResultLabel.textAlignment = NSTextAlignmentCenter;
-    [_contentView addSubview:_testResultLabel];
-    y += 46;
-
-    UIButton *resetBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    resetBtn.frame = CGRectMake(margin, y, cardWidth, 36);
-    [resetBtn setTitle:@"恢复默认配置" forState:UIControlStateNormal];
-    [resetBtn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
-    [resetBtn addTarget:self action:@selector(resetAction) forControlEvents:UIControlEventTouchUpInside];
-    [_contentView addSubview:resetBtn];
-    y += 50;
-
-    _contentView.frame = CGRectMake(0, 0, width, y);
-    _scrollView.contentSize = CGSizeMake(width, y);
+- (void)saveTapped {
+    [self dismissKeyboard];
+    [self saveUIToConfig];
+    [[TypelessHostBridge sharedBridge] refreshPipSettingIfActive];
+    [self showAlertTitle:@"配置已保存" message:@"语音模型与文本模型配置已生效，并在键盘端同步。"];
 }
 
-- (UIView *)createCardWithY:(CGFloat)y width:(CGFloat)width height:(CGFloat)height {
-    UIView *card = [[UIView alloc] initWithFrame:CGRectMake(16, y, width, height)];
-    card.backgroundColor = [self cardBackgroundColorForTheme];
-    card.layer.cornerRadius = 12;
-    card.layer.masksToBounds = YES;
-    card.layer.borderWidth = 0.5;
-    if (@available(iOS 13.0, *)) {
-        card.layer.borderColor = [UIColor separatorColor].CGColor;
-    } else {
-        card.layer.borderColor = [UIColor colorWithWhite:0.85 alpha:1.0].CGColor;
-    }
-    [_contentView addSubview:card];
-    return card;
+- (void)resetTapped {
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"恢复默认配置"
+                                                                message:@"将清空自定义的语音与文本 API 设置并还原默认 Prompt，确认继续？"
+                                                         preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"确认重置" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+        [[TypelessConfig sharedConfig] resetToDefaults];
+        [self loadConfigIntoUI];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
-- (UITextField *)addFieldToCard:(UIView *)card y:(CGFloat *)y label:(NSString *)label placeholder:(NSString *)placeholder width:(CGFloat)width hasPaste:(BOOL)hasPaste {
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(14, *y, width - 28, 14)];
-    lbl.text = label;
-    lbl.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightMedium];
-    lbl.textColor = TypelessSecondaryLabelColor();
-    [card addSubview:lbl];
-
-    CGFloat tfW = hasPaste ? (width - 28 - 56) : (width - 28);
-    UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(14, *y + 16, tfW, 30)];
-    tf.placeholder = placeholder;
-    tf.font = [UIFont systemFontOfSize:13];
-    tf.layer.cornerRadius = 6;
-    tf.layer.borderWidth = 0.5;
-    tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    tf.autocorrectionType = UITextAutocorrectionTypeNo;
-    tf.clearButtonMode = UITextFieldViewModeWhileEditing;
-    tf.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 8, 30)];
-    tf.leftViewMode = UITextFieldViewModeAlways;
-    if (@available(iOS 13.0, *)) {
-        tf.backgroundColor = [UIColor tertiarySystemGroupedBackgroundColor];
-        tf.layer.borderColor = [UIColor separatorColor].CGColor;
+- (void)keepAliveSwitchChanged:(UISwitch *)sw {
+    if (sw.on) {
+        [[TypelessHostBridge sharedBridge] startKeepAliveAndShowToast:NO];
     } else {
-        tf.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1.0];
-        tf.layer.borderColor = [UIColor colorWithWhite:0.8 alpha:1.0].CGColor;
+        [[TypelessHostBridge sharedBridge] stopKeepAlive];
     }
-    tf.delegate = self;
-    [card addSubview:tf];
-
-    if (hasPaste) {
-        UIButton *pBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        pBtn.frame = CGRectMake(width - 14 - 50, *y + 16, 50, 30);
-        [pBtn setTitle:@"粘贴" forState:UIControlStateNormal];
-        pBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-        objc_setAssociatedObject(pBtn, "targetField", tf, OBJC_ASSOCIATION_ASSIGN);
-        [pBtn addTarget:self action:@selector(pasteIntoField:) forControlEvents:UIControlEventTouchUpInside];
-        [card addSubview:pBtn];
-    }
-
-    *y += 58;
-    return tf;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self refreshBridgeStatusUI];
+    });
 }
 
-- (void)pasteIntoField:(UIButton *)sender {
-    UITextField *tf = objc_getAssociatedObject(sender, "targetField");
-    if (tf) {
-        NSString *clip = [UIPasteboard generalPasteboard].string ?: @"";
-        NSString *clean = [clip stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (clean.length > 0) {
-            tf.text = clean;
+- (void)pipSwitchChanged:(UISwitch *)sw {
+    [TypelessConfig sharedConfig].pipKeepAliveEnabled = sw.on;
+    [[TypelessConfig sharedConfig] save];
+    [[TypelessHostBridge sharedBridge] refreshPipSettingIfActive];
+    if (sw.on && ![TypelessHostBridge sharedBridge].isKeepAliveActive) {
+        self.keepAliveSwitch.on = YES;
+        [[TypelessHostBridge sharedBridge] startKeepAliveAndShowToast:NO];
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self refreshBridgeStatusUI];
+    });
+}
+
+- (void)requestPermissionsTapped {
+    [[AVAudioSession sharedInstance] requestRecordPermission:^(BOOL micGranted) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            Class sfCls = NSClassFromString(@"SFSpeechRecognizer");
+            if (sfCls && [sfCls respondsToSelector:@selector(requestAuthorization:)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                [sfCls requestAuthorization:^(SFSpeechRecognizerAuthorizationStatus status) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [self refreshBridgeStatusUI];
+                        NSString *msg = [NSString stringWithFormat:@"麦克风：%@\nApple 语音识别：%@",
+                                         micGranted ? @"已授权" : @"未授权（请前往系统设置-Gboard开启）",
+                                         ((NSInteger)status == 3) ? @"已授权" : @"未授权或不可用"];
+                        [self showAlertTitle:@"权限状态" message:msg];
+                    });
+                }];
+#pragma clang diagnostic pop
+            } else {
+                [self refreshBridgeStatusUI];
+                [self showAlertTitle:@"麦克风权限" message:micGranted ? @"麦克风已授权" : @"麦克风未授权，请在系统设置中开启"];
+            }
+        });
+    }];
+}
+
+- (void)diagnoseBridgeTapped {
+    TypelessHostBridge *bridge = [TypelessHostBridge sharedBridge];
+    TypelessConfig *cfg = [TypelessConfig sharedConfig];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    BOOL micOK = ([[AVAudioSession sharedInstance] recordPermission] == AVAudioSessionRecordPermissionGranted);
+#pragma clang diagnostic pop
+    Class sfCls = NSClassFromString(@"SFSpeechRecognizer");
+    NSInteger sfStatus = sfCls ? (NSInteger)[sfCls authorizationStatus] : -1;
+
+    NSString *report = [NSString stringWithFormat:
+                        @"• 保活总开关：%@\n• 127.0.0.1 本地桥接：%@\n• PiP 画中画：%@\n• AppGroup 共享：%@\n• 麦克风权限：%@\n• 系统语音识别：%@\n\n提示：只要开启了“后台语音保活”且授予了麦克风权限（及键盘“允许完全访问”），即使证书没有 AppGroup 权限也可通过 127.0.0.1 桥接免切录音。",
+                        bridge.isKeepAliveActive ? @"运行中" : @"未开启",
+                        bridge.isLoopbackServerActive ? @"已监听 48912 端口" : @"未监听",
+                        bridge.isPipActive ? @"活跃中" : (cfg.pipKeepAliveEnabled ? @"就绪（切出后台时自动触发）" : @"已关闭"),
+                        cfg.hasSharedAppGroup ? (cfg.detectedAppGroupIdentifier ?: @"可用") : @"无（已启用本地直连）",
+                        micOK ? @"已授权" : @"未授权",
+                        (sfStatus == 3) ? @"已授权" : @"未授权"];
+    [self showAlertTitle:@"保活与桥接诊断" message:report];
+}
+
+- (void)asrEngineChanged:(UISegmentedControl *)seg {
+    [self updateAsrCloudVisibility];
+}
+
+- (void)asrPresetTapped:(UIButton *)btn {
+    self.asrEngineSegment.selectedSegmentIndex = 1;
+    [self updateAsrCloudVisibility];
+    switch (btn.tag) {
+        case 0:
+            self.asrUrlField.text = @"https://api.openai.com/v1";
+            self.asrModelField.text = @"whisper-1";
+            break;
+        case 1:
+            self.asrUrlField.text = @"https://api.groq.com/openai/v1";
+            self.asrModelField.text = @"whisper-large-v3-turbo";
+            break;
+        case 2:
+            self.asrUrlField.text = @"https://api.siliconflow.cn/v1";
+            self.asrModelField.text = @"FunAudioLLM/SenseVoiceSmall";
+            break;
+        default:
+            break;
+    }
+}
+
+- (void)asrModelChipTapped:(UIButton *)btn {
+    NSString *t = [btn titleForState:UIControlStateNormal];
+    if (t.length > 0) self.asrModelField.text = t;
+}
+
+- (void)copyAsrToLlmTapped {
+    if (self.asrUrlField.text.length > 0) self.llmUrlField.text = self.asrUrlField.text;
+    if (self.asrKeyField.text.length > 0) self.llmKeyField.text = self.asrKeyField.text;
+    self.llmTestResultLabel.hidden = NO;
+    self.llmTestResultLabel.textColor = [UIColor colorWithRed:0.06 green:0.55 blue:0.40 alpha:1.0];
+    self.llmTestResultLabel.text = @"已将语音 Base URL 与 API Key 复制到文本模型配置（别忘了点击保存）。";
+}
+
+- (void)llmPresetTapped:(UIButton *)btn {
+    switch (btn.tag) {
+        case 0:
+            self.llmUrlField.text = @"https://api.openai.com/v1";
+            self.llmModelField.text = @"gpt-4o-mini";
+            break;
+        case 1:
+            self.llmUrlField.text = @"https://api.deepseek.com/v1";
+            self.llmModelField.text = @"deepseek-chat";
+            break;
+        case 2:
+            self.llmUrlField.text = @"https://api.groq.com/openai/v1";
+            self.llmModelField.text = @"llama-3.3-70b-versatile";
+            break;
+        case 3:
+            self.llmUrlField.text = @"https://api.siliconflow.cn/v1";
+            self.llmModelField.text = @"Qwen/Qwen2.5-7B-Instruct";
+            break;
+        default:
+            break;
+    }
+}
+
+- (void)llmModelChipTapped:(UIButton *)btn {
+    NSString *t = [btn titleForState:UIControlStateNormal];
+    if (t.length > 0) self.llmModelField.text = t;
+}
+
+- (void)smartCleanupChanged:(UISwitch *)sw {}
+
+- (void)promptModeChanged:(UISegmentedControl *)seg {
+    if (self.activePromptIndex >= 0 && self.activePromptIndex < (NSInteger)self.draftPrompts.count) {
+        self.draftPrompts[self.activePromptIndex] = self.promptTextView.text ?: @"";
+    }
+    self.activePromptIndex = seg.selectedSegmentIndex;
+    self.promptTextView.text = self.draftPrompts[self.activePromptIndex];
+}
+
+- (void)toggleSecureField:(UIButton *)btn {
+    UIView *wrap = btn.superview;
+    for (UIView *sub in wrap.subviews) {
+        if ([sub isKindOfClass:[UITextField class]]) {
+            UITextField *tf = (UITextField *)sub;
+            tf.secureTextEntry = !tf.secureTextEntry;
+            if (@available(iOS 13.0, *)) {
+                [btn setImage:[UIImage systemImageNamed:(tf.secureTextEntry ? @"eye" : @"eye.slash")] forState:UIControlStateNormal];
+            }
+            break;
         }
     }
 }
 
-- (void)reloadConfigValues {
-    TypelessConfig *cfg = [TypelessConfig sharedConfig];
-    _asrEngineSegment.selectedSegmentIndex = cfg.useAppleASR ? 1 : 0;
-    _urlField.text = cfg.baseURL ?: @"";
-    _keyField.text = cfg.apiKey ?: @"";
-    _asrField.text = cfg.asrModel ?: @"";
-    _llmField.text = cfg.llmModel ?: @"";
-    _promptTextView.text = cfg.customPrompt ?: @"";
-}
-
-- (void)presetTapped:(UIButton *)sender {
-    switch (sender.tag) {
-        case 200: // OpenAI
-            _urlField.text = @"https://api.openai.com/v1";
-            _asrField.text = @"whisper-1";
-            _llmField.text = @"gpt-4o-mini";
-            _asrEngineSegment.selectedSegmentIndex = 0;
+- (void)pasteIntoSiblingField:(UIButton *)btn {
+    NSString *clip = [UIPasteboard generalPasteboard].string;
+    if (clip.length == 0) return;
+    UIView *wrap = btn.superview;
+    for (UIView *sub in wrap.subviews) {
+        if ([sub isKindOfClass:[UITextField class]]) {
+            ((UITextField *)sub).text = [clip stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
             break;
-        case 201: // Groq
-            _urlField.text = @"https://api.groq.com/openai/v1";
-            _asrField.text = @"whisper-large-v3-turbo";
-            _llmField.text = @"llama-3.1-8b-instant";
-            _asrEngineSegment.selectedSegmentIndex = 0;
-            break;
-        case 202: // DeepSeek
-            _urlField.text = @"https://api.deepseek.com/v1";
-            _asrField.text = @"";
-            _llmField.text = @"deepseek-chat";
-            _asrEngineSegment.selectedSegmentIndex = 1;
-            break;
-        case 203: // SiliconFlow
-            _urlField.text = @"https://api.siliconflow.cn/v1";
-            _asrField.text = @"FunAudioLLM/SenseVoiceSmall";
-            _llmField.text = @"deepseek-ai/DeepSeek-V2.5";
-            _asrEngineSegment.selectedSegmentIndex = 0;
-            break;
+        }
     }
 }
 
-- (void)testApiConnection {
-    NSString *base = [_urlField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    NSString *key = [_keyField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    NSString *model = [_llmField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+#pragma mark - Connectivity Tests (ASR & LLM Separate)
 
-    if (key.length == 0) {
-        _testResultLabel.textColor = [UIColor systemOrangeColor];
-        _testResultLabel.text = @"未填写 API Key，当前模式将直接使用 Apple 本地免费听写";
+- (void)testAsrTapped {
+    [self dismissKeyboard];
+    if (self.asrEngineSegment.selectedSegmentIndex == 0) {
+        Class sfCls = NSClassFromString(@"SFSpeechRecognizer");
+        SFSpeechRecognizer *rec = sfCls ? [[sfCls alloc] initWithLocale:[NSLocale localeWithLocaleIdentifier:@"zh_CN"]] : nil;
+        self.asrTestResultLabel.hidden = NO;
+        BOOL ok = (rec && rec.isAvailable);
+        self.asrTestResultLabel.textColor = ok ? [UIColor colorWithRed:0.06 green:0.55 blue:0.40 alpha:1.0] : [UIColor systemRedColor];
+        self.asrTestResultLabel.text = ok ? @"Apple 本地语音识别器就绪可用！" : @"Apple 本地识别器当前不可用，可先点击“授权麦克风/识别”或切换 Whisper 云端。";
         return;
     }
 
-    [_testSpinner startAnimating];
-    _testBtn.enabled = NO;
-    _testResultLabel.textColor = TypelessSecondaryLabelColor();
-    _testResultLabel.text = @"正在连接测试...";
+    NSString *base = [self.asrUrlField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    while ([base hasSuffix:@"/"]) base = [base substringToIndex:base.length - 1];
+    NSString *key = [self.asrKeyField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (base.length == 0 || key.length == 0) {
+        self.asrTestResultLabel.hidden = NO;
+        self.asrTestResultLabel.textColor = [UIColor systemRedColor];
+        self.asrTestResultLabel.text = @"请先填写语音 Base URL 和 API Key";
+        return;
+    }
 
-    NSString *cleanBase = [base stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
-    NSURL *url = [NSURL URLWithString:[cleanBase stringByAppendingString:@"/chat/completions"]];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-    req.HTTPMethod = @"POST";
-    req.timeoutInterval = 10.0;
+    self.asrTestResultLabel.hidden = NO;
+    self.asrTestResultLabel.textColor = [UIColor secondaryLabelColor];
+    self.asrTestResultLabel.text = @"正在检测语音接口...";
+
+    NSString *urlStr = [base stringByAppendingString:@"/models"];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
+    req.timeoutInterval = 12.0;
     [req setValue:[NSString stringWithFormat:@"Bearer %@", key] forHTTPHeaderField:@"Authorization"];
-    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
 
-    NSDictionary *payload = @{
-        @"model": model.length > 0 ? model : @"gpt-4o-mini",
-        @"messages": @[@{@"role": @"user", @"content": @"hi"}],
-        @"max_tokens": @(5)
-    };
-    req.HTTPBody = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
-
+    CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
     [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.testSpinner stopAnimating];
-            self.testBtn.enabled = YES;
-
+            NSInteger code = [(NSHTTPURLResponse *)response statusCode];
+            int ms = (int)((CFAbsoluteTimeGetCurrent() - start) * 1000.0);
             if (error) {
-                self.testResultLabel.textColor = [UIColor systemRedColor];
-                self.testResultLabel.text = [NSString stringWithFormat:@"连接失败: %@", error.localizedDescription];
-                return;
-            }
-
-            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
-            if (httpResp.statusCode == 200) {
-                self.testResultLabel.textColor = [UIColor systemGreenColor];
-                self.testResultLabel.text = @"✅ API 连接成功！大模型正常响应。";
+                self.asrTestResultLabel.textColor = [UIColor systemRedColor];
+                self.asrTestResultLabel.text = [NSString stringWithFormat:@"连接失败：%@", error.localizedDescription];
+            } else if (code >= 200 && code < 300) {
+                self.asrTestResultLabel.textColor = [UIColor colorWithRed:0.06 green:0.55 blue:0.40 alpha:1.0];
+                self.asrTestResultLabel.text = [NSString stringWithFormat:@"语音接口鉴权成功（HTTP %ld · %dms）", (long)code, ms];
             } else {
-                self.testResultLabel.textColor = [UIColor systemOrangeColor];
-                self.testResultLabel.text = [NSString stringWithFormat:@"接口返回状态码 %ld，请检查 Key 与模型名称", (long)httpResp.statusCode];
+                NSString *body = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
+                self.asrTestResultLabel.textColor = [UIColor systemRedColor];
+                self.asrTestResultLabel.text = [NSString stringWithFormat:@"HTTP %ld：%@", (long)code, [body substringToIndex:MIN(body.length, (NSUInteger)120)]];
             }
         });
     }] resume];
 }
 
-- (void)saveAction {
+- (void)testLlmTapped {
+    [self dismissKeyboard];
+    NSString *base = [self.llmUrlField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    while ([base hasSuffix:@"/"]) base = [base substringToIndex:base.length - 1];
+    NSString *key = [self.llmKeyField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *model = [self.llmModelField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (base.length == 0 || key.length == 0 || model.length == 0) {
+        self.llmTestResultLabel.hidden = NO;
+        self.llmTestResultLabel.textColor = [UIColor systemRedColor];
+        self.llmTestResultLabel.text = @"请先完整填写文本 Base URL、API Key 与 Model ID";
+        return;
+    }
+
+    self.llmTestResultLabel.hidden = NO;
+    self.llmTestResultLabel.textColor = [UIColor secondaryLabelColor];
+    self.llmTestResultLabel.text = @"正在测试对话模型...";
+
+    NSString *urlStr = [base stringByAppendingString:@"/chat/completions"];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
+    req.HTTPMethod = @"POST";
+    req.timeoutInterval = 15.0;
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:[NSString stringWithFormat:@"Bearer %@", key] forHTTPHeaderField:@"Authorization"];
+    NSDictionary *payload = @{
+        @"model": model,
+        @"messages": @[@{@"role": @"user", @"content": @"Reply with one word: ok"}],
+        @"max_tokens": @(10),
+        @"temperature": @(0)
+    };
+    req.HTTPBody = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+
+    CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSInteger code = [(NSHTTPURLResponse *)response statusCode];
+            int ms = (int)((CFAbsoluteTimeGetCurrent() - start) * 1000.0);
+            if (error) {
+                self.llmTestResultLabel.textColor = [UIColor systemRedColor];
+                self.llmTestResultLabel.text = [NSString stringWithFormat:@"连接失败：%@", error.localizedDescription];
+            } else if (code >= 200 && code < 300 && data) {
+                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                NSArray *choices = [json isKindOfClass:[NSDictionary class]] ? json[@"choices"] : nil;
+                NSString *reply = choices.firstObject[@"message"][@"content"] ?: @"ok";
+                self.llmTestResultLabel.textColor = [UIColor colorWithRed:0.06 green:0.55 blue:0.40 alpha:1.0];
+                self.llmTestResultLabel.text = [NSString stringWithFormat:@"连通成功（HTTP %ld · %dms）返回：%@", (long)code, ms, [reply stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]];
+            } else {
+                NSString *body = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
+                self.llmTestResultLabel.textColor = [UIColor systemRedColor];
+                self.llmTestResultLabel.text = [NSString stringWithFormat:@"HTTP %ld：%@", (long)code, [body substringToIndex:MIN(body.length, (NSUInteger)120)]];
+            }
+        });
+    }] resume];
+}
+
+#pragma mark - Keyboard & Alerts
+
+- (void)dismissKeyboard {
     [self.view endEditing:YES];
-    TypelessConfig *cfg = [TypelessConfig sharedConfig];
-    cfg.useAppleASR = (_asrEngineSegment.selectedSegmentIndex == 1);
-    cfg.baseURL = [_urlField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    cfg.apiKey = [_keyField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    cfg.asrModel = [_asrField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    cfg.llmModel = [_llmField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (_promptTextView.text.length > 0) {
-        cfg.customPrompt = [_promptTextView.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    }
-    [cfg save];
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功"
-                                                                   message:([[TypelessConfig sharedConfig] hasSharedAppGroup]
-                                                                             ? @"AI 语音与模型配置已保存到共享容器，键盘已实时同步。"
-                                                                             : @"配置已保存（提示：当前未检测到共享 AppGroup，若键盘未同步也可直接在键盘浮层内点「模型」设置）。")
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)refreshKeepAliveUI {
-    BOOL alive = [TypelessHostBridge sharedBridge].isKeepAliveActive;
-    BOOL hasGroup = [[TypelessConfig sharedConfig] hasSharedAppGroup];
-
-    _bridgeStatusLabel.text = alive ? @"● 运行中" : @"○ 未开启";
-    _bridgeStatusLabel.textColor = alive ? [UIColor systemGreenColor] : [UIColor systemOrangeColor];
-
-    _syncStatusLabel.text = hasGroup
-        ? @"共享通信正常：开启保活后可彻底解决键盘录音 561145187 限制。"
-        : @"⚠️ 未检测到 AppGroup 共享（请开启“允许完全访问”并在签名时保留 AppGroup）。";
-
-    if (alive) {
-        [_bridgeToggleBtn setTitle:@"关闭后台语音保活" forState:UIControlStateNormal];
-        [_bridgeToggleBtn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
-        _bridgeToggleBtn.backgroundColor = [[UIColor systemRedColor] colorWithAlphaComponent:0.1];
-    } else {
-        [_bridgeToggleBtn setTitle:@"一键开启后台语音保活" forState:UIControlStateNormal];
-        [_bridgeToggleBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        _bridgeToggleBtn.backgroundColor = [UIColor systemBlueColor];
-    }
-}
-
-- (void)toggleKeepAliveAction {
-    TypelessHostBridge *bridge = [TypelessHostBridge sharedBridge];
-    if (bridge.isKeepAliveActive) {
-        [bridge stopKeepAlive];
-    } else {
-        [bridge startKeepAliveAndShowToast:NO];
-    }
-    [self refreshKeepAliveUI];
-}
-
-- (void)resetAction {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"恢复默认"
-                                                                   message:@"确定将所有 AI 语音设置恢复为默认值吗？"
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"恢复" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-        [[TypelessConfig sharedConfig] resetToDefaults];
-        [self reloadConfigValues];
-        self.testResultLabel.text = @"";
-    }]];
-    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
     [textField resignFirstResponder];
     return YES;
+}
+
+- (void)keyboardWillChange:(NSNotification *)note {
+    CGRect kbFrame = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+    CGRect local = [self.view convertRect:kbFrame fromView:nil];
+    CGFloat overlap = MAX(0, CGRectGetMaxY(self.view.bounds) - CGRectGetMinY(local));
+    self.scrollView.contentInset = UIEdgeInsetsMake(0, 0, overlap > 0 ? overlap + 12.0 : 0, 0);
+    self.scrollView.scrollIndicatorInsets = self.scrollView.contentInset;
+}
+
+- (void)showAlertTitle:(NSString *)title message:(NSString *)msg {
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:title message:msg preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 @end
