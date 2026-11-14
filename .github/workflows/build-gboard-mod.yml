@@ -1,0 +1,108 @@
+name: Build & Package Gboard Lintype Mod
+
+on:
+  push:
+    paths:
+      - 'GboardMod/**'
+      - 'scripts/patch_gboard_ipa.py'
+      - '.github/workflows/build-gboard-mod.yml'
+  workflow_dispatch:
+
+jobs:
+  build-gboard:
+    name: Compile Dylib & Patch Gboard IPA
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare directories
+        run: |
+          mkdir -p build
+
+      - name: Download base Gboard IPA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Downloading Gboard_2.3.19.ipa from release assets..."
+          gh release download gboard-base-assets -p "Gboard_2.3.19.ipa" -D build
+          ls -lh build/Gboard_2.3.19.ipa
+
+      - name: Compile libLintypeGboard.dylib
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 \
+            -target arm64-apple-ios12.0 \
+            -dynamiclib \
+            -fobjc-arc \
+            -O2 \
+            -I GboardMod \
+            -framework Foundation \
+            -framework UIKit \
+            -framework CoreGraphics \
+            -framework QuartzCore \
+            -framework AVFoundation \
+            -framework Speech \
+            -install_name @rpath/libLintypeGboard.dylib \
+            -o build/libLintypeGboard.dylib \
+            GboardMod/LintypeVoiceOverlayView.m \
+            GboardMod/LintypeVoiceManager.m \
+            GboardMod/GboardNativeTheme.m \
+            GboardMod/LintypeGboard.m
+
+          file build/libLintypeGboard.dylib
+          ls -lh build/libLintypeGboard.dylib
+
+      - name: Patch & Repackage Gboard IPA
+        run: |
+          python3 scripts/patch_gboard_ipa.py \
+            build/Gboard_2.3.19.ipa \
+            build/libLintypeGboard.dylib \
+            build/Gboard-Lintype-unsigned.ipa
+
+          ls -lh build/Gboard-Lintype-unsigned.ipa
+          shasum -a 256 build/Gboard-Lintype-unsigned.ipa
+
+      - name: Verify Patched IPA Contents
+        run: |
+          unzip -l build/Gboard-Lintype-unsigned.ipa | grep -E "libLintypeGboard.dylib|Gboard.appex"
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gboard-Lintype-unsigned-ipa
+          path: build/Gboard-Lintype-unsigned.ipa
+          retention-days: 30
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="v1.0.0-gboard"
+          gh release delete "$TAG_NAME" -y 2>/dev/null || true
+          git tag -d "$TAG_NAME" 2>/dev/null || true
+          git push origin :refs/tags/"$TAG_NAME" 2>/dev/null || true
+
+          gh release create "$TAG_NAME" build/Gboard-Lintype-unsigned.ipa \
+            --title "Gboard + Lintype 语音输入 & iOS 原生九宫格定制版" \
+            --notes "本版本为 Gboard 2.3.19 深度定制版（支持全能签 ESign / 巨魔 TrollStore 签名安装）：
+          1. 深度整合 Lintype AI 实时语音输入功能（支持 iOS 本地与高精度实时识别，带动态波形与快捷上屏）。
+          2. 优化九宫格按键皮肤为 iOS 原生风格（白色按键、原生灰功能键、系统蓝确认键、原生阴影与圆角）。
+          3. 纯净候选词栏：去除了前置序号干扰数字，采用原生字号与清晰排版。"
+
+      - name: Deploy to GitHub Pages
+        run: |
+          mkdir -p /tmp/ghpages-deploy
+          git clone --branch gh-pages "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" /tmp/ghpages-deploy || {
+            mkdir -p /tmp/ghpages-deploy
+            cd /tmp/ghpages-deploy
+            git init
+            git checkout -b gh-pages
+            git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          }
+          cp build/Gboard-Lintype-unsigned.ipa /tmp/ghpages-deploy/Gboard-Lintype-unsigned.ipa
+          cd /tmp/ghpages-deploy
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Gboard-Lintype-unsigned.ipa
+          git commit -m "Deploy Gboard-Lintype-unsigned.ipa" || true
+          git push -u origin gh-pages --force
