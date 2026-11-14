@@ -1,5 +1,13 @@
 #import "TypelessAppSettingsViewController.h"
 #import "TypelessConfig.h"
+#import <objc/runtime.h>
+
+static UIColor *TypelessSecondaryLabelColor(void) {
+    if (@available(iOS 13.0, *)) {
+        return [UIColor secondaryLabelColor];
+    }
+    return [UIColor grayColor];
+}
 
 @interface TypelessAppSettingsViewController () <UITextFieldDelegate>
 
@@ -198,7 +206,7 @@
     UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(14, *y, width - 28, 14)];
     lbl.text = label;
     lbl.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightMedium];
-    lbl.textColor = [UIColor secondaryLabelColor];
+    lbl.textColor = TypelessSecondaryLabelColor();
     [card addSubview:lbl];
 
     CGFloat tfW = hasPaste ? (width - 28 - 56) : (width - 28);
@@ -299,7 +307,7 @@
 
     [_testSpinner startAnimating];
     _testBtn.enabled = NO;
-    _testResultLabel.textColor = [UIColor secondaryLabelColor];
+    _testResultLabel.textColor = TypelessSecondaryLabelColor();
     _testResultLabel.text = @"正在连接测试...";
 
     NSString *cleanBase = [base stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];

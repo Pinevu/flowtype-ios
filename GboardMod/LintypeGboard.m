@@ -163,12 +163,16 @@ static id my_mainMenuPageDescriptor(id self, SEL _cmd) {
         Class itemClass = objc_getClass("GKBSettingsItem");
         if (!itemClass) return page;
 
-        id aiItem = [[itemClass alloc] performSelector:@selector(initWithType:settingID:title:accessibilityIdentifier:key:)
-                                            withObject:(id)(intptr_t)1
-                                            withObject:@"SettingsMenuItemAIVoice"
-                                            withObject:@"AI 语音与模型配置"
-                                            withObject:@"SettingsMenuItemAIVoice"
-                                            withObject:@"ai_voice"];
+        typedef id (*GKBSettingsItemInitFn)(id, SEL, NSInteger, NSString *, NSString *, NSString *, NSString *);
+        SEL initSel = @selector(initWithType:settingID:title:accessibilityIdentifier:key:);
+        id aiItem = nil;
+        if ([itemClass instancesRespondToSelector:initSel]) {
+            GKBSettingsItemInitFn initFn = (GKBSettingsItemInitFn)[itemClass instanceMethodForSelector:initSel];
+            if (initFn) {
+                id rawAlloc = [itemClass alloc];
+                aiItem = initFn(rawAlloc, initSel, 1, @"SettingsMenuItemAIVoice", @"AI 语音与模型配置", @"SettingsMenuItemAIVoice", @"ai_voice");
+            }
+        }
         if (!aiItem) return page;
 
         @try {
