@@ -7,6 +7,7 @@ import zipfile
 import plistlib
 import subprocess
 import pathlib
+import json
 
 def inject_macho_load_dylib(binary_path, dylib_rpath):
     print(f"Injecting {dylib_rpath} into {binary_path}...")
@@ -43,18 +44,15 @@ def inject_macho_load_dylib(binary_path, dylib_rpath):
     new_cmd_bytes = struct.pack("<IIIIII", 0xc, new_cmdsize, 24, 2, 0x10000, 0x10000) + path_bytes
 
     if cs_offset is not None:
-        # Crucial for iOS 18: LC_CODE_SIGNATURE MUST strictly remain the LAST load command!
-        # Insert LC_LOAD_DYLIB at cs_offset, then put LC_CODE_SIGNATURE immediately after it.
         data[cs_offset:cs_offset + new_cmdsize] = new_cmd_bytes
         data[cs_offset + new_cmdsize:cs_offset + new_cmdsize + cs_size] = cs_bytes
     else:
         cmd_end = 32 + sizeofcmds
         data[cmd_end:cmd_end + new_cmdsize] = new_cmd_bytes
 
-    # Update Mach-O header
     struct.pack_into("<II", data, 16, ncmds + 1, sizeofcmds + new_cmdsize)
 
-    # Verification of load commands order
+    # Verification
     v_ncmds, v_sizeofcmds = struct.unpack_from("<II", data, 16)
     v_offset = 32
     v_cmds = []
@@ -69,7 +67,7 @@ def inject_macho_load_dylib(binary_path, dylib_rpath):
     with open(binary_path, "wb") as f:
         f.write(data)
 
-def patch_gboard(base_ipa, dylib_path, output_ipa):
+def patch_gboard(base_ipa, dylib_path, zh_zip_path, output_ipa):
     work_dir = pathlib.Path("/tmp/gboard_patch_work")
     if work_dir.exists():
         shutil.rmtree(work_dir)
@@ -86,21 +84,76 @@ def patch_gboard(base_ipa, dylib_path, output_ipa):
     assert app_dir.exists(), "Gboard.app not found in IPA"
     assert appex_dir.exists(), "Gboard.appex not found in Gboard.app"
 
-    # Place dylib in Payload/Gboard.app/Frameworks/
+    # 1. Place dylib in Payload/Gboard.app/Frameworks/
     app_fw = app_dir / "Frameworks"
     app_fw.mkdir(parents=True, exist_ok=True)
     shutil.copy2(dylib_path, app_fw / "libLintypeGboard.dylib")
 
-    # Clean any nested Frameworks directory inside appex (not permitted by iOS 18 extension rules)
     appex_fw = appex_dir / "Frameworks"
     if appex_fw.exists():
         shutil.rmtree(appex_fw)
 
-    # Inject load command into both binaries with LC_CODE_SIGNATURE strictly preserved as last
+    # 2. Inject load command into both binaries
     inject_macho_load_dylib(app_dir / "Gboard", "@rpath/libLintypeGboard.dylib")
     inject_macho_load_dylib(appex_dir / "Gboard", "@rpath/libLintypeGboard.dylib")
 
-    # Update Info.plist permissions
+    # 3. Configure languages.plist: set 9-key as DEFAULT variant for Simplified Chinese
+    lang_plist = app_fw / "gboard_framework.framework" / "GKBCommonResources.bundle" / "languages.plist"
+    if lang_plist.exists():
+        with open(lang_plist, "rb") as f:
+            pl = plistlib.load(f)
+        if "zh_hans" in pl:
+            pl["zh_hans"]["variants"] = ["nine_key_zh_hans", "qwerty_zh_hans", "wubi_zh_hans", "stroke_zh_hans"]
+            pl["zh_hans"]["default"] = True
+            print("Configured zh_hans variants with nine_key_zh_hans as default in languages.plist!")
+        with open(lang_plist, "wb") as f:
+            plistlib.dump(pl, f)
+
+    # 4. Bundle Chinese Language Model (zh_hans.zip)
+    kb_res_bundle = appex_dir / "GKBKeyboardResources.bundle"
+    if kb_res_bundle.exists() and zh_zip_path and os.path.exists(zh_zip_path):
+        print(f"Bundling {zh_zip_path} into GKBKeyboardResources.bundle...")
+        shutil.copy2(zh_zip_path, kb_res_bundle / "zh_hans.zip")
+        shutil.copy2(zh_zip_path, app_dir / "zh_hans.zip")
+
+        # Also pre-extract directly into LanguageModels in bundle
+        lm_target = app_dir / "LanguageModels"
+        lm_target.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zh_zip_path, "r") as zf:
+            zf.extractall(lm_target)
+            (lm_target / "main:zh_hans_v2").mkdir(parents=True, exist_ok=True)
+            zf.extractall(lm_target / "main:zh_hans_v2")
+
+        lm_target_appex = appex_dir / "LanguageModels"
+        lm_target_appex.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zh_zip_path, "r") as zf:
+            zf.extractall(lm_target_appex)
+            (lm_target_appex / "main:zh_hans_v2").mkdir(parents=True, exist_ok=True)
+            zf.extractall(lm_target_appex / "main:zh_hans_v2")
+
+        # Update metadata_bundled.json so Gboard knows zh_hans is locally bundled
+        meta_bundled_path = kb_res_bundle / "metadata_bundled.json"
+        if meta_bundled_path.exists():
+            with open(meta_bundled_path, "r", encoding="utf-8") as f:
+                mb_list = json.load(f)
+            has_zh = any("zh_hans" in x.get("id", "") for x in mb_list)
+            if not has_zh:
+                mb_list.append({
+                    "id": "main:zh_hans_v2",
+                    "locale": "zh_hans_CN",
+                    "description": "简体中文",
+                    "filesize": str(os.path.getsize(zh_zip_path)),
+                    "rawChecksum": "6e61af57544cbb6dbc07101aba7cf8b7",
+                    "checksum": "6e61af57544cbb6dbc07101aba7cf8b7",
+                    "url": "https://www.gstatic.com/gboard/iOS/gboard_latest/lms/zh_hans.zip",
+                    "version": 13,
+                    "compression": "zip"
+                })
+                with open(meta_bundled_path, "w", encoding="utf-8") as f:
+                    json.dump(mb_list, f, ensure_ascii=False)
+                print("Updated metadata_bundled.json with offline zh_hans_v2 entry!")
+
+    # 5. Update Info.plist permissions
     for plist_path in [app_dir / "Info.plist", appex_dir / "Info.plist"]:
         with open(plist_path, "rb") as f:
             pl = plistlib.load(f)
@@ -110,13 +163,12 @@ def patch_gboard(base_ipa, dylib_path, output_ipa):
             plistlib.dump(pl, f)
         print(f"Updated permissions in {plist_path}")
 
-    # Remove stale _CodeSignature folders
+    # 6. Remove stale _CodeSignature folders
     for p in work_dir.rglob("_CodeSignature"):
         if p.is_dir():
             shutil.rmtree(p)
 
-    # If codesign tool is present, ad-hoc sign cleanly without hardcoded Google entitlements
-    # so ESign / TrollStore can inject the user's valid certificate entitlements without AMFI mismatch
+    # 7. Ad-hoc codesign
     if shutil.which("codesign"):
         print("Ad-hoc codesigning with clean entitlements for third-party cert compatibility...")
         try:
@@ -141,7 +193,7 @@ def patch_gboard(base_ipa, dylib_path, output_ipa):
     print(f"Generated {output_path} successfully ({size} bytes, {size / 1024 / 1024:.2f} MB)")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 4:
-        print(f"Usage: {sys.argv[0]} <base_ipa> <dylib_path> <output_ipa>")
+    if len(sys.argv) < 5:
+        print(f"Usage: {sys.argv[0]} <base_ipa> <dylib_path> <zh_zip_path> <output_ipa>")
         sys.exit(1)
-    patch_gboard(sys.argv[1], sys.argv[2], sys.argv[3])
+    patch_gboard(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])

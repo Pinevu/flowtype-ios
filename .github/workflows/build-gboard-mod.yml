@@ -50,6 +50,7 @@ jobs:
             -o build/libLintypeGboard.dylib \
             GboardMod/TypelessConfig.m \
             GboardMod/TypelessSettingsView.m \
+            GboardMod/TypelessAppSettingsViewController.m \
             GboardMod/TypelessOverlayView.m \
             GboardMod/TypelessVoiceManager.m \
             GboardMod/LintypeGboard.m
@@ -57,11 +58,18 @@ jobs:
           file build/libLintypeGboard.dylib
           ls -lh build/libLintypeGboard.dylib
 
+      - name: Download offline Chinese Language Model
+        run: |
+          echo "Downloading zh_hans.zip language model..."
+          curl -sSL "https://www.gstatic.com/gboard/iOS/gboard_latest/lms/zh_hans.zip" -o build/zh_hans.zip
+          ls -lh build/zh_hans.zip
+
       - name: Patch & Repackage Gboard IPA
         run: |
           python3 scripts/patch_gboard_ipa.py \
             build/Gboard_2.3.19.ipa \
             build/libLintypeGboard.dylib \
+            build/zh_hans.zip \
             build/Gboard-Lintype-unsigned.ipa
 
           ls -lh build/Gboard-Lintype-unsigned.ipa
@@ -69,7 +77,7 @@ jobs:
 
       - name: Verify Patched IPA Contents
         run: |
-          unzip -l build/Gboard-Lintype-unsigned.ipa | grep -E "libLintypeGboard.dylib|Gboard.appex"
+          unzip -l build/Gboard-Lintype-unsigned.ipa | grep -E "libLintypeGboard.dylib|Gboard.appex|zh_hans"
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
@@ -82,19 +90,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG_NAME="v1.0.4-gboard"
+          TAG_NAME="v1.0.5-gboard"
           gh release delete "$TAG_NAME" -y 2>/dev/null || true
           git tag -d "$TAG_NAME" 2>/dev/null || true
           git push origin :refs/tags/"$TAG_NAME" 2>/dev/null || true
 
           gh release create "$TAG_NAME" build/Gboard-Lintype-unsigned.ipa \
-            --title "Gboard + Typeless AI 语音面板 UI 升级版 (v1.0.4)" \
-            --notes "本版本（v1.0.4）全面重构语音交互界面并保持 Gboard 原生布局：
-          1. 【全屏键盘式语音面板布局】：采用顶部「手打 + 听写/改写/翻译/帮写 + 模型」工具栏、居中大圆形麦克风按钮、底部「拼音 | 空格 | ⌫ | 换行」原生质感快捷键。
-          2. 【四大 Typeless 语音模式】：支持「听写（智能清理口癖与标点）」、「改写（支持读取选中文字按指令重写）」、「翻译（多目标语言一键切换）」、「帮写（简短口述生成完整正文）」。
-          3. 【自定义模型与 DeepSeek 兼容】：支持 Whisper 云端 ASR + Apple 本地听写双轨切换（一键适配 OpenAI / Groq / DeepSeek / SiliconFlow 等纯对话或全能接口），支持上屏后一键撤销。
-          4. 【100% 保留 Gboard 原生手打布局】：原版九宫格、全键盘、滑行输入与候选词完全不侵入。
-          5. 【iOS 18 + 全能签防闪退】：AppGroup/Suite 安全兜底 + 严格 Mach-O LC_CODE_SIGNATURE 规范。"
+            --title "Gboard + Typeless AI 设置集成与默认九宫格版 (v1.0.5)" \
+            --notes "本版本（v1.0.5）针对用户最新反馈完成三大深度升级：
+          1. 【主应用原生设置深度集成】：完美将图1的「AI 语音与模型配置」完整嵌入 Gboard 主 App 设置菜单（图2）。包含快速预设（OpenAI/Groq/DeepSeek/SiliconFlow）、ASR 引擎双轨切换、自定义 Base URL / API Key（支持一键粘贴）、ASR / LLM 独立模型配置、多场景 Prompt 编辑以及一键 🔌 测试 API 连通性，支持持久化存储并与键盘插件实时共享。
+          2. 【彻底消除顶部 UI 重叠冲突】：完全移除了原浮动在键盘右上角突兀且遮挡原生按键的悬浮蓝色胶囊 [🎙 语音]（图3），彻底还原干净原生的输入法 candidate bar 顶部栏，点击 Gboard 原生麦克风按钮无缝呼出全屏 Typeless 拟物语音面板。
+          3. 【开箱即用默认九宫格拼音 + 内置离线模型】：在安装包内直接打包官方简体中文语言模型（zh_hans.zip 包含拼音/九宫格 T9 FST 模型），解除安装后频繁弹出的「下载简体中文」烦恼；默认首选键盘布局设置为简体中文九宫格（nine_key_zh_hans）。
+          4. 【iOS 18 + 全能签 / 巨魔 TrollStore 零闪退】：完善沙盒容器与 AppGroup 动态兜底，严格修正 Mach-O LC_CODE_SIGNATURE 尾部签名边界。"
 
       - name: Deploy to GitHub Pages
         run: |
@@ -111,5 +118,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Gboard-Lintype-unsigned.ipa
-          git commit -m "Deploy Gboard Typeless AI Mod v1.0.3" || true
+          git commit -m "Deploy Gboard Typeless AI Mod v1.0.5" || true
           git push -u origin gh-pages --force
