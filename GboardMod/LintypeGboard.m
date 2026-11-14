@@ -615,12 +615,15 @@ static NSInteger const kHeaderVoiceBarTag = 99201;
         voiceBtn.tag = 99202;
         voiceBtn.translatesAutoresizingMaskIntoConstraints = NO;
         voiceBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         voiceBtn.contentEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 8);
         if (@available(iOS 13.0, *)) {
             UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
             [voiceBtn setImage:[UIImage systemImageNamed:@"waveform.circle.fill" withConfiguration:cfg] forState:UIControlStateNormal];
             voiceBtn.imageEdgeInsets = UIEdgeInsetsMake(0, -3, 0, 3);
         }
+#pragma clang diagnostic pop
         [voiceBtn setTitle:@"AI 语音" forState:UIControlStateNormal];
         [voiceBtn addTarget:self action:@selector(handleVoiceTap:) forControlEvents:UIControlEventTouchUpInside];
         [pill addSubview:voiceBtn];
@@ -634,7 +637,10 @@ static NSInteger const kHeaderVoiceBarTag = 99201;
         kaBtn.tag = 99204;
         kaBtn.translatesAutoresizingMaskIntoConstraints = NO;
         kaBtn.titleLabel.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightMedium];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         kaBtn.contentEdgeInsets = UIEdgeInsetsMake(0, 7, 0, 10);
+#pragma clang diagnostic pop
         [kaBtn addTarget:self action:@selector(handleKeepAliveTap:) forControlEvents:UIControlEventTouchUpInside];
         [pill addSubview:kaBtn];
 

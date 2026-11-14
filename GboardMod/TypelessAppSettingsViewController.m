@@ -343,10 +343,11 @@
         eyeBtn.tag = 7701;
         if (@available(iOS 13.0, *)) {
             [eyeBtn setImage:[UIImage systemImageNamed:@"eye"] forState:UIControlStateNormal];
+            eyeBtn.tintColor = [UIColor secondaryLabelColor];
         } else {
             [eyeBtn setTitle:@"显" forState:UIControlStateNormal];
+            eyeBtn.tintColor = [UIColor grayColor];
         }
-        eyeBtn.tintColor = [UIColor secondaryLabelColor];
         [eyeBtn addTarget:self action:@selector(toggleSecureField:) forControlEvents:UIControlEventTouchUpInside];
         [fieldWrap addSubview:eyeBtn];
 
@@ -943,7 +944,11 @@
     }
 
     self.asrTestResultLabel.hidden = NO;
-    self.asrTestResultLabel.textColor = [UIColor secondaryLabelColor];
+    if (@available(iOS 13.0, *)) {
+        self.asrTestResultLabel.textColor = [UIColor secondaryLabelColor];
+    } else {
+        self.asrTestResultLabel.textColor = [UIColor grayColor];
+    }
     self.asrTestResultLabel.text = @"正在检测语音接口...";
 
     NSString *urlStr = [base stringByAppendingString:@"/models"];
@@ -985,7 +990,11 @@
     }
 
     self.llmTestResultLabel.hidden = NO;
-    self.llmTestResultLabel.textColor = [UIColor secondaryLabelColor];
+    if (@available(iOS 13.0, *)) {
+        self.llmTestResultLabel.textColor = [UIColor secondaryLabelColor];
+    } else {
+        self.llmTestResultLabel.textColor = [UIColor grayColor];
+    }
     self.llmTestResultLabel.text = @"正在测试对话模型...";
 
     NSString *urlStr = [base stringByAppendingString:@"/chat/completions"];

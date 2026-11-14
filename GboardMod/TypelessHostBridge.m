@@ -61,6 +61,8 @@ static CFStringRef const kDarwinRecReady   = CFSTR("com.lintype.gboard.bridge.re
 @property (nonatomic, copy, nullable) TypelessBridgeRecordingCompletion extStopCompletion;
 @property (nonatomic, strong, nullable) NSTimer *extPollTimer;
 @property (nonatomic, strong, nullable) NSTimer *extStopTimeoutTimer;
+
+- (void)handleDarwinNotification:(NSString *)name;
 @end
 
 static void BridgeDarwinCallback(CFNotificationCenterRef center,
@@ -1160,7 +1162,7 @@ static NSData * _Nullable LoopbackHTTPRequest(NSString *method,
 
     if (self.extUsingHTTPBridge) {
         self.extUsingHTTPBridge = NO;
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_USER_INITIATED, 0), ^{
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
             NSDictionary *stopResp = [self fetchLoopbackJSONPath:@"/stop" method:@"POST" timeout:1.5];
             NSInteger wavStatus = 0;
             NSData *wavData = nil;

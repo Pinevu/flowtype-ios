@@ -162,13 +162,19 @@
 #pragma clang diagnostic pop
 }
 
+- (void)applyContinuousCornersToLayer:(CALayer *)layer {
+    if (@available(iOS 13.0, *)) {
+        layer.cornerCurve = kCACornerCurveContinuous;
+    }
+}
+
 - (UIButton *)makePillButtonWithFontSize:(CGFloat)fontSize weight:(UIFontWeight)weight {
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
     btn.translatesAutoresizingMaskIntoConstraints = NO;
     btn.titleLabel.font = [UIFont systemFontOfSize:fontSize weight:weight];
     btn.titleLabel.lineBreakMode = NSLineBreakByClipping;
     btn.titleLabel.numberOfLines = 1;
-    btn.layer.cornerCurve = kCACornerCurveContinuous;
+    [self applyContinuousCornersToLayer:btn.layer];
     [btn setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [btn setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     return btn;
@@ -267,7 +273,7 @@
     self.statusCardView.translatesAutoresizingMaskIntoConstraints = NO;
     self.statusCardView.backgroundColor = [TypelessOverlayView surfaceCardColor];
     self.statusCardView.layer.cornerRadius = 14.0;
-    self.statusCardView.layer.cornerCurve = kCACornerCurveContinuous;
+    [self applyContinuousCornersToLayer:self.statusCardView.layer];
     self.statusCardView.layer.borderWidth = 0.8;
     self.statusCardView.layer.borderColor = [TypelessOverlayView borderHairlineColor].CGColor;
     [self.centerStageContainer addSubview:self.statusCardView];
@@ -312,7 +318,7 @@
     self.historyContainerView.translatesAutoresizingMaskIntoConstraints = NO;
     self.historyContainerView.backgroundColor = [TypelessOverlayView surfaceCardColor];
     self.historyContainerView.layer.cornerRadius = 14.0;
-    self.historyContainerView.layer.cornerCurve = kCACornerCurveContinuous;
+    [self applyContinuousCornersToLayer:self.historyContainerView.layer];
     self.historyContainerView.layer.borderWidth = 0.8;
     self.historyContainerView.layer.borderColor = [TypelessOverlayView borderHairlineColor].CGColor;
     self.historyContainerView.hidden = YES;
@@ -489,6 +495,9 @@
     [self.bottomBarView addSubview:self.returnBtn];
 
     // Auto Layout Constraints
+    self.badgeFullTrailingConstraint = [self.statusBadgeLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.statusCardView.trailingAnchor constant:-11.0];
+    self.badgeErrorTrailingConstraint = [self.statusBadgeLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.cardSecondaryBtn.leadingAnchor constant:-6.0];
+
     [NSLayoutConstraint activateConstraints:@[
         // Row 1: Top bar
         [self.topBarView.topAnchor constraintEqualToAnchor:self.topAnchor constant:6.0],
@@ -610,9 +619,6 @@
         [self.statusCardView.trailingAnchor constraintEqualToAnchor:self.centerStageContainer.trailingAnchor],
         [self.statusCardView.bottomAnchor constraintEqualToAnchor:self.micDockView.topAnchor constant:-5.0],
 
-        self.badgeFullTrailingConstraint = [self.statusBadgeLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.statusCardView.trailingAnchor constant:-11.0];
-        self.badgeErrorTrailingConstraint = [self.statusBadgeLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.cardSecondaryBtn.leadingAnchor constant:-6.0];
-
         [self.statusBadgeLabel.topAnchor constraintEqualToAnchor:self.statusCardView.topAnchor constant:7.0],
         [self.statusBadgeLabel.leadingAnchor constraintEqualToAnchor:self.statusCardView.leadingAnchor constant:11.0],
         self.badgeFullTrailingConstraint,
@@ -667,7 +673,7 @@
     [btn setTitleColor:tc forState:UIControlStateNormal];
     btn.titleLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightMedium];
     btn.layer.cornerRadius = 8.0;
-    btn.layer.cornerCurve = kCACornerCurveContinuous;
+    [self applyContinuousCornersToLayer:btn.layer];
     btn.layer.shadowColor = [UIColor blackColor].CGColor;
     btn.layer.shadowOpacity = 0.14;
     btn.layer.shadowOffset = CGSizeMake(0, 1);
