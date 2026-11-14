@@ -188,6 +188,16 @@ final class FlowTypeTests: XCTestCase {
         let (_, cands96426) = db.queryT9Candidates(digits: "96426")
         XCTAssertFalse(cands96426.isEmpty)
         XCTAssertTrue(cands96426.contains(where: { $0.text.hasPrefix("我") }))
+
+        // 6. Fast phase (no sentence lattice) already yields exact matches instantly
+        let (_, fast64426) = db.queryT9Candidates(digits: "64426", includeSentenceDecoding: false)
+        XCTAssertEqual(fast64426.first?.text, "你好")
+        let (_, fast64) = db.queryT9Candidates(digits: "64", includeSentenceDecoding: false)
+        XCTAssertEqual(fast64.first?.text, "你")
+
+        // 7. Cancelled long input returns promptly without crashing
+        let (_, cancelled) = db.queryT9Candidates(digits: "9694264244326", isCancelled: { true })
+        XCTAssertLessThanOrEqual(cancelled.count, 40)
     }
 
     func testBackgroundCropLayoutAndOpacityConfigRoundTrip() throws {

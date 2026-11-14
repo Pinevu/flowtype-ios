@@ -49,88 +49,73 @@ public struct ManualKeyboardPanel: View {
     }
 
     private var t9IdleCandidateBar: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 0) {
+            HStack(spacing: 0) {
+                ForEach(model.t9StarterCandidates, id: \.self) { word in
+                    Button {
+                        model.insertStarterCandidate(word)
+                    } label: {
+                        Text(word)
+                            .font(.system(size: 20, weight: .regular))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 40)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Divider().frame(height: 22)
+
+            candidateChevronButton(isOpen: model.isEmoticonDrawerOpen) {
+                model.toggleEmoticonDrawer()
+            }
+        }
+    }
+
+    private var t9CandidateBar: some View {
+        HStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(model.t9StarterCandidates, id: \.self) { word in
+                HStack(spacing: 22) {
+                    ForEach(model.pinyinCandidates.prefix(24)) { cand in
                         Button {
-                            model.insertStarterCandidate(word)
+                            model.selectPinyinCandidate(cand)
                         } label: {
-                            Text(word)
-                                .font(.system(size: 17, weight: .regular))
+                            Text(cand.text)
+                                .font(.system(size: 20, weight: .regular))
                                 .foregroundStyle(.primary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
+                                .lineLimit(1)
+                                .frame(height: 40)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
                 }
+                .padding(.horizontal, 12)
             }
 
-            Divider().frame(height: 18)
+            Divider().frame(height: 22)
 
-            Button {
-                model.togglePinyinLayoutMode()
-            } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 28, height: 28)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("切换26键")
-        }
-    }
-
-    private var t9CandidateBar: some View {
-        HStack(spacing: 6) {
-            // Raw digits / locked syllable preview badge
-            Button {
-                model.commitT9AsRawDigits()
-            } label: {
-                Text(model.displayPinyin)
-                    .font(.system(size: 13, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.blue)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(Color.blue.opacity(0.14))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            .buttonStyle(.plain)
-
-            // Candidates list
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(Array(model.pinyinCandidates.prefix(20).enumerated()), id: \.element.id) { idx, cand in
-                        Button {
-                            model.selectPinyinCandidate(cand)
-                        } label: {
-                            Text(idx == 0 ? "\(cand.text)" : "\(idx + 1).\(cand.text)")
-                                .font(.system(size: 16, weight: idx == 0 ? .semibold : .regular))
-                                .foregroundStyle(idx == 0 ? Color.blue : Color.primary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(idx == 0 ? Color.blue.opacity(0.12) : Color.clear)
-                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-
-            Button {
+            candidateChevronButton(isOpen: model.isCandidateDrawerExpanded) {
                 model.triggerHaptic()
                 model.isEmoticonDrawerOpen = false
                 model.isCandidateDrawerExpanded.toggle()
-            } label: {
-                Image(systemName: model.isCandidateDrawerExpanded ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 28, height: 28)
             }
-            .buttonStyle(.plain)
         }
+    }
+
+    private func candidateChevronButton(isOpen: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: isOpen ? "chevron.up" : "chevron.down")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 40, height: 40)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var qwertyCandidateBar: some View {
@@ -334,274 +319,22 @@ public struct ManualKeyboardPanel: View {
     }
 
     private var t9KeyGrid: some View {
-        GeometryReader { geo in
-            let rowSpacing: CGFloat = 7
-            let colSpacing: CGFloat = 6
-            let totalHeight = geo.size.height
-            let rowHeight = max(36, (totalHeight - rowSpacing * 3) / 4)
-            let span2Height = rowHeight * 2 + rowSpacing
-
-            let colWidth = max(46, (geo.size.width - colSpacing * 4) / 5)
-            let span2Width = colWidth * 2 + colSpacing
-
-            HStack(alignment: .top, spacing: colSpacing) {
-                // MARK: Column 0 (Sidebar: 123 / #@¥ / ABC [2u], or Pinyin syllable picker when expanded)
-                if model.isT9PinyinPickerExpanded && !model.t9ComposingDigits.isEmpty {
-                    t9PinyinSidebar(width: colWidth, height: rowHeight * 4 + rowSpacing * 3)
-                } else {
-                    VStack(spacing: rowSpacing) {
-                        Button {
-                            model.switchLayoutPage(.numbers)
-                        } label: {
-                            t9SpecialKeyLabel("123", fontSize: 15, width: colWidth, height: rowHeight)
-                        }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            model.switchLayoutPage(.symbols)
-                        } label: {
-                            t9SpecialKeyLabel("#@¥", fontSize: 15, width: colWidth, height: rowHeight)
-                        }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            model.toggleManualLanguage()
-                        } label: {
-                            t9SpecialKeyLabel("ABC", fontSize: 16, width: colWidth, height: span2Height)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-
-                // MARK: Columns 1-3 (Punctuation + 2..9 Pinyin Keys + 选拼音 + 空格)
-                VStack(spacing: rowSpacing) {
-                    // Row 1: ,。?! | ABC | DEF
-                    HStack(spacing: colSpacing) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(keyBackgroundColor)
-                                .shadow(color: keyShadowColor, radius: 0.5, x: 0, y: 1)
-                            Text(",。?!")
-                                .font(.system(size: 16, weight: .medium))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                        }
-                        .frame(width: colWidth, height: rowHeight)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            model.handleT9PunctuationKeyTap()
-                        }
-                        .onLongPressGesture(minimumDuration: 0.35) {
-                            model.triggerHaptic()
-                            if !model.t9ComposingDigits.isEmpty {
-                                model.insertT9SyllableSeparator()
-                            } else {
-                                model.handleKeyTap("、")
-                            }
-                        }
-
-                        t9KeyButton(digit: "2", letters: "ABC", width: colWidth, height: rowHeight)
-                        t9KeyButton(digit: "3", letters: "DEF", width: colWidth, height: rowHeight)
-                    }
-
-                    // Row 2: GHI | JKL | MNO
-                    HStack(spacing: colSpacing) {
-                        t9KeyButton(digit: "4", letters: "GHI", width: colWidth, height: rowHeight)
-                        t9KeyButton(digit: "5", letters: "JKL", width: colWidth, height: rowHeight)
-                        t9KeyButton(digit: "6", letters: "MNO", width: colWidth, height: rowHeight)
-                    }
-
-                    // Row 3: PQRS | TUV | WXYZ
-                    HStack(spacing: colSpacing) {
-                        t9KeyButton(digit: "7", letters: "PQRS", width: colWidth, height: rowHeight)
-                        t9KeyButton(digit: "8", letters: "TUV", width: colWidth, height: rowHeight)
-                        t9KeyButton(digit: "9", letters: "WXYZ", width: colWidth, height: rowHeight)
-                    }
-
-                    // Row 4: 选拼音 (1 col) + 空格 (2 cols merged)
-                    HStack(spacing: colSpacing) {
-                        Button {
-                            model.toggleT9PinyinPicker()
-                        } label: {
-                            let isActive = model.isT9PinyinPickerExpanded || model.selectedT9SyllableFilter != nil
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .fill(isActive ? Color.blue.opacity(0.18) : keyBackgroundColor)
-                                    .shadow(color: keyShadowColor, radius: 0.5, x: 0, y: 1)
-                                VStack(spacing: 1) {
-                                    Text(model.selectedT9SyllableFilter ?? "选拼音")
-                                        .font(.system(size: 14, weight: isActive ? .semibold : .medium))
-                                        .foregroundStyle(isActive ? Color.blue : (model.t9ComposingDigits.isEmpty ? Color.secondary : Color.primary))
-                                        .lineLimit(1)
-                                        .minimumScaleFactor(0.7)
-                                }
-                            }
-                            .frame(width: colWidth, height: rowHeight)
-                        }
-                        .buttonStyle(.plain)
-
-                        SpacebarTrackpadKey(
-                            title: "空格",
-                            fixedWidth: span2Width,
-                            height: rowHeight,
-                            keyColor: keyBackgroundColor,
-                            onTap: { model.handleT9SpaceTap() },
-                            onTrackpadDrag: { dx in model.handleSpaceTrackpadDrag(deltaX: dx) },
-                            onTrackpadEnd: { model.resetSpaceTrackpad() }
-                        )
-                    }
-                }
-
-                // MARK: Column 4 (⌫ / ^_^ / 换行 [2u])
-                VStack(spacing: rowSpacing) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(specialKeyBackgroundColor)
-                            .shadow(color: keyShadowColor, radius: 0.5, x: 0, y: 1)
-                        Image(systemName: "delete.left")
-                            .font(.system(size: 19, weight: .medium))
-                            .foregroundStyle(.primary)
-                    }
-                    .frame(width: colWidth, height: rowHeight)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        model.handleBackspaceTap()
-                    }
-                    .onLongPressGesture(minimumDuration: 0.35, perform: {}, onPressingChanged: { pressing in
-                        if pressing {
-                            model.startContinuousBackspace()
-                        } else {
-                            model.stopContinuousBackspace()
-                        }
-                    })
-
-                    Button {
-                        model.toggleEmoticonDrawer()
-                    } label: {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(model.isEmoticonDrawerOpen ? Color.blue.opacity(0.18) : specialKeyBackgroundColor)
-                                .shadow(color: keyShadowColor, radius: 0.5, x: 0, y: 1)
-                            Text("^_^")
-                                .font(.system(size: 15, weight: .medium))
-                                .foregroundStyle(model.isEmoticonDrawerOpen ? Color.blue : Color.primary)
-                        }
-                        .frame(width: colWidth, height: rowHeight)
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        model.handleReturnTap()
-                    } label: {
-                        Text(effectiveReturnTitle)
-                            .font(.system(size: 16, weight: .semibold))
-                            .frame(width: colWidth, height: span2Height)
-                            .background(effectiveReturnColor)
-                            .foregroundStyle(effectiveReturnForeground)
-                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                            .shadow(color: keyShadowColor, radius: 0.5, x: 0, y: 1)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
+        T9KeyGridView(model: model, state: t9GridState)
+            .equatable()
     }
 
-    private func t9SpecialKeyLabel(_ title: String, fontSize: CGFloat, width: CGFloat, height: CGFloat) -> some View {
-        Text(title)
-            .font(.system(size: fontSize, weight: .medium))
-            .frame(width: width, height: height)
-            .background(specialKeyBackgroundColor)
-            .foregroundStyle(.primary)
-            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .shadow(color: keyShadowColor, radius: 0.5, x: 0, y: 1)
-    }
-
-    private func t9PinyinSidebar(width: CGFloat, height: CGFloat) -> some View {
-        VStack(spacing: 4) {
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 4) {
-                    if model.selectedT9SyllableFilter != nil {
-                        Button {
-                            model.selectT9SyllableFilter(nil)
-                        } label: {
-                            Text("重选")
-                                .font(.system(size: 12, weight: .semibold))
-                                .frame(width: width - 4, height: 28)
-                                .background(Color.orange.opacity(0.18))
-                                .foregroundStyle(.orange)
-                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    ForEach(model.t9SyllableOptions, id: \.self) { syll in
-                        let isSelected = model.selectedT9SyllableFilter == syll
-                        Button {
-                            model.selectT9SyllableFilter(syll)
-                        } label: {
-                            Text(syll)
-                                .font(.system(size: 14, weight: isSelected ? .bold : .medium))
-                                .frame(width: width - 4, height: 32)
-                                .background(isSelected ? Color.blue : keyBackgroundColor)
-                                .foregroundStyle(isSelected ? Color.white : Color.primary)
-                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    Button {
-                        model.triggerHaptic()
-                        model.insertT9SyllableSeparator()
-                    } label: {
-                        Text("分词 '")
-                            .font(.system(size: 12, weight: .medium))
-                            .frame(width: width - 4, height: 28)
-                            .background(keyBackgroundColor.opacity(0.85))
-                            .foregroundStyle(.secondary)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.vertical, 3)
-            }
-
-            Button {
-                model.toggleT9PinyinPicker()
-            } label: {
-                Text("收起")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: width - 4, height: 28)
-                    .background(Color.blue.opacity(0.16))
-                    .foregroundStyle(.blue)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .padding(.bottom, 3)
-        }
-        .frame(width: width, height: height)
-        .background(specialKeyBackgroundColor.opacity(0.95))
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .shadow(color: keyShadowColor, radius: 0.5, x: 0, y: 1)
-    }
-
-    private func t9KeyButton(digit: String, letters: String, width: CGFloat, height: CGFloat) -> some View {
-        Button {
-            model.handleT9KeyTap(digit)
-        } label: {
-            Text(letters)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .frame(width: width, height: height)
-                .background(keyBackgroundColor)
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .shadow(color: keyShadowColor, radius: 0.5, x: 0, y: 1)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(digit) \(letters)")
+    private var t9GridState: T9GridState {
+        let composing = !model.t9ComposingDigits.isEmpty
+        return T9GridState(
+            isComposing: composing,
+            isPickerExpanded: model.isT9PinyinPickerExpanded,
+            isEmoticonOpen: model.isEmoticonDrawerOpen,
+            selectedFilter: model.selectedT9SyllableFilter,
+            syllableOptions: model.isT9PinyinPickerExpanded ? model.t9SyllableOptions : [],
+            returnTitle: effectiveReturnTitle,
+            returnIsAccent: isComposingChinesePinyin || model.returnKeyLabel != "换行",
+            isTranslucent: isCustomOrTranslucentBackdrop
+        )
     }
 
     private var emoticonDrawerView: some View {
@@ -1016,23 +749,13 @@ public struct ManualKeyboardPanel: View {
         model.config.backgroundStyle != .system || model.config.backgroundOpacity < 0.98
     }
 
-    private var keyShadowColor: Color {
-        .black.opacity(colorScheme == .dark ? 0.30 : 0.14)
+    private var palette: KeyPalette {
+        KeyPalette(colorScheme: colorScheme, isTranslucent: isCustomOrTranslucentBackdrop)
     }
 
-    private var keyBackgroundColor: Color {
-        if colorScheme == .dark {
-            return Color(white: 0.29).opacity(isCustomOrTranslucentBackdrop ? 0.88 : 1.0)
-        }
-        return Color.white.opacity(isCustomOrTranslucentBackdrop ? 0.90 : 1.0)
-    }
+    private var keyBackgroundColor: Color { palette.key }
 
-    private var specialKeyBackgroundColor: Color {
-        if colorScheme == .dark {
-            return Color(white: 0.19).opacity(isCustomOrTranslucentBackdrop ? 0.86 : 1.0)
-        }
-        return Color(red: 0.68, green: 0.70, blue: 0.75).opacity(isCustomOrTranslucentBackdrop ? 0.86 : 1.0)
-    }
+    private var specialKeyBackgroundColor: Color { palette.special }
 }
 
 // MARK: - Character Key Button with Zero-Delay Touch + Keycap Popover
@@ -1091,23 +814,39 @@ private struct CharacterKeyButton: View {
 
 // MARK: - Spacebar with Tap + Long-Press Cursor Trackpad
 
-private struct SpacebarTrackpadKey: View {
+struct SpacebarTrackpadKey: View {
     let title: String
     var fixedWidth: CGFloat? = nil
     let height: CGFloat
     let keyColor: Color
+    var pressedColor: Color? = nil
+    var edgeColor: Color? = nil
     let onTap: () -> Void
     let onTrackpadDrag: (CGFloat) -> Void
     let onTrackpadEnd: () -> Void
 
     @State private var isTrackpadActive = false
+    @State private var isPressed = false
     @State private var lastDragX: CGFloat?
+
+    private var currentFill: Color {
+        if isTrackpadActive { return Color.blue.opacity(0.22) }
+        if isPressed, let pressedColor { return pressedColor }
+        return keyColor
+    }
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(isTrackpadActive ? Color.blue.opacity(0.22) : keyColor)
-                .shadow(color: .black.opacity(0.22), radius: 0.5, x: 0, y: 1)
+            if let edgeColor {
+                Capsule()
+                    .fill(edgeColor)
+                    .frame(height: 1.5)
+                    .padding(.horizontal, 3)
+                    .frame(maxHeight: .infinity, alignment: .bottom)
+                    .offset(y: 1)
+            }
+            RoundedRectangle(cornerRadius: edgeColor == nil ? 6 : 7, style: .continuous)
+                .fill(currentFill)
 
             Text(isTrackpadActive ? "◀ 滑动移动光标 ▶" : title)
                 .font(.system(size: 13, weight: .medium))
@@ -1119,6 +858,15 @@ private struct SpacebarTrackpadKey: View {
         .onTapGesture {
             onTap()
         }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    if !isPressed { isPressed = true }
+                }
+                .onEnded { _ in
+                    isPressed = false
+                }
+        )
         .simultaneousGesture(
             LongPressGesture(minimumDuration: 0.25)
                 .sequenced(before: DragGesture(minimumDistance: 0))

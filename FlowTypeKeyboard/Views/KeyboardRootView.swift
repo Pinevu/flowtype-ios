@@ -31,89 +31,20 @@ public struct KeyboardRootView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(customBackgroundView)
+        .background(
+            KeyboardBackgroundView(
+                style: model.config.backgroundStyle,
+                opacity: model.config.backgroundOpacity,
+                hex: model.config.customBackgroundHex,
+                scale: model.config.customBackgroundScale,
+                offsetX: model.config.customBackgroundOffsetX,
+                offsetY: model.config.customBackgroundOffsetY,
+                image: model.customBackgroundImage,
+                isDark: effectiveColorScheme == .dark
+            )
+            .equatable()
+        )
         .preferredColorScheme(effectiveColorScheme)
-    }
-
-    @ViewBuilder
-    private var customBackgroundView: some View {
-        ZStack {
-            switch model.config.backgroundStyle {
-            case .system:
-                backgroundSurface
-                    .opacity(model.config.backgroundOpacity)
-            case .pureDark:
-                Color.black
-                    .opacity(model.config.backgroundOpacity)
-            case .cleanLight:
-                Color.white
-                    .opacity(model.config.backgroundOpacity)
-            case .oceanBlue:
-                LinearGradient(
-                    colors: [Color(red: 0.08, green: 0.18, blue: 0.36), Color(red: 0.05, green: 0.10, blue: 0.22)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .opacity(model.config.backgroundOpacity)
-            case .neonPurple:
-                LinearGradient(
-                    colors: [Color(red: 0.28, green: 0.08, blue: 0.42), Color(red: 0.12, green: 0.04, blue: 0.28)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .opacity(model.config.backgroundOpacity)
-            case .morandiGrey:
-                Color(red: 0.45, green: 0.48, blue: 0.50)
-                    .opacity(model.config.backgroundOpacity)
-            case .cherryPink:
-                LinearGradient(
-                    colors: [Color(red: 0.98, green: 0.88, blue: 0.90), Color(red: 0.92, green: 0.76, blue: 0.82)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .opacity(model.config.backgroundOpacity)
-            case .customColor:
-                colorFromHex(model.config.customBackgroundHex)
-                    .opacity(model.config.backgroundOpacity)
-            case .customImage:
-                if let data = model.customBackgroundImageData,
-                   let uiImg = UIImage(data: data) {
-                    GeometryReader { geo in
-                        let layout = AIConfiguration.computeBackgroundCropLayout(
-                            imageWidth: Double(uiImg.size.width),
-                            imageHeight: Double(uiImg.size.height),
-                            containerWidth: Double(geo.size.width),
-                            containerHeight: Double(geo.size.height),
-                            scale: model.config.customBackgroundScale,
-                            normalizedOffsetX: model.config.customBackgroundOffsetX,
-                            normalizedOffsetY: model.config.customBackgroundOffsetY
-                        )
-
-                        Image(uiImage: uiImg)
-                            .resizable()
-                            .frame(width: layout.drawWidth, height: layout.drawHeight)
-                            .offset(x: layout.offsetX, y: layout.offsetY)
-                            .frame(width: geo.size.width, height: geo.size.height)
-                            .clipped()
-                            .opacity(model.config.backgroundOpacity)
-                    }
-                } else {
-                    colorFromHex(model.config.customBackgroundHex)
-                        .opacity(model.config.backgroundOpacity)
-                }
-            }
-        }
-    }
-
-    private func colorFromHex(_ hex: String) -> Color {
-        let rgba = AIConfiguration.parseHexRGBA(hex)
-        return Color(.sRGB, red: rgba.r, green: rgba.g, blue: rgba.b, opacity: rgba.a)
-    }
-
-    private var backgroundSurface: Color {
-        effectiveColorScheme == .dark
-            ? Color(red: 0.11, green: 0.11, blue: 0.13)
-            : Color(red: 0.83, green: 0.84, blue: 0.87)
     }
 
     // MARK: - Top Toolbar
@@ -262,5 +193,103 @@ public struct KeyboardRootView: View {
                     }
                 }
             }
+    }
+}
+
+
+// MARK: - Background (isolated + equatable so keystrokes never re-render or re-decode it)
+
+struct KeyboardBackgroundView: View, Equatable {
+    let style: KeyboardBackgroundStyle
+    let opacity: Double
+    let hex: String
+    let scale: Double
+    let offsetX: Double
+    let offsetY: Double
+    let image: UIImage?
+    let isDark: Bool
+
+    static func == (lhs: KeyboardBackgroundView, rhs: KeyboardBackgroundView) -> Bool {
+        lhs.style == rhs.style
+            && lhs.opacity == rhs.opacity
+            && lhs.hex == rhs.hex
+            && lhs.scale == rhs.scale
+            && lhs.offsetX == rhs.offsetX
+            && lhs.offsetY == rhs.offsetY
+            && lhs.image === rhs.image
+            && lhs.isDark == rhs.isDark
+    }
+
+    private var baseSurface: Color {
+        isDark
+            ? Color(red: 0.11, green: 0.11, blue: 0.13)
+            : Color(red: 0.83, green: 0.84, blue: 0.87)
+    }
+
+    private func colorFromHex(_ hex: String) -> Color {
+        let rgba = AIConfiguration.parseHexRGBA(hex)
+        return Color(.sRGB, red: rgba.r, green: rgba.g, blue: rgba.b, opacity: rgba.a)
+    }
+
+    var body: some View {
+        ZStack {
+            switch style {
+            case .system:
+                baseSurface.opacity(opacity)
+            case .pureDark:
+                Color.black.opacity(opacity)
+            case .cleanLight:
+                Color.white.opacity(opacity)
+            case .oceanBlue:
+                LinearGradient(
+                    colors: [Color(red: 0.08, green: 0.18, blue: 0.36), Color(red: 0.05, green: 0.10, blue: 0.22)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .opacity(opacity)
+            case .neonPurple:
+                LinearGradient(
+                    colors: [Color(red: 0.28, green: 0.08, blue: 0.42), Color(red: 0.12, green: 0.04, blue: 0.28)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .opacity(opacity)
+            case .morandiGrey:
+                Color(red: 0.45, green: 0.48, blue: 0.50).opacity(opacity)
+            case .cherryPink:
+                LinearGradient(
+                    colors: [Color(red: 0.98, green: 0.88, blue: 0.90), Color(red: 0.92, green: 0.76, blue: 0.82)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .opacity(opacity)
+            case .customColor:
+                colorFromHex(hex).opacity(opacity)
+            case .customImage:
+                if let uiImg = image {
+                    GeometryReader { geo in
+                        let layout = AIConfiguration.computeBackgroundCropLayout(
+                            imageWidth: Double(uiImg.size.width),
+                            imageHeight: Double(uiImg.size.height),
+                            containerWidth: Double(geo.size.width),
+                            containerHeight: Double(geo.size.height),
+                            scale: scale,
+                            normalizedOffsetX: offsetX,
+                            normalizedOffsetY: offsetY
+                        )
+
+                        Image(uiImage: uiImg)
+                            .resizable()
+                            .frame(width: layout.drawWidth, height: layout.drawHeight)
+                            .offset(x: layout.offsetX, y: layout.offsetY)
+                            .frame(width: geo.size.width, height: geo.size.height)
+                            .clipped()
+                            .opacity(opacity)
+                    }
+                } else {
+                    colorFromHex(hex).opacity(opacity)
+                }
+            }
+        }
     }
 }

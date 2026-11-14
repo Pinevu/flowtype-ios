@@ -68,8 +68,8 @@ public final class KeyboardStateModel: ObservableObject {
     @Published public var isEmoticonDrawerOpen: Bool = false
 
     // MARK: - Background Cache & Defaults
-    @Published public var customBackgroundImageData: Data?
-    public let t9StarterCandidates: [String] = ["的", "一", "我", "你", "在", "是", "了", "不", "有", "好"]
+    @Published public var customBackgroundImage: UIImage?
+    public let t9StarterCandidates: [String] = ["的", "一", "我", "你", "吗", "啊", "可以"]
 
     // MARK: - Undo State
     @Published public var canUndoLastAIInsert: Bool = false
@@ -87,6 +87,11 @@ public final class KeyboardStateModel: ObservableObject {
     private var lastDictatedText: String = ""
     private var lastInsertedLength: Int = 0
     private var lastReplacedOriginal: String = ""
+
+    private let hapticGenerator = UIImpactFeedbackGenerator(style: .light)
+    private let statusQueue = DispatchQueue(label: "com.flowtype.keyboard.status", qos: .utility)
+    private var isStatusPollInFlight = false
+    private let t9QueryToken = AtomicCounter()
 
     private var statusPollTimer: Timer?
     private var backspaceTimer: Timer?
@@ -140,8 +145,10 @@ public final class KeyboardStateModel: ObservableObject {
 
     public func refreshContextFromProxy() {
         guard let proxy = proxyProvider?() else { return }
-        selectedTextPreview = proxy.selectedText ?? ""
-        returnKeyLabel = mapReturnKeyTitle(proxy.returnKeyType)
+        let newSelected = proxy.selectedText ?? ""
+        if selectedTextPreview != newSelected { selectedTextPreview = newSelected }
+        let newReturnLabel = mapReturnKeyTitle(proxy.returnKeyType)
+        if returnKeyLabel != newReturnLabel { returnKeyLabel = newReturnLabel }
         updateAutoShiftIfNeeded()
         if manualLanguage == .english && layoutPage == .letters {
             refreshEnglishSuggestions()
@@ -159,12 +166,17 @@ public final class KeyboardStateModel: ObservableObject {
 
     public func reloadCustomBackgroundImageIfNeeded(force: Bool = false) {
         if config.backgroundStyle == .customImage {
-            if force || loadedBackgroundRevision != config.customBackgroundRevision || customBackgroundImageData == nil {
-                customBackgroundImageData = store.loadCustomBackgroundImageData()
+            if force || loadedBackgroundRevision != config.customBackgroundRevision || customBackgroundImage == nil {
+                if let data = store.loadCustomBackgroundImageData(), let decoded = UIImage(data: data) {
+                    // Decode once up-front so SwiftUI never decodes JPEG data while typing.
+                    customBackgroundImage = decoded.preparingForDisplay() ?? decoded
+                } else {
+                    customBackgroundImage = nil
+                }
                 loadedBackgroundRevision = config.customBackgroundRevision
             }
-        } else if customBackgroundImageData != nil {
-            customBackgroundImageData = nil
+        } else if customBackgroundImage != nil {
+            customBackgroundImage = nil
             loadedBackgroundRevision = -1
         }
     }
@@ -188,13 +200,21 @@ public final class KeyboardStateModel: ObservableObject {
 
     private func startHeartbeatPolling() {
         statusPollTimer?.invalidate()
-        statusPollTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+        statusPollTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                let loaded = self.store.loadStatus()
-                if loaded != self.hostStatus {
-                    self.hostStatus = loaded
-                    self.handleHostStatusUpdate(loaded)
+                guard let self, !self.isStatusPollInFlight else { return }
+                self.isStatusPollInFlight = true
+                let store = self.store
+                self.statusQueue.async { [weak self] in
+                    let loaded = store.loadStatus()
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.isStatusPollInFlight = false
+                        if loaded != self.hostStatus {
+                            self.hostStatus = loaded
+                            self.handleHostStatusUpdate(loaded)
+                        }
+                    }
                 }
             }
         }
@@ -538,6 +558,7 @@ public final class KeyboardStateModel: ObservableObject {
     }
 
     public func stopContinuousBackspace() {
+        guard backspaceTimer != nil else { return }
         backspaceTimer?.invalidate()
         backspaceTimer = nil
         refreshContextFromProxy()
@@ -661,8 +682,8 @@ public final class KeyboardStateModel: ObservableObject {
 
     public func handleT9KeyTap(_ key: String) {
         triggerHaptic()
-        statusBannerMessage = nil
-        isEmoticonDrawerOpen = false
+        if statusBannerMessage != nil { statusBannerMessage = nil }
+        if isEmoticonDrawerOpen { isEmoticonDrawerOpen = false }
 
         switch key {
         case "1":
@@ -689,8 +710,8 @@ public final class KeyboardStateModel: ObservableObject {
 
     public func handleT9PunctuationKeyTap() {
         triggerHaptic()
-        statusBannerMessage = nil
-        isEmoticonDrawerOpen = false
+        if statusBannerMessage != nil { statusBannerMessage = nil }
+        if isEmoticonDrawerOpen { isEmoticonDrawerOpen = false }
         let cycleMarks = ["，", "。", "？", "！"]
 
         if !t9ComposingDigits.isEmpty {
@@ -772,22 +793,50 @@ public final class KeyboardStateModel: ObservableObject {
 
         let words = personalWords
         let filter = selectedT9SyllableFilter
-        queryQueue.async { [weak self] in
-            guard let self else { return }
-            let (sylls, cands) = self.lexicon.queryT9Candidates(
+        let token = t9QueryToken.increment()
+        let counter = t9QueryToken
+        let lexicon = self.lexicon
+        let pureCount = digits.filter { $0 != "'" }.count
+        let needsSentencePhase = pureCount >= 3 || digits.contains("'") || (filter?.contains("'") ?? false)
+
+        let publish: @Sendable ([String], [PinyinCandidate]) -> Void = { [weak self] sylls, cands in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      counter.value == token,
+                      self.t9ComposingDigits == digits,
+                      self.selectedT9SyllableFilter == filter else { return }
+                if self.t9SyllableOptions != sylls { self.t9SyllableOptions = sylls }
+                if self.pinyinCandidates != cands { self.pinyinCandidates = cands }
+                let display = filter ?? digits
+                if self.displayPinyin != display { self.displayPinyin = display }
+            }
+        }
+
+        // Phase 1: indexed lookups only (instant). Phase 2: sentence lattice decoding, skipped if superseded.
+        queryQueue.async {
+            guard counter.value == token else { return }
+            let fast = lexicon.queryT9Candidates(
                 digits: digits,
                 pinyinFilter: filter,
                 personalWords: words,
-                limit: 40
+                limit: 40,
+                includeSentenceDecoding: false,
+                isCancelled: { counter.value != token }
             )
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.t9ComposingDigits == digits,
-                      self.selectedT9SyllableFilter == filter else { return }
-                self.t9SyllableOptions = sylls
-                self.pinyinCandidates = cands
-                self.displayPinyin = filter ?? digits
-            }
+            guard counter.value == token else { return }
+            publish(fast.syllableOptions, fast.candidates)
+
+            guard needsSentencePhase else { return }
+            let full = lexicon.queryT9Candidates(
+                digits: digits,
+                pinyinFilter: filter,
+                personalWords: words,
+                limit: 40,
+                includeSentenceDecoding: true,
+                isCancelled: { counter.value != token }
+            )
+            guard counter.value == token else { return }
+            publish(full.syllableOptions, full.candidates)
         }
     }
 
@@ -1021,7 +1070,28 @@ public final class KeyboardStateModel: ObservableObject {
 
     public func triggerHaptic() {
         guard config.hapticFeedback else { return }
-        let gen = UIImpactFeedbackGenerator(style: .light)
-        gen.impactOccurred()
+        hapticGenerator.impactOccurred()
+        hapticGenerator.prepare()
+    }
+}
+
+
+/// Thread-safe monotonically increasing token used to cancel stale background lexicon queries.
+final class AtomicCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: Int = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+
+    @discardableResult
+    func increment() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        current &+= 1
+        return current
     }
 }

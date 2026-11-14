@@ -456,7 +456,9 @@ public final class LexiconDatabase: @unchecked Sendable {
         digits: String,
         pinyinFilter: String? = nil,
         personalWords: [PersonalWord] = [],
-        limit: Int = 40
+        limit: Int = 40,
+        includeSentenceDecoding: Bool = true,
+        isCancelled: (() -> Bool)? = nil
     ) -> (syllableOptions: [String], candidates: [PinyinCandidate]) {
         let cleanDigits = digits.filter { ($0 >= "2" && $0 <= "9") || $0 == "'" }
         guard !cleanDigits.isEmpty else { return ([], []) }
@@ -577,12 +579,13 @@ public final class LexiconDatabase: @unchecked Sendable {
                             source: .singleChar
                         ))
                     }
-                } else {
+                } else if includeSentenceDecoding {
                     let decoded = decodeT9ViterbiSentences(
                         pureDigits: pureDigits,
                         obligatorySplits: obligatorySplits,
                         lockedSpans: lockedSpans,
-                        topK: 4
+                        topK: 4,
+                        isCancelled: isCancelled
                     )
                     for item in decoded {
                         appendCandidate(PinyinCandidate(
@@ -646,12 +649,13 @@ public final class LexiconDatabase: @unchecked Sendable {
             }
 
             // 4. Multi-syllable T9 Viterbi sentence decoding (full digit coverage)
-            if pureDigits.count >= 3 || !obligatorySplits.isEmpty {
+            if includeSentenceDecoding && (pureDigits.count >= 3 || !obligatorySplits.isEmpty) {
                 let decoded = decodeT9ViterbiSentences(
                     pureDigits: pureDigits,
                     obligatorySplits: obligatorySplits,
                     lockedSpans: lockedSpans,
-                    topK: 4
+                    topK: 4,
+                    isCancelled: isCancelled
                 )
                 for item in decoded {
                     appendCandidate(PinyinCandidate(
@@ -769,7 +773,8 @@ public final class LexiconDatabase: @unchecked Sendable {
         pureDigits: String,
         obligatorySplits: Set<Int>,
         lockedSpans: [(start: Int, end: Int, syllable: String)],
-        topK: Int
+        topK: Int,
+        isCancelled: (() -> Bool)? = nil
     ) -> [(text: String, pinyin: String)] {
         let chars = Array(pureDigits)
         let n = chars.count
@@ -836,6 +841,7 @@ public final class LexiconDatabase: @unchecked Sendable {
 
         // Single-syllable T9 char edges
         for start in 0..<n {
+            if isCancelled?() == true { return [] }
             for span in spansByStart[start] {
                 if let fixedSyl = span.lockedSyllable {
                     var rank = 0
@@ -861,6 +867,7 @@ public final class LexiconDatabase: @unchecked Sendable {
         var phraseLookupCount = 0
         func collectMulti(start: Int, currentOffset: Int, depth: Int, expectedSyllables: Int) {
             if phraseLookupCount >= 48 { return }
+            if isCancelled?() == true { return }
             if depth >= 2 {
                 let subDigits = String(chars[start..<currentOffset])
                 phraseLookupCount += 1
@@ -890,6 +897,7 @@ public final class LexiconDatabase: @unchecked Sendable {
         }
 
         for i in 0..<n where !spansByStart[i].isEmpty {
+            if isCancelled?() == true { return [] }
             pathLockedPrefix = ""
             collectMulti(start: i, currentOffset: i, depth: 0, expectedSyllables: 0)
         }
