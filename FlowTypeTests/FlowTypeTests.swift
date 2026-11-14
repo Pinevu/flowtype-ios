@@ -49,6 +49,9 @@ final class FlowTypeTests: XCTestCase {
         let (_, sentenceCands) = db.queryPinyinCandidates(rawInput: "woxiangchifan")
         XCTAssertTrue(sentenceCands.contains(where: { $0.text == "我想吃饭" }))
 
+        let (_, longSentenceCands) = db.queryPinyinCandidates(rawInput: "womenyiqiquchifan")
+        XCTAssertEqual(longSentenceCands.first?.text, "我们一起去吃饭")
+
         let (_, initialCands) = db.queryPinyinCandidates(rawInput: "nh")
         XCTAssertTrue(initialCands.contains(where: { $0.text == "你好" }))
 

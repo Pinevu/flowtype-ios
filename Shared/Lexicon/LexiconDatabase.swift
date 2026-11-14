@@ -423,11 +423,15 @@ public final class LexiconDatabase: @unchecked Sendable {
         let n = chars.count
         guard n > 1 else { return [] }
 
-        // Collect all valid syllable spans and multi-syllable spans up to 6 syllables
+        // Collect all valid syllable spans and multi-syllable spans up to 5 syllables
         let fullEdges = seg.latticeEdges.filter { !$0.isPartial }
         if fullEdges.isEmpty {
             return []
         }
+
+        let primaryEdges = Set(seg.primarySyllables)
+        // Negative log10 corpus normalization keeps every single-char cost < 0 so valid longer syllables beat bogus splits
+        let logCorpusMass = 7.0
 
         // Group single-syllable transitions by start index
         var singleStarts = Array(repeating: [SyllableSpan](), count: n)
@@ -443,39 +447,75 @@ public final class LexiconDatabase: @unchecked Sendable {
         }
 
         var transitions = Array(repeating: [LatticeNodeEdge](), count: n)
+        var bestEdgeIndex: [[String: Int]] = Array(repeating: [:], count: n)
+
+        func addTransition(start: Int, end: Int, text: String, score: Double) {
+            let key = "\(end)#\(text)"
+            if let existingIdx = bestEdgeIndex[start][key] {
+                if score > transitions[start][existingIdx].score {
+                    transitions[start][existingIdx] = LatticeNodeEdge(start: start, end: end, text: text, score: score)
+                }
+            } else {
+                bestEdgeIndex[start][key] = transitions[start].count
+                transitions[start].append(LatticeNodeEdge(start: start, end: end, text: text, score: score))
+            }
+        }
 
         // Single-syllable character edges
         for edge in fullEdges {
             let variants = fuzzy ? PinyinSyllableParser.fuzzyVariants(for: edge.text) : [edge.text]
-            var topChars: [(String, Int)] = []
+            let primBonus = primaryEdges.contains(edge) ? 0.25 : 0.0
+            var charPool: [(word: String, score: Double)] = []
             for v in variants {
-                topChars.append(contentsOf: fetchBundleChars(pinyin: v, limit: 3))
+                let fuzzyPenalty = (v == edge.text) ? 0.0 : 0.45
+                for (hanzi, freq) in fetchBundleChars(pinyin: v, limit: 3) {
+                    let base = log10(Double(max(freq, 1)) + 1.0) - logCorpusMass + primBonus - fuzzyPenalty
+                    charPool.append((hanzi, base))
+                }
             }
-            topChars.sort { $0.1 > $1.1 }
-            for (rank, item) in topChars.prefix(2).enumerated() {
-                let s = log10(Double(max(item.1, 1)) + 1.0) - Double(rank) * 0.6
-                transitions[edge.startOffset].append(LatticeNodeEdge(start: edge.startOffset, end: edge.endOffset, text: item.0, score: s))
+            charPool.sort { $0.score > $1.score }
+            var seenChars = Set<String>()
+            var rank = 0
+            for item in charPool where seenChars.insert(item.word).inserted {
+                let s = item.score - Double(rank) * 0.25
+                addTransition(start: edge.startOffset, end: edge.endOffset, text: item.word, score: s)
+                rank += 1
+                if rank >= 3 { break }
             }
         }
 
         // Multi-syllable phrase edges (2..5 syllables chained along valid spans)
+        var pathSyllables: [SyllableSpan] = []
         func collectMultiEdges(start: Int, currentOffset: Int, depth: Int) {
             if depth >= 2 {
                 let sub = String(chars[start..<currentOffset])
+                let sylString = pathSyllables.map(\.text).joined(separator: " ")
+                let primMatches = pathSyllables.reduce(0) { $0 + (primaryEdges.contains($1) ? 1 : 0) }
+                let primBonus = 0.25 * Double(primMatches)
+
                 let userHits = fetchUserPhrases(pinyin: sub, limit: 2)
-                for (w, f) in userHits {
-                    let s = log10(Double(f * 5000 + 1000)) + Double(depth) * 3.8
-                    transitions[start].append(LatticeNodeEdge(start: start, end: currentOffset, text: w, score: s))
+                for (w, f) in userHits where w.count == depth {
+                    let s = log10(Double(f * 5000 + 1000)) - logCorpusMass + 0.9 + Double(min(depth - 2, 3)) * 0.2 + primBonus
+                    addTransition(start: start, end: currentOffset, text: w, score: s)
                 }
-                let bundleHits = fetchBundlePhrases(pinyin: sub, limit: 3)
-                for (rank, item) in bundleHits.enumerated() {
-                    let s = log10(Double(max(item.1, 1)) + 1.0) + Double(depth) * 3.6 - Double(rank) * 0.4
-                    transitions[start].append(LatticeNodeEdge(start: start, end: currentOffset, text: item.0, score: s))
+
+                let bundleHits = fetchBundlePhrasesWithSyllables(pinyin: sub, limit: 6)
+                var phraseRank = 0
+                for item in bundleHits {
+                    if !item.syllables.isEmpty && item.syllables != sylString {
+                        continue
+                    }
+                    let s = log10(Double(max(item.freq, 1)) + 1.0) - logCorpusMass + 0.6 + Double(min(depth - 2, 3)) * 0.2 - Double(phraseRank) * 0.25 + primBonus
+                    addTransition(start: start, end: currentOffset, text: item.word, score: s)
+                    phraseRank += 1
+                    if phraseRank >= 3 { break }
                 }
             }
             guard depth < 5, currentOffset < n else { return }
             for nextSpan in singleStarts[currentOffset] {
+                pathSyllables.append(nextSpan)
                 collectMultiEdges(start: start, currentOffset: nextSpan.endOffset, depth: depth + 1)
+                pathSyllables.removeLast()
             }
         }
 
@@ -484,27 +524,33 @@ public final class LexiconDatabase: @unchecked Sendable {
         }
 
         // Beam search DP across 0...n
+        func pruneBeams(_ list: [ViterbiPath], maxKeep: Int) -> [ViterbiPath] {
+            let sorted = list.sorted { $0.score > $1.score }
+            var seenTexts = Set<String>()
+            var deduped: [ViterbiPath] = []
+            for p in sorted where seenTexts.insert(p.text).inserted {
+                deduped.append(p)
+                if deduped.count >= maxKeep { break }
+            }
+            return deduped
+        }
+
         var beams = Array(repeating: [ViterbiPath](), count: n + 1)
         beams[0] = [ViterbiPath(text: "", score: 0)]
 
         for i in 0..<n {
             guard !beams[i].isEmpty, !transitions[i].isEmpty else { continue }
+            if beams[i].count > 10 {
+                beams[i] = pruneBeams(beams[i], maxKeep: 10)
+            }
             for path in beams[i] {
                 for edge in transitions[i] {
                     let candidate = ViterbiPath(text: path.text + edge.text, score: path.score + edge.score)
                     beams[edge.end].append(candidate)
                 }
             }
-            // Prune beams at reachable nodes later or immediately for next positions
-            for j in (i + 1)...n where beams[j].count > 12 {
-                beams[j].sort { $0.score > $1.score }
-                var seenBeamTexts = Set<String>()
-                var deduped: [ViterbiPath] = []
-                for p in beams[j] where seenBeamTexts.insert(p.text).inserted {
-                    deduped.append(p)
-                    if deduped.count >= 6 { break }
-                }
-                beams[j] = deduped
+            for j in (i + 1)...n where beams[j].count > 24 {
+                beams[j] = pruneBeams(beams[j], maxKeep: 10)
             }
         }
 
@@ -540,17 +586,27 @@ public final class LexiconDatabase: @unchecked Sendable {
     }
 
     private func fetchBundlePhrases(pinyin: String, limit: Int) -> [(String, Int)] {
+        fetchBundlePhrasesWithSyllables(pinyin: pinyin, limit: limit).map { ($0.word, $0.freq) }
+    }
+
+    private func fetchBundlePhrasesWithSyllables(pinyin: String, limit: Int) -> [(word: String, freq: Int, syllables: String)] {
         guard let db = bundleDB else { return [] }
-        let sql = "SELECT word, freq FROM phrases WHERE pinyin = ? ORDER BY freq DESC LIMIT ?;"
+        let sql = "SELECT word, freq, syllables FROM phrases WHERE pinyin = ? ORDER BY freq DESC LIMIT ?;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, pinyin, -1, SQLITE_TRANSIENT)
         sqlite3_bind_int(stmt, 2, Int32(limit))
-        var rows: [(String, Int)] = []
+        var rows: [(String, Int, String)] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             if let cStr = sqlite3_column_text(stmt, 0) {
-                rows.append((String(cString: cStr), Int(sqlite3_column_int64(stmt, 1))))
+                let word = String(cString: cStr)
+                let freq = Int(sqlite3_column_int64(stmt, 1))
+                var syls = ""
+                if let sPtr = sqlite3_column_text(stmt, 2) {
+                    syls = String(cString: sPtr)
+                }
+                rows.append((word, freq, syls))
             }
         }
         return rows
