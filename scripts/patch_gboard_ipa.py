@@ -117,19 +117,27 @@ def patch_gboard(base_ipa, dylib_path, zh_zip_path, output_ipa):
         shutil.copy2(zh_zip_path, app_dir / "zh_hans.zip")
 
         # Also pre-extract directly into LanguageModels in bundle
-        lm_target = app_dir / "LanguageModels"
-        lm_target.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(zh_zip_path, "r") as zf:
-            zf.extractall(lm_target)
-            (lm_target / "main:zh_hans_v2").mkdir(parents=True, exist_ok=True)
-            zf.extractall(lm_target / "main:zh_hans_v2")
+        zh_entry = {
+            "id": "main:zh_hans_v2",
+            "locale": "zh_hans_CN",
+            "description": "简体中文",
+            "filesize": str(os.path.getsize(zh_zip_path)),
+            "rawChecksum": "6e61af57544cbb6dbc07101aba7cf8b7",
+            "checksum": "6e61af57544cbb6dbc07101aba7cf8b7",
+            "url": "https://www.gstatic.com/gboard/iOS/gboard_latest/lms/zh_hans.zip",
+            "version": 13,
+            "compression": "zip"
+        }
 
-        lm_target_appex = appex_dir / "LanguageModels"
-        lm_target_appex.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(zh_zip_path, "r") as zf:
-            zf.extractall(lm_target_appex)
-            (lm_target_appex / "main:zh_hans_v2").mkdir(parents=True, exist_ok=True)
-            zf.extractall(lm_target_appex / "main:zh_hans_v2")
+        for base_target in [app_dir / "LanguageModels", appex_dir / "LanguageModels"]:
+            base_target.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(zh_zip_path, "r") as zf:
+                zf.extractall(base_target)
+                target_sub = base_target / "main:zh_hans_v2"
+                target_sub.mkdir(parents=True, exist_ok=True)
+                zf.extractall(target_sub)
+            with open(base_target / "metadata.json", "w", encoding="utf-8") as f:
+                json.dump([zh_entry], f, ensure_ascii=False, indent=2)
 
         # Update metadata_bundled.json so Gboard knows zh_hans is locally bundled
         meta_bundled_path = kb_res_bundle / "metadata_bundled.json"
@@ -138,20 +146,22 @@ def patch_gboard(base_ipa, dylib_path, zh_zip_path, output_ipa):
                 mb_list = json.load(f)
             has_zh = any("zh_hans" in x.get("id", "") for x in mb_list)
             if not has_zh:
-                mb_list.append({
-                    "id": "main:zh_hans_v2",
-                    "locale": "zh_hans_CN",
-                    "description": "简体中文",
-                    "filesize": str(os.path.getsize(zh_zip_path)),
-                    "rawChecksum": "6e61af57544cbb6dbc07101aba7cf8b7",
-                    "checksum": "6e61af57544cbb6dbc07101aba7cf8b7",
-                    "url": "https://www.gstatic.com/gboard/iOS/gboard_latest/lms/zh_hans.zip",
-                    "version": 13,
-                    "compression": "zip"
-                })
+                mb_list.append(zh_entry)
                 with open(meta_bundled_path, "w", encoding="utf-8") as f:
                     json.dump(mb_list, f, ensure_ascii=False)
                 print("Updated metadata_bundled.json with offline zh_hans_v2 entry!")
+
+        # Update bundle metadata.json as well
+        bundle_meta_path = kb_res_bundle / "metadata.json"
+        if bundle_meta_path.exists():
+            with open(bundle_meta_path, "r", encoding="utf-8") as f:
+                b_list = json.load(f)
+            has_zh = any("zh_hans" in x.get("id", "") for x in b_list)
+            if not has_zh:
+                b_list.append(zh_entry)
+                with open(bundle_meta_path, "w", encoding="utf-8") as f:
+                    json.dump(b_list, f, ensure_ascii=False)
+                print("Updated bundle metadata.json with zh_hans_v2 entry!")
 
     # 5. Update Info.plist permissions
     for plist_path in [app_dir / "Info.plist", appex_dir / "Info.plist"]:

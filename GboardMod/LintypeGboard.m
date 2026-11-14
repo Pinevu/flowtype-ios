@@ -66,29 +66,72 @@ static void SafeHookInstanceMethod(Class cls, SEL sel, IMP replacementIMP, IMP *
 
 #pragma mark - Chinese Language Model & Offline T9 Setup
 
-static void SetupChinese9KeyOfflineAssets(void) {
-    @try {
-        NSURL *container = safe_containerURL(nil, nil, @"group.com.google.keyboard");
-        if (!container) return;
-        NSString *lmDir = [container.path stringByAppendingPathComponent:@"LanguageModels"];
-        [[NSFileManager defaultManager] createDirectoryAtPath:lmDir withIntermediateDirectories:YES attributes:nil error:nil];
+static NSDictionary *GetChineseLanguageModelEntryDict(void) {
+    return @{
+        @"id": @"main:zh_hans_v2",
+        @"locale": @"zh_hans_CN",
+        @"description": @"简体中文",
+        @"filesize": @"9115605",
+        @"rawChecksum": @"6e61af57544cbb6dbc07101aba7cf8b7",
+        @"checksum": @"6e61af57544cbb6dbc07101aba7cf8b7",
+        @"url": @"https://www.gstatic.com/gboard/iOS/gboard_latest/lms/zh_hans.zip",
+        @"version": @(13),
+        @"compression": @"zip"
+    };
+}
 
-        // Check if zh_hans dictionary already exists
-        NSString *pinyinSysDict = [lmDir stringByAppendingPathComponent:@"zh_t_i0_pinyin/pinyin_system_dictionary"];
-        if (![[NSFileManager defaultManager] fileExistsAtPath:pinyinSysDict]) {
-            // Find bundled zh_hans.zip
-            NSString *bundleZip = [[NSBundle mainBundle] pathForResource:@"zh_hans" ofType:@"zip"];
-            if (!bundleZip) {
-                // If in extension or main app, search resources
-                NSString *resBundle = [[NSBundle mainBundle] pathForResource:@"GKBKeyboardResources" ofType:@"bundle"];
-                if (resBundle) {
-                    bundleZip = [resBundle stringByAppendingPathComponent:@"zh_hans.zip"];
+static void PopulateOfflineChineseLanguageModelsInDir(NSString *baseLmDir) {
+    if (!baseLmDir) return;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:baseLmDir withIntermediateDirectories:YES attributes:nil error:nil];
+
+    NSString *zhTargetDir = [baseLmDir stringByAppendingPathComponent:@"main:zh_hans_v2"];
+    [fm createDirectoryAtPath:zhTargetDir withIntermediateDirectories:YES attributes:nil error:nil];
+
+    // Also write metadata.json so GKBLanguageModelManager can parse it
+    NSString *metaPath = [baseLmDir stringByAppendingPathComponent:@"metadata.json"];
+    if (![fm fileExistsAtPath:metaPath]) {
+        NSArray *arr = @[GetChineseLanguageModelEntryDict()];
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:arr options:NSJSONWritingPrettyPrinted error:nil];
+        if (jsonData) {
+            [jsonData writeToFile:metaPath atomically:YES];
+        }
+    }
+
+    // Check if models exist in main:zh_hans_v2
+    NSString *pinyinDict = [zhTargetDir stringByAppendingPathComponent:@"zh_t_i0_pinyin/pinyin_system_dictionary"];
+    if (![fm fileExistsAtPath:pinyinDict]) {
+        // Search pre-extracted assets in App Bundle
+        NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+        NSString *bundledLmZh = [bundlePath stringByAppendingPathComponent:@"LanguageModels/main:zh_hans_v2"];
+        if ([fm fileExistsAtPath:[bundledLmZh stringByAppendingPathComponent:@"zh_t_i0_pinyin/pinyin_system_dictionary"]]) {
+            NSLog(@"[LintypeGboard] Copying bundled pre-extracted models from %@ to %@", bundledLmZh, zhTargetDir);
+            NSArray *items = [fm contentsOfDirectoryAtPath:bundledLmZh error:nil];
+            for (NSString *item in items) {
+                NSString *src = [bundledLmZh stringByAppendingPathComponent:item];
+                NSString *dst = [zhTargetDir stringByAppendingPathComponent:item];
+                if (![fm fileExistsAtPath:dst]) {
+                    [fm copyItemAtPath:src toPath:dst error:nil];
                 }
             }
-            if (bundleZip && [[NSFileManager defaultManager] fileExistsAtPath:bundleZip]) {
-                // Decompress zh_hans.zip into lmDir using system NSTask or unzip helper if available
-                NSLog(@"[LintypeGboard] Unpacking bundled zh_hans offline language model from: %@", bundleZip);
-            }
+        }
+    }
+}
+
+static void SetupChinese9KeyOfflineAssets(void) {
+    @try {
+        // 1. Setup in AppGroup container
+        NSURL *container = safe_containerURL(nil, nil, @"group.com.google.keyboard");
+        if (container) {
+            NSString *lmDir = [container.path stringByAppendingPathComponent:@"LanguageModels"];
+            PopulateOfflineChineseLanguageModelsInDir(lmDir);
+        }
+
+        // 2. Setup in local sandbox
+        NSString *docBase = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        if (docBase) {
+            NSString *localLmDir = [docBase stringByAppendingPathComponent:@"LanguageModels"];
+            PopulateOfflineChineseLanguageModelsInDir(localLmDir);
         }
     } @catch (NSException *e) {
         NSLog(@"[LintypeGboard] Exception in SetupChinese9KeyOfflineAssets: %@", e);
@@ -97,43 +140,43 @@ static void SetupChinese9KeyOfflineAssets(void) {
 
 static void ConfigureDefault9KeyPreferences(void) {
     @try {
-        NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
-        NSArray *enabled = [defs arrayForKey:@"EnabledLanguages"];
-        if (!enabled || enabled.count == 0 || ![enabled.firstObject isEqualToString:@"zh_hans"]) {
-            NSMutableArray *newEnabled = [NSMutableArray arrayWithObject:@"zh_hans"];
-            if (enabled) {
-                for (id item in enabled) {
-                    if (![item isEqualToString:@"zh_hans"]) {
-                        [newEnabled addObject:item];
-                    }
-                }
-            }
-            if (![newEnabled containsObject:@"en_us"]) {
-                [newEnabled addObject:@"en_us"];
-            }
-            [defs setObject:newEnabled forKey:@"EnabledLanguages"];
-        }
+        NSDictionary *zhDict = GetChineseLanguageModelEntryDict();
+        NSDictionary *localLmMap = @{@"main:zh_hans_v2": zhDict};
 
-        NSString *cur = [defs stringForKey:@"CurrentLanguage"];
-        if (!cur || [cur isEqualToString:@"en_us"] || [cur isEqualToString:@"en"]) {
+        NSArray *defsList = @[
+            [NSUserDefaults standardUserDefaults],
+            safe_initWithSuiteName(nil, nil, @"group.com.google.keyboard")
+        ];
+
+        for (NSUserDefaults *defs in defsList) {
+            if (!defs) continue;
+
+            // Register LocalLanguageModels entry
+            NSDictionary *currentLms = [defs dictionaryForKey:@"LocalLanguageModels"];
+            if (!currentLms || !currentLms[@"main:zh_hans_v2"]) {
+                NSMutableDictionary *newMap = [currentLms mutableCopy] ?: [NSMutableDictionary dictionary];
+                newMap[@"main:zh_hans_v2"] = zhDict;
+                [defs setObject:[newMap copy] forKey:@"LocalLanguageModels"];
+            }
+
+            // Set Simplified Chinese as current language and 9-key as variant
+            [defs setObject:@[@"zh_hans"] forKey:@"EnabledLanguages"];
             [defs setObject:@"zh_hans" forKey:@"CurrentLanguage"];
+            [defs setObject:@"nine_key_zh_hans" forKey:@"zh_hans_varaint"]; // Google typo compatibility
+            [defs setObject:@"nine_key_zh_hans" forKey:@"zh_hans_variant"];
+            [defs setBool:YES forKey:@"VoiceInputSetting"];
+            [defs synchronize];
         }
-
-        // Force default layout variant to 9-key for Simplified Chinese
-        [defs setObject:@"nine_key_zh_hans" forKey:@"zh_hans_varaint"];
-        [defs setObject:@"nine_key_zh_hans" forKey:@"zh_hans_variant"];
-        [defs setBool:YES forKey:@"VoiceInputSetting"];
-        [defs synchronize];
     } @catch (NSException *e) {
         NSLog(@"[LintypeGboard] Exception in ConfigureDefault9KeyPreferences: %@", e);
     }
 }
 
-#pragma mark - GKBLanguageModelManager Hooks (Suppress '下载简体中文')
+#pragma mark - GKBLanguageModelManager Hooks (Never prompt '下载简体中文')
 
 static BOOL (*orig_isLanguageModelAvailable)(id self, SEL _cmd, id lang) = NULL;
 static BOOL my_isLanguageModelAvailable(id self, SEL _cmd, id lang) {
-    NSString *desc = [lang description];
+    NSString *desc = [[lang description] lowercaseString];
     if ([desc containsString:@"zh"] || [desc containsString:@"hans"] || [desc containsString:@"pinyin"]) {
         return YES;
     }
@@ -147,100 +190,163 @@ static BOOL my_shouldShowLanguageModelUpdatePrompt(id self, SEL _cmd) {
     return NO;
 }
 
-#pragma mark - Main App Gboard Settings Menu Injection (Image 1 into Image 2)
-
-static id (*orig_mainMenuPageDescriptor)(id self, SEL _cmd) = NULL;
-static id my_mainMenuPageDescriptor(id self, SEL _cmd) {
-    id page = nil;
-    if (orig_mainMenuPageDescriptor) {
-        page = orig_mainMenuPageDescriptor(self, _cmd);
-    }
-    @try {
-        if (!page) return page;
-        NSArray *sections = [page valueForKey:@"sections"];
-        if (![sections isKindOfClass:[NSArray class]] || sections.count == 0) return page;
-
-        Class itemClass = objc_getClass("GKBSettingsItem");
-        if (!itemClass) return page;
-
-        typedef id (*GKBSettingsItemInitFn)(id, SEL, NSInteger, NSString *, NSString *, NSString *, NSString *);
-        SEL initSel = @selector(initWithType:settingID:title:accessibilityIdentifier:key:);
-        id aiItem = nil;
-        if ([itemClass instancesRespondToSelector:initSel]) {
-            GKBSettingsItemInitFn initFn = (GKBSettingsItemInitFn)[itemClass instanceMethodForSelector:initSel];
-            if (initFn) {
-                id rawAlloc = [itemClass alloc];
-                aiItem = initFn(rawAlloc, initSel, 1, @"SettingsMenuItemAIVoice", @"AI 语音与模型配置", @"SettingsMenuItemAIVoice", @"ai_voice");
-            }
-        }
-        if (!aiItem) return page;
-
-        @try {
-            [aiItem setValue:@"OpenAI / DeepSeek / 语音识别与模型" forKey:@"subtitle"];
-        } @catch (NSException *e) {}
-
-        BOOL inserted = NO;
-        for (id sec in sections) {
-            NSArray *rows = [sec valueForKey:@"rows"];
-            if (![rows isKindOfClass:[NSArray class]]) continue;
-
-            for (NSUInteger i = 0; i < rows.count; i++) {
-                id r = rows[i];
-                NSString *sid = [r valueForKey:@"settingID"];
-                if ([sid isEqualToString:@"SettingsMenuItemLanguages"] || [sid isEqualToString:@"SettingsMenuItemKeyboardSettings"]) {
-                    NSMutableArray *newRows = [rows mutableCopy];
-                    [newRows insertObject:aiItem atIndex:i + 1];
-                    [sec setValue:[newRows copy] forKey:@"rows"];
-                    inserted = YES;
-                    break;
-                }
-            }
-            if (inserted) break;
-        }
-
-        if (!inserted && sections.count > 0) {
-            id sec0 = sections.firstObject;
-            NSArray *rows = [sec0 valueForKey:@"rows"];
-            NSMutableArray *newRows = [rows mutableCopy] ?: [NSMutableArray array];
-            [newRows addObject:aiItem];
-            [sec0 setValue:[newRows copy] forKey:@"rows"];
-        }
-    } @catch (NSException *e) {
-        NSLog(@"[LintypeGboard] Exception injecting AI voice settings menu item: %@", e);
-    }
-    return page;
+static BOOL my_shouldUpdateForLanguage(id self, SEL _cmd, id lang) {
+    return NO;
 }
 
-static void (*orig_didSelectSetting)(id self, SEL _cmd, id vc, id setting, id url) = NULL;
-static void my_didSelectSetting(id self, SEL _cmd, id vc, id setting, id url) {
-    @try {
-        NSString *sid = [setting valueForKey:@"settingID"];
-        if ([sid isEqualToString:@"SettingsMenuItemAIVoice"]) {
-            TypelessAppSettingsViewController *aiVC = [[TypelessAppSettingsViewController alloc] init];
-            UINavigationController *nav = nil;
-            if ([self isKindOfClass:[UIViewController class]]) {
-                nav = ((UIViewController *)self).navigationController;
-            }
-            if (nav) {
-                [nav pushViewController:aiVC animated:YES];
-            } else if ([self isKindOfClass:[UIViewController class]]) {
-                UINavigationController *wrap = [[UINavigationController alloc] initWithRootViewController:aiVC];
-                [((UIViewController *)self) presentViewController:wrap animated:YES completion:nil];
-            }
-            return;
+static id (*orig_bestAvailableLocalEntryForLanguage)(id self, SEL _cmd, id lang) = NULL;
+static id my_bestAvailableLocalEntryForLanguage(id self, SEL _cmd, id lang) {
+    id entry = nil;
+    if (orig_bestAvailableLocalEntryForLanguage) {
+        entry = orig_bestAvailableLocalEntryForLanguage(self, _cmd, lang);
+    }
+    if (!entry) {
+        NSString *desc = [[lang description] lowercaseString];
+        if ([desc containsString:@"zh"] || [desc containsString:@"hans"] || [desc containsString:@"pinyin"]) {
+            return GetChineseLanguageModelEntryDict();
         }
-    } @catch (NSException *e) {
-        NSLog(@"[LintypeGboard] Exception in didSelectSetting: %@", e);
+    }
+    return entry;
+}
+
+static NSString *(*orig_mainLanguageModelIDForLanguage)(id self, SEL _cmd, id lang) = NULL;
+static NSString *my_mainLanguageModelIDForLanguage(id self, SEL _cmd, id lang) {
+    NSString *desc = [[lang description] lowercaseString];
+    if ([desc containsString:@"zh"] || [desc containsString:@"hans"] || [desc containsString:@"pinyin"]) {
+        return @"main:zh_hans_v2";
+    }
+    if (orig_mainLanguageModelIDForLanguage) {
+        return orig_mainLanguageModelIDForLanguage(self, _cmd, lang);
+    }
+    return @"main:zh_hans_v2";
+}
+
+#pragma mark - Main App GKBSettingsViewController Hooks (Safe & Crash-Free)
+
+static void TypelessOpenSettingsAction(UIViewController *vc) {
+    if (!vc) return;
+    TypelessAppSettingsViewController *settingsVC = [[TypelessAppSettingsViewController alloc] init];
+    if (vc.navigationController) {
+        [vc.navigationController pushViewController:settingsVC animated:YES];
+    } else {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:settingsVC];
+        nav.modalPresentationStyle = UIModalPresentationPageSheet;
+        [vc presentViewController:nav animated:YES completion:nil];
+    }
+}
+
+static const NSInteger kTypelessSettingsBannerTag = 887766;
+
+static void InjectSettingsCardIntoView(UIViewController *vc) {
+    if (!vc || !vc.view) return;
+
+    // 1. Add Navigation Bar Right Button (Always accessible)
+    if (!vc.navigationItem.rightBarButtonItem) {
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+        [btn setTitle:@"⚙️ AI模型" forState:UIControlStateNormal];
+        btn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        [btn sizeToFit];
+        objc_setAssociatedObject(btn, "typeless_parent_vc", vc, OBJC_ASSOCIATION_ASSIGN);
+        [btn addTarget:vc action:@selector(typeless_handleNavBarBtnTap:) forControlEvents:UIControlEventTouchUpInside];
+        vc.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:btn];
     }
 
-    if (orig_didSelectSetting) {
-        orig_didSelectSetting(self, _cmd, vc, setting, url);
+    // 2. Add Top Banner Card inside TableView if available
+    UITableView *tableView = nil;
+    for (UIView *sub in vc.view.subviews) {
+        if ([sub isKindOfClass:[UITableView class]]) {
+            tableView = (UITableView *)sub;
+            break;
+        }
+    }
+
+    if (tableView && ![tableView viewWithTag:kTypelessSettingsBannerTag]) {
+        CGFloat cardW = tableView.bounds.size.width > 0 ? (tableView.bounds.size.width - 32) : 340;
+        UIView *banner = [[UIView alloc] initWithFrame:CGRectMake(16, 8, cardW, 64)];
+        banner.tag = kTypelessSettingsBannerTag;
+        banner.backgroundColor = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:0.08];
+        banner.layer.cornerRadius = 14.0;
+        banner.layer.borderWidth = 1.0;
+        banner.layer.borderColor = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:0.25].CGColor;
+        banner.layer.masksToBounds = YES;
+
+        // Icon
+        UILabel *iconLbl = [[UILabel alloc] initWithFrame:CGRectMake(14, 16, 32, 32)];
+        iconLbl.text = @"🤖";
+        iconLbl.font = [UIFont systemFontOfSize:24];
+        [banner addSubview:iconLbl];
+
+        // Title & Subtitle
+        UILabel *titleLbl = [[UILabel alloc] initWithFrame:CGRectMake(56, 12, cardW - 80, 20)];
+        titleLbl.text = @"AI 语音与模型配置";
+        titleLbl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
+        titleLbl.textColor = [UIColor colorWithRed:0.05 green:0.4 blue:0.9 alpha:1.0];
+        [banner addSubview:titleLbl];
+
+        UILabel *subLbl = [[UILabel alloc] initWithFrame:CGRectMake(56, 34, cardW - 80, 16)];
+        subLbl.text = @"OpenAI / DeepSeek / 语音识别与模型";
+        subLbl.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightRegular];
+        subLbl.textColor = [UIColor darkGrayColor];
+        [banner addSubview:subLbl];
+
+        // Arrow >
+        UILabel *arrowLbl = [[UILabel alloc] initWithFrame:CGRectMake(cardW - 24, 22, 16, 20)];
+        arrowLbl.text = @">";
+        arrowLbl.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+        arrowLbl.textColor = [UIColor lightGrayColor];
+        [banner addSubview:arrowLbl];
+
+        // Tap Gesture
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:vc action:@selector(typeless_handleCardTap:)];
+        [banner addGestureRecognizer:tap];
+        banner.userInteractionEnabled = YES;
+
+        UIView *existingHeader = tableView.tableHeaderView;
+        if (existingHeader) {
+            UIView *wrapHeader = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tableView.bounds.size.width, existingHeader.bounds.size.height + 76)];
+            existingHeader.frame = CGRectMake(0, 0, tableView.bounds.size.width, existingHeader.bounds.size.height);
+            [wrapHeader addSubview:existingHeader];
+            banner.frame = CGRectMake(16, existingHeader.bounds.size.height + 6, cardW, 64);
+            [wrapHeader addSubview:banner];
+            tableView.tableHeaderView = wrapHeader;
+        } else {
+            UIView *headerWrap = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tableView.bounds.size.width, 80)];
+            banner.frame = CGRectMake(16, 8, cardW, 64);
+            [headerWrap addSubview:banner];
+            tableView.tableHeaderView = headerWrap;
+        }
+    }
+}
+
+static void (*orig_settings_viewWillAppear)(UIViewController *self, SEL _cmd, BOOL animated) = NULL;
+static void my_settings_viewWillAppear(UIViewController *self, SEL _cmd, BOOL animated) {
+    if (orig_settings_viewWillAppear) {
+        orig_settings_viewWillAppear(self, _cmd, animated);
+    }
+    @try {
+        InjectSettingsCardIntoView(self);
+    } @catch (NSException *e) {
+        NSLog(@"[LintypeGboard] Error injecting settings card: %@", e);
+    }
+}
+
+static void typeless_handleNavBarBtnTap(id self, SEL _cmd, UIButton *sender) {
+    UIViewController *vc = objc_getAssociatedObject(sender, "typeless_parent_vc");
+    if (!vc && [self isKindOfClass:[UIViewController class]]) {
+        vc = (UIViewController *)self;
+    }
+    TypelessOpenSettingsAction(vc);
+}
+
+static void typeless_handleCardTap(id self, SEL _cmd, UITapGestureRecognizer *gesture) {
+    if ([self isKindOfClass:[UIViewController class]]) {
+        TypelessOpenSettingsAction((UIViewController *)self);
     }
 }
 
 #pragma mark - Gboard UIInputViewController Hooks
 
-static void (*orig_inputVc_viewDidAppear)(id self, SEL _cmd, BOOL animated) = NULL;
+static void (*orig_inputVc_viewDidAppear)(UIInputViewController *self, SEL _cmd, BOOL animated) = NULL;
 static void my_inputVc_viewDidAppear(UIInputViewController *self, SEL _cmd, BOOL animated) {
     if (orig_inputVc_viewDidAppear) {
         orig_inputVc_viewDidAppear(self, _cmd, animated);
@@ -253,7 +359,7 @@ static void my_inputVc_viewDidAppear(UIInputViewController *self, SEL _cmd, BOOL
     }
 }
 
-static void (*orig_inputVc_viewDidLayoutSubviews)(id self, SEL _cmd) = NULL;
+static void (*orig_inputVc_viewDidLayoutSubviews)(UIInputViewController *self, SEL _cmd) = NULL;
 static void my_inputVc_viewDidLayoutSubviews(UIInputViewController *self, SEL _cmd) {
     if (orig_inputVc_viewDidLayoutSubviews) {
         orig_inputVc_viewDidLayoutSubviews(self, _cmd);
@@ -263,76 +369,58 @@ static void my_inputVc_viewDidLayoutSubviews(UIInputViewController *self, SEL _c
         TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
         if (mgr.isOverlayVisible) {
             for (UIView *sub in self.view.subviews) {
-                if ([sub isKindOfClass:[TypelessOverlayView class]]) {
-                    sub.frame = self.view.bounds;
-                    [self.view bringSubviewToFront:sub];
-                    break;
+                if (sub != mgr.overlayView) {
+                    sub.hidden = YES;
                 }
             }
+            [mgr.overlayView updateLayoutForContainerBounds:self.view.bounds];
+            [self.view bringSubviewToFront:mgr.overlayView];
         }
-    } @catch (NSException *e) {}
-}
-
-static void (*orig_inputVc_selectionDidChange)(id self, SEL _cmd, id<UITextInput> textInput) = NULL;
-static void my_inputVc_selectionDidChange(UIInputViewController *self, SEL _cmd, id<UITextInput> textInput) {
-    if (orig_inputVc_selectionDidChange) {
-        orig_inputVc_selectionDidChange(self, _cmd, textInput);
-    }
-
-    @try {
-        TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
-        if (mgr.isOverlayVisible && mgr.state == TypelessSessionStateIdle) {
-            for (UIView *sub in self.view.subviews) {
-                if ([sub isKindOfClass:[TypelessOverlayView class]]) {
-                    [(TypelessOverlayView *)sub refreshStateUI];
-                    break;
-                }
-            }
-        }
-    } @catch (NSException *e) {}
-}
-
-static void my_inputVc_startVoiceInput(UIInputViewController *self, SEL _cmd) {
-    @try {
-        [[TypelessVoiceManager sharedManager] presentVoiceOverlayInViewController:self autoStart:YES];
     } @catch (NSException *e) {
-        NSLog(@"[LintypeGboard] Exception in startVoiceInput: %@", e);
+        NSLog(@"[LintypeGboard] Exception in viewDidLayoutSubviews: %@", e);
     }
 }
 
-static void my_inputVc_handleVoiceInput(UIInputViewController *self, SEL _cmd) {
+static void (*orig_inputVc_viewWillDisappear)(UIInputViewController *self, SEL _cmd, BOOL animated) = NULL;
+static void my_inputVc_viewWillDisappear(UIInputViewController *self, SEL _cmd, BOOL animated) {
     @try {
-        [[TypelessVoiceManager sharedManager] presentVoiceOverlayInViewController:self autoStart:YES];
-    } @catch (NSException *e) {
-        NSLog(@"[LintypeGboard] Exception in handleVoiceInput: %@", e);
+        [[TypelessVoiceManager sharedManager] dismissOverlay];
+    } @catch (NSException *e) {}
+
+    if (orig_inputVc_viewWillDisappear) {
+        orig_inputVc_viewWillDisappear(self, _cmd, animated);
     }
 }
 
+#pragma mark - GKBVoiceInputLauncher Hooks
+
+static void (*orig_voiceLauncher_launchVoiceInput)(id self, SEL _cmd) = NULL;
 static void my_voiceLauncher_launchVoiceInput(id self, SEL _cmd) {
     @try {
-        id delegate = nil;
-        @try {
-            delegate = [self valueForKey:@"delegate"];
-        } @catch (NSException *e) {}
+        NSLog(@"[LintypeGboard] GKBVoiceInputLauncher launchVoiceInput triggered!");
+        TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
+        UIInputViewController *inputVC = mgr.activeInputViewController;
 
-        UIInputViewController *vc = nil;
-        if ([delegate isKindOfClass:[UIInputViewController class]]) {
-            vc = (UIInputViewController *)delegate;
-        } else {
-            vc = [TypelessVoiceManager sharedManager].activeInputViewController;
+        if (inputVC && inputVC.view) {
+            [mgr showOverlayInView:inputVC.view];
+            [mgr startRecording];
+            return;
         }
-        [[TypelessVoiceManager sharedManager] presentVoiceOverlayInViewController:vc autoStart:YES];
     } @catch (NSException *e) {
         NSLog(@"[LintypeGboard] Exception in launchVoiceInput: %@", e);
+    }
+
+    if (orig_voiceLauncher_launchVoiceInput) {
+        orig_voiceLauncher_launchVoiceInput(self, _cmd);
     }
 }
 
 #pragma mark - Constructor
 
 __attribute__((constructor)) static void init_lintype_gboard(void) {
-    NSLog(@"[LintypeGboard] Initializing Gboard Typeless AI Mod v1.0.5...");
+    NSLog(@"[LintypeGboard] Initializing Gboard Typeless AI Mod (Stable & Crash-Free)...");
 
-    // 1. Install AppGroup & NSUserDefaults guards in both Main App and Extension
+    // 1. Install AppGroup & NSUserDefaults guards
     SafeHookInstanceMethod([NSFileManager class],
                            @selector(containerURLForSecurityApplicationGroupIdentifier:),
                            (IMP)safe_containerURL,
@@ -346,23 +434,26 @@ __attribute__((constructor)) static void init_lintype_gboard(void) {
     ConfigureDefault9KeyPreferences();
     SetupChinese9KeyOfflineAssets();
 
-    // 3. Hook GKBLanguageModelManager to suppress "下载简体中文" and enable offline pinyin
+    // 3. Hook GKBLanguageModelManager: offline pinyin support & suppress download prompt
     Class lmManagerCls = objc_getClass("GKBLanguageModelManager");
     if (lmManagerCls) {
         SafeHookInstanceMethod(lmManagerCls, @selector(isLanguageModelAvailableForLanguage:), (IMP)my_isLanguageModelAvailable, (IMP *)&orig_isLanguageModelAvailable);
         SafeHookInstanceMethod(lmManagerCls, @selector(shouldShowLanguageModelUpdatePrompt), (IMP)my_shouldShowLanguageModelUpdatePrompt, NULL);
+        SafeHookInstanceMethod(lmManagerCls, @selector(shouldUpdateForLanguage:), (IMP)my_shouldUpdateForLanguage, NULL);
+        SafeHookInstanceMethod(lmManagerCls, @selector(bestAvailableLocalEntryForLanguage:), (IMP)my_bestAvailableLocalEntryForLanguage, (IMP *)&orig_bestAvailableLocalEntryForLanguage);
+        SafeHookInstanceMethod(lmManagerCls, @selector(mainLanguageModelIDForLanguage:), (IMP)my_mainLanguageModelIDForLanguage, (IMP *)&orig_mainLanguageModelIDForLanguage);
     }
 
     NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
     if (![bundlePath hasSuffix:@".appex"]) {
         // --- In Main App (Gboard.app) ---
-        // Hook GKBSettingsViewController to inject Image 1 settings into Image 2 settings list
         Class settingsVcCls = objc_getClass("GKBSettingsViewController");
         if (settingsVcCls) {
-            SafeHookInstanceMethod(settingsVcCls, @selector(mainMenuPageDescriptor), (IMP)my_mainMenuPageDescriptor, (IMP *)&orig_mainMenuPageDescriptor);
-            SafeHookInstanceMethod(settingsVcCls, @selector(viewController:didSelectSetting:URL:), (IMP)my_didSelectSetting, (IMP *)&orig_didSelectSetting);
+            class_addMethod(settingsVcCls, @selector(typeless_handleNavBarBtnTap:), (IMP)typeless_handleNavBarBtnTap, "v@:@");
+            class_addMethod(settingsVcCls, @selector(typeless_handleCardTap:), (IMP)typeless_handleCardTap, "v@:@");
+            SafeHookInstanceMethod(settingsVcCls, @selector(viewWillAppear:), (IMP)my_settings_viewWillAppear, (IMP *)&orig_settings_viewWillAppear);
         }
-        NSLog(@"[LintypeGboard] Main app settings hooks installed successfully.");
+        NSLog(@"[LintypeGboard] Main app safe UI hooks installed successfully.");
         return;
     }
 
@@ -371,23 +462,14 @@ __attribute__((constructor)) static void init_lintype_gboard(void) {
     if (inputVcCls) {
         SafeHookInstanceMethod(inputVcCls, @selector(viewDidAppear:), (IMP)my_inputVc_viewDidAppear, (IMP *)&orig_inputVc_viewDidAppear);
         SafeHookInstanceMethod(inputVcCls, @selector(viewDidLayoutSubviews), (IMP)my_inputVc_viewDidLayoutSubviews, (IMP *)&orig_inputVc_viewDidLayoutSubviews);
-        SafeHookInstanceMethod(inputVcCls, @selector(selectionDidChange:), (IMP)my_inputVc_selectionDidChange, (IMP *)&orig_inputVc_selectionDidChange);
-
-        Method mStart = class_getInstanceMethod(inputVcCls, @selector(startVoiceInput));
-        if (mStart) {
-            method_setImplementation(mStart, (IMP)my_inputVc_startVoiceInput);
-        }
-
-        Method mHandle = class_getInstanceMethod(inputVcCls, @selector(handleVoiceInput));
-        if (mHandle) {
-            method_setImplementation(mHandle, (IMP)my_inputVc_handleVoiceInput);
-        }
+        SafeHookInstanceMethod(inputVcCls, @selector(viewWillDisappear:), (IMP)my_inputVc_viewWillDisappear, (IMP *)&orig_inputVc_viewWillDisappear);
     }
 
     Class voiceLauncherCls = objc_getClass("GKBVoiceInputLauncher");
     if (voiceLauncherCls) {
         Method mLaunch = class_getInstanceMethod(voiceLauncherCls, @selector(launchVoiceInput));
         if (mLaunch) {
+            orig_voiceLauncher_launchVoiceInput = (void (*)(id, SEL))method_getImplementation(mLaunch);
             method_setImplementation(mLaunch, (IMP)my_voiceLauncher_launchVoiceInput);
         }
     }
