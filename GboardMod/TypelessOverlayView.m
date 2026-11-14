@@ -2,6 +2,7 @@
 #import "TypelessConfig.h"
 #import "TypelessSettingsView.h"
 #import "TypelessVoiceManager.h"
+#import "TypelessHostBridge.h"
 
 @interface TypelessOverlayView () <TypelessSettingsViewDelegate>
 
@@ -50,6 +51,7 @@
 // Settings Sheet
 @property (nonatomic, strong, nullable) TypelessSettingsView *settingsView;
 @property (nonatomic, copy, nullable) NSString *transientNotice;
+@property (nonatomic, assign) NSInteger errorActionKind; // 0 = retry, 1 = wake host keepalive, 2 = open iOS settings
 
 @end
 
@@ -608,6 +610,17 @@
         [self refreshStateUI];
         self.statusTitleLabel.text = message ?: @"发生未知错误";
         self.statusTitleLabel.textColor = [UIColor systemOrangeColor];
+
+        if ([message containsString:@"561145187"] || [message containsString:@"保活"]) {
+            self.errorActionKind = 1;
+            [self.statusActionBtn setTitle:@"开启后台语音保活" forState:UIControlStateNormal];
+        } else if ([message containsString:@"完全访问"] || [message containsString:@"系统设置"] || [message containsString:@"权限"]) {
+            self.errorActionKind = 2;
+            [self.statusActionBtn setTitle:@"前往系统设置" forState:UIControlStateNormal];
+        } else {
+            self.errorActionKind = 0;
+            [self.statusActionBtn setTitle:@"重新尝试" forState:UIControlStateNormal];
+        }
     });
 }
 
@@ -653,6 +666,7 @@
 }
 
 - (void)openSettingsTapped {
+    [[TypelessConfig sharedConfig] load];
     if (!_settingsView) {
         _settingsView = [[TypelessSettingsView alloc] initWithFrame:self.bounds];
         _settingsView.delegate = self;
@@ -683,6 +697,29 @@
 - (void)statusActionTapped {
     TypelessVoiceManager *mgr = [TypelessVoiceManager sharedManager];
     if (mgr.state == TypelessSessionStateError) {
+        if (self.errorActionKind == 1) {
+            [[TypelessHostBridge sharedBridge] openHostKeepAliveFromViewController:mgr.activeInputViewController];
+            [mgr cancelRecordingAndReset];
+            return;
+        }
+        if (self.errorActionKind == 2) {
+            NSURL *settingsURL = [NSURL URLWithString:UIApplicationOpenSettingsURLString];
+            if (settingsURL) {
+                UIResponder *resp = mgr.activeInputViewController;
+                while (resp) {
+                    if ([resp isKindOfClass:[UIApplication class]]) {
+                        [(UIApplication *)resp openURL:settingsURL options:@{} completionHandler:nil];
+                        break;
+                    }
+                    resp = [resp nextResponder];
+                }
+                if (!resp && mgr.activeInputViewController.extensionContext) {
+                    [mgr.activeInputViewController.extensionContext openURL:settingsURL completionHandler:nil];
+                }
+            }
+            [mgr cancelRecordingAndReset];
+            return;
+        }
         [mgr startRecording];
     } else {
         [mgr cancelRecordingAndReset];

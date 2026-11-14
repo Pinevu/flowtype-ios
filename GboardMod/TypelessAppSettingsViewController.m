@@ -1,5 +1,6 @@
 #import "TypelessAppSettingsViewController.h"
 #import "TypelessConfig.h"
+#import "TypelessHostBridge.h"
 #import <objc/runtime.h>
 
 static UIColor *TypelessSecondaryLabelColor(void) {
@@ -13,6 +14,10 @@ static UIColor *TypelessSecondaryLabelColor(void) {
 
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIView *contentView;
+
+@property (nonatomic, strong) UILabel *bridgeStatusLabel;
+@property (nonatomic, strong) UILabel *syncStatusLabel;
+@property (nonatomic, strong) UIButton *bridgeToggleBtn;
 
 @property (nonatomic, strong) UISegmentedControl *asrEngineSegment;
 @property (nonatomic, strong) UITextField *urlField;
@@ -37,10 +42,30 @@ static UIColor *TypelessSecondaryLabelColor(void) {
     [self setupNavigationItem];
     [self setupScrollView];
     [self reloadConfigValues];
+    [self refreshKeepAliveUI];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(refreshKeepAliveUI)
+                                                 name:@"TypelessHostKeepAliveChanged"
+                                               object:nil];
 
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self.view action:@selector(endEditing:)];
     tap.cancelsTouchesInView = NO;
     [self.view addGestureRecognizer:tap];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (self.navigationController) {
+        [self.navigationController setNavigationBarHidden:NO animated:animated];
+    }
+    [[TypelessConfig sharedConfig] load];
+    [self reloadConfigValues];
+    [self refreshKeepAliveUI];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 - (UIColor *)backgroundColorForTheme {
@@ -58,10 +83,20 @@ static UIColor *TypelessSecondaryLabelColor(void) {
 }
 
 - (void)setupNavigationItem {
+    if (self.navigationController.viewControllers.count <= 1) {
+        self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭"
+                                                                                 style:UIBarButtonItemStylePlain
+                                                                                target:self
+                                                                                action:@selector(closeModalAction)];
+    }
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"保存"
                                                                               style:UIBarButtonItemStyleDone
                                                                              target:self
                                                                              action:@selector(saveAction)];
+}
+
+- (void)closeModalAction {
+    [self dismissViewControllerAnimated:YES completion:nil];
 }
 
 - (void)setupScrollView {
@@ -77,6 +112,32 @@ static UIColor *TypelessSecondaryLabelColor(void) {
     CGFloat width = self.view.bounds.size.width;
     CGFloat margin = 16.0;
     CGFloat cardWidth = width - margin * 2;
+
+    // 0. Host Background Voice Keep-Alive & Cross-Process Sync Card
+    UIView *bridgeCard = [self createCardWithY:y width:cardWidth height:106];
+    UILabel *bTitle = [[UILabel alloc] initWithFrame:CGRectMake(14, 10, cardWidth - 130, 20)];
+    bTitle.text = @"🎙 iOS 18 后台语音保活";
+    bTitle.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
+    [bridgeCard addSubview:bTitle];
+
+    _bridgeStatusLabel = [[UILabel alloc] initWithFrame:CGRectMake(cardWidth - 114, 10, 100, 20)];
+    _bridgeStatusLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    _bridgeStatusLabel.textAlignment = NSTextAlignmentRight;
+    [bridgeCard addSubview:_bridgeStatusLabel];
+
+    _syncStatusLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 33, cardWidth - 28, 28)];
+    _syncStatusLabel.font = [UIFont systemFontOfSize:11.5];
+    _syncStatusLabel.textColor = TypelessSecondaryLabelColor();
+    _syncStatusLabel.numberOfLines = 2;
+    [bridgeCard addSubview:_syncStatusLabel];
+
+    _bridgeToggleBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    _bridgeToggleBtn.frame = CGRectMake(14, 65, cardWidth - 28, 32);
+    _bridgeToggleBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    _bridgeToggleBtn.layer.cornerRadius = 8;
+    [_bridgeToggleBtn addTarget:self action:@selector(toggleKeepAliveAction) forControlEvents:UIControlEventTouchUpInside];
+    [bridgeCard addSubview:_bridgeToggleBtn];
+    y += 118;
 
     // 1. Presets Section
     UIView *presetCard = [self createCardWithY:y width:cardWidth height:90];
@@ -361,29 +422,45 @@ static UIColor *TypelessSecondaryLabelColor(void) {
     }
     [cfg save];
 
-    // Export shared configuration JSON for Keyboard Extension
-    @try {
-        NSMutableDictionary *dict = [NSMutableDictionary dictionary];
-        dict[@"baseURL"] = cfg.baseURL ?: @"";
-        dict[@"apiKey"] = cfg.apiKey ?: @"";
-        dict[@"asrModel"] = cfg.asrModel ?: @"";
-        dict[@"llmModel"] = cfg.llmModel ?: @"";
-        dict[@"useAppleASR"] = @(cfg.useAppleASR);
-        dict[@"customPrompt"] = cfg.customPrompt ?: @"";
-
-        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dict options:NSJSONWritingPrettyPrinted error:nil];
-        if (jsonData) {
-            NSString *appSupport = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
-            NSString *localPath = [appSupport stringByAppendingPathComponent:@"typeless_config.json"];
-            [jsonData writeToFile:localPath atomically:YES];
-        }
-    } @catch (NSException *e) {}
-
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存成功"
-                                                                   message:@"AI 语音与模型配置已生效，已同步至输入法。"
+                                                                   message:([[TypelessConfig sharedConfig] hasSharedAppGroup]
+                                                                             ? @"AI 语音与模型配置已保存到共享容器，键盘已实时同步。"
+                                                                             : @"配置已保存（提示：当前未检测到共享 AppGroup，若键盘未同步也可直接在键盘浮层内点「模型」设置）。")
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)refreshKeepAliveUI {
+    BOOL alive = [TypelessHostBridge sharedBridge].isKeepAliveActive;
+    BOOL hasGroup = [[TypelessConfig sharedConfig] hasSharedAppGroup];
+
+    _bridgeStatusLabel.text = alive ? @"● 运行中" : @"○ 未开启";
+    _bridgeStatusLabel.textColor = alive ? [UIColor systemGreenColor] : [UIColor systemOrangeColor];
+
+    _syncStatusLabel.text = hasGroup
+        ? @"共享通信正常：开启保活后可彻底解决键盘录音 561145187 限制。"
+        : @"⚠️ 未检测到 AppGroup 共享（请开启“允许完全访问”并在签名时保留 AppGroup）。";
+
+    if (alive) {
+        [_bridgeToggleBtn setTitle:@"关闭后台语音保活" forState:UIControlStateNormal];
+        [_bridgeToggleBtn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
+        _bridgeToggleBtn.backgroundColor = [[UIColor systemRedColor] colorWithAlphaComponent:0.1];
+    } else {
+        [_bridgeToggleBtn setTitle:@"一键开启后台语音保活" forState:UIControlStateNormal];
+        [_bridgeToggleBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        _bridgeToggleBtn.backgroundColor = [UIColor systemBlueColor];
+    }
+}
+
+- (void)toggleKeepAliveAction {
+    TypelessHostBridge *bridge = [TypelessHostBridge sharedBridge];
+    if (bridge.isKeepAliveActive) {
+        [bridge stopKeepAlive];
+    } else {
+        [bridge startKeepAliveAndShowToast:NO];
+    }
+    [self refreshKeepAliveUI];
 }
 
 - (void)resetAction {

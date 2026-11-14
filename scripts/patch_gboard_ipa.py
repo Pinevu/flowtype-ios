@@ -102,21 +102,21 @@ def patch_gboard(base_ipa, dylib_path, zh_zip_path, output_ipa):
     if lang_plist.exists():
         with open(lang_plist, "rb") as f:
             pl = plistlib.load(f)
+        for k, v in pl.items():
+            if isinstance(v, dict) and "default" in v:
+                v.pop("default", None)
         if "zh_hans" in pl:
             pl["zh_hans"]["variants"] = ["nine_key_zh_hans", "qwerty_zh_hans", "wubi_zh_hans", "stroke_zh_hans"]
             pl["zh_hans"]["default"] = True
-            print("Configured zh_hans variants with nine_key_zh_hans as default in languages.plist!")
+            print("Configured zh_hans variants with nine_key_zh_hans as sole default in languages.plist!")
         with open(lang_plist, "wb") as f:
             plistlib.dump(pl, f)
 
-    # 4. Bundle Chinese Language Model (zh_hans.zip)
+    # 4. Bundle Chinese Language Model ONCE inside shared gboard_framework.framework/GKBCommonResources.bundle/zh_hans_lm
+    #    (no colon characters in path, no 4x duplicate copies, accessible to both Gboard.app and Gboard.appex)
     kb_res_bundle = appex_dir / "GKBKeyboardResources.bundle"
-    if kb_res_bundle.exists() and zh_zip_path and os.path.exists(zh_zip_path):
-        print(f"Bundling {zh_zip_path} into GKBKeyboardResources.bundle...")
-        shutil.copy2(zh_zip_path, kb_res_bundle / "zh_hans.zip")
-        shutil.copy2(zh_zip_path, app_dir / "zh_hans.zip")
-
-        # Also pre-extract directly into LanguageModels in bundle
+    common_res_bundle = app_fw / "gboard_framework.framework" / "GKBCommonResources.bundle"
+    if zh_zip_path and os.path.exists(zh_zip_path):
         zh_entry = {
             "id": "main:zh_hans_v2",
             "locale": "zh_hans_CN",
@@ -129,39 +129,35 @@ def patch_gboard(base_ipa, dylib_path, zh_zip_path, output_ipa):
             "compression": "zip"
         }
 
-        for base_target in [app_dir / "LanguageModels", appex_dir / "LanguageModels"]:
-            base_target.mkdir(parents=True, exist_ok=True)
-            with zipfile.ZipFile(zh_zip_path, "r") as zf:
-                zf.extractall(base_target)
-                target_sub = base_target / "main:zh_hans_v2"
-                target_sub.mkdir(parents=True, exist_ok=True)
-                zf.extractall(target_sub)
-            with open(base_target / "metadata.json", "w", encoding="utf-8") as f:
-                json.dump([zh_entry], f, ensure_ascii=False, indent=2)
+        shared_zh_dir = common_res_bundle / "zh_hans_lm"
+        if shared_zh_dir.exists():
+            shutil.rmtree(shared_zh_dir)
+        shared_zh_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Extracting {zh_zip_path} ONCE into {shared_zh_dir}...")
+        with zipfile.ZipFile(zh_zip_path, "r") as zf:
+            zf.extractall(shared_zh_dir)
 
-        # Update metadata_bundled.json so Gboard knows zh_hans is locally bundled
-        meta_bundled_path = kb_res_bundle / "metadata_bundled.json"
-        if meta_bundled_path.exists():
-            with open(meta_bundled_path, "r", encoding="utf-8") as f:
-                mb_list = json.load(f)
-            has_zh = any("zh_hans" in x.get("id", "") for x in mb_list)
-            if not has_zh:
-                mb_list.append(zh_entry)
-                with open(meta_bundled_path, "w", encoding="utf-8") as f:
-                    json.dump(mb_list, f, ensure_ascii=False)
-                print("Updated metadata_bundled.json with offline zh_hans_v2 entry!")
+        # Update metadata_bundled.json so Gboard recognizes zh_hans_v2 as locally bundled
+        if kb_res_bundle.exists():
+            meta_bundled_path = kb_res_bundle / "metadata_bundled.json"
+            if meta_bundled_path.exists():
+                with open(meta_bundled_path, "r", encoding="utf-8") as f:
+                    mb_list = json.load(f)
+                if not any("zh_hans" in x.get("id", "") for x in mb_list):
+                    mb_list.append(zh_entry)
+                    with open(meta_bundled_path, "w", encoding="utf-8") as f:
+                        json.dump(mb_list, f, ensure_ascii=False)
+                    print("Updated metadata_bundled.json with offline zh_hans_v2 entry!")
 
-        # Update bundle metadata.json as well
-        bundle_meta_path = kb_res_bundle / "metadata.json"
-        if bundle_meta_path.exists():
-            with open(bundle_meta_path, "r", encoding="utf-8") as f:
-                b_list = json.load(f)
-            has_zh = any("zh_hans" in x.get("id", "") for x in b_list)
-            if not has_zh:
-                b_list.append(zh_entry)
-                with open(bundle_meta_path, "w", encoding="utf-8") as f:
-                    json.dump(b_list, f, ensure_ascii=False)
-                print("Updated bundle metadata.json with zh_hans_v2 entry!")
+            bundle_meta_path = kb_res_bundle / "metadata.json"
+            if bundle_meta_path.exists():
+                with open(bundle_meta_path, "r", encoding="utf-8") as f:
+                    b_list = json.load(f)
+                if not any("zh_hans" in x.get("id", "") for x in b_list):
+                    b_list.append(zh_entry)
+                    with open(bundle_meta_path, "w", encoding="utf-8") as f:
+                        json.dump(b_list, f, ensure_ascii=False)
+                    print("Updated metadata.json with zh_hans_v2 entry!")
 
     # 5. Update Info.plist permissions
     for plist_path in [app_dir / "Info.plist", appex_dir / "Info.plist"]:
@@ -178,16 +174,15 @@ def patch_gboard(base_ipa, dylib_path, zh_zip_path, output_ipa):
         if p.is_dir():
             shutil.rmtree(p)
 
-    # 7. Ad-hoc codesign
+    # 7. Ad-hoc codesign every nested framework/dylib first, then appex, then app
     if shutil.which("codesign"):
-        print("Ad-hoc codesigning with clean entitlements for third-party cert compatibility...")
-        try:
-            subprocess.run(["codesign", "--force", "--sign", "-", str(app_fw / "libLintypeGboard.dylib")], check=True)
-            subprocess.run(["codesign", "--force", "--sign", "-", str(appex_dir)], check=True)
-            subprocess.run(["codesign", "--force", "--sign", "-", str(app_dir)], check=True)
-            print("Codesign verification completed successfully.")
-        except Exception as e:
-            print("Codesign note:", e)
+        print("Ad-hoc codesigning nested frameworks, appex, and app cleanly...")
+        for item in sorted(app_fw.iterdir()):
+            if item.suffix in (".dylib", ".framework"):
+                subprocess.run(["codesign", "--force", "--sign", "-", str(item)], check=True)
+        subprocess.run(["codesign", "--force", "--sign", "-", str(appex_dir)], check=True)
+        subprocess.run(["codesign", "--force", "--sign", "-", str(app_dir)], check=True)
+        print("Codesign verification completed successfully.")
 
     print(f"Packaging {output_ipa}...")
     output_path = pathlib.Path(output_ipa).resolve()

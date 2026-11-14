@@ -37,6 +37,9 @@ typedef NS_ENUM(NSInteger, TypelessVoiceMode) {
 - (NSString *)promptForMode:(TypelessVoiceMode)mode;
 - (BOOL)hasValidApiKey;
 - (BOOL)shouldUseWhisperAPI;
+- (BOOL)hasSharedAppGroup;
+- (nullable NSString *)sharedAppGroupPath;
+- (NSString *)sharedConfigDirectory;
 - (void)load;
 - (void)save;
 - (void)resetToDefaults;

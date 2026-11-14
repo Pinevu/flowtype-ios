@@ -38,9 +38,11 @@ jobs:
             -dynamiclib \
             -fobjc-arc \
             -O2 \
+            -Wall -Werror=implicit-function-declaration \
             -I GboardMod \
             -Wl,-undefined,dynamic_lookup \
             -framework Foundation \
+            -framework CoreFoundation \
             -framework UIKit \
             -framework CoreGraphics \
             -framework QuartzCore \
@@ -49,6 +51,7 @@ jobs:
             -install_name @rpath/libLintypeGboard.dylib \
             -o build/libLintypeGboard.dylib \
             GboardMod/TypelessConfig.m \
+            GboardMod/TypelessHostBridge.m \
             GboardMod/TypelessSettingsView.m \
             GboardMod/TypelessAppSettingsViewController.m \
             GboardMod/TypelessOverlayView.m \
@@ -77,7 +80,7 @@ jobs:
 
       - name: Verify Patched IPA Contents
         run: |
-          unzip -l build/Gboard-Lintype-unsigned.ipa | grep -E "libLintypeGboard.dylib|Gboard.appex|zh_hans"
+          unzip -l build/Gboard-Lintype-unsigned.ipa | grep -E "libLintypeGboard.dylib|Gboard.appex|zh_hans_lm|pinyin_system_dictionary" | head -n 40
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
@@ -90,18 +93,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG_NAME="v1.0.6-gboard"
+          TAG_NAME="v1.0.7-gboard"
           gh release delete "$TAG_NAME" -y 2>/dev/null || true
           git tag -d "$TAG_NAME" 2>/dev/null || true
           git push origin :refs/tags/"$TAG_NAME" 2>/dev/null || true
 
           gh release create "$TAG_NAME" build/Gboard-Lintype-unsigned.ipa \
-            --title "Gboard + Typeless AI 稳定性修复与开箱即用九宫格版 (v1.0.6)" \
-            --notes "本版本（v1.0.6）彻底解决主应用设置点击闪退与离线语言包识别问题：
-          1. 【主界面设置零闪退 + 原生横幅入口】：移除有风险的菜单分发Hook，在 Gboard 主 App 设置页（图3）顶部植入高颜值「AI 语音与模型配置」横幅卡片，并在右上角常驻「⚙️ AI模型」入口。点击直达完整的模型设置页（图2模型设置），彻底解决此前点击设置闪退的问题。
-          2. 【彻底集成简体中文离线包，杜绝“下载简体中文”】：在沙盒容器及 AppGroup 双重部署官方完整简体中文模型（zh_t_i0_pinyin 与 gesture 九宫格），在 metadata.json 与 LocalLanguageModels 准确注册 main:zh_hans_v2，Hook 拦截底层检测，开箱即用无需网络下载。
-          3. 【开箱即用默认九宫格拼音】：首选变体锁定 nine_key_zh_hans，解决旧版本退回英文全键盘的问题，首次唤出即为原生九宫格体验。
-          4. 【保留原生极简候选栏】：去除侵入式重叠悬浮窗，点击原生麦克风唤起 Typeless 拟物毛玻璃全屏语音面板。"
+            --title "Gboard + Typeless AI iOS 18 稳定修复与原生设置集成版 (v1.0.7)" \
+            --notes "本版本（v1.0.7）针对反馈的所有闪退与核心体验问题完成底层重构修复：
+          1. 【彻底修复 iOS 18 闪退】：移除 ARC 下不安全的 initWithSuiteName Hook 与启动同步大文件拷贝，改用安全的 GKBPreferences.setUserDefaults 守护与只读资源挂载。
+          2. 【真正集成到 Gboard 原生设置列表（图3）且点击零闪退】：直接通过 GKBSettingsItem + GKBSettingsSection 原生注入「AI 语音与模型设置」菜单项，修正 didSelectSetting 的 NSInteger 参数签名，直达完整模型设置页与 iOS 18 保活开关。
+          3. 【跨进程实时配置同步】：重构 TypelessConfig，同时写入 AppGroup NSUserDefaults、共享容器 JSON 与 Darwin 通知，主应用保存后键盘立即生效。
+          4. 【真正默认简体中文九宫格，告别“下载简体中文”】：正确Hook GKBLanguageDownloader 与 GKBLanguageManager，返回真实 GKBLanguageResourceEntry 实例指向内置 zh_hans_lm，默认启用 nine_key_zh_hans 九宫格。
+          5. 【解决 iOS 18 键盘录音 561145187 限制】：新增主程序后台音频保活与跨进程录音桥接（支持保活后静默直录与一键唤醒激活）。"
 
       - name: Deploy to GitHub Pages
         run: |
@@ -118,5 +122,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Gboard-Lintype-unsigned.ipa
-          git commit -m "Deploy Gboard Typeless AI Mod v1.0.6" || true
+          git commit -m "Deploy Gboard Typeless AI Mod v1.0.7" || true
           git push -u origin gh-pages --force

@@ -1,6 +1,7 @@
 #import "TypelessVoiceManager.h"
 #import "TypelessConfig.h"
 #import "TypelessOverlayView.h"
+#import "TypelessHostBridge.h"
 #import <Speech/Speech.h>
 
 @interface TypelessVoiceManager () <AVAudioRecorderDelegate>
@@ -12,6 +13,7 @@
 @property (nonatomic, strong, nullable) NSTimer *meterTimer;
 @property (nonatomic, strong, nullable) NSURL *recordingFileURL;
 @property (nonatomic, strong, nullable) NSDate *recordingStartDate;
+@property (nonatomic, assign) BOOL usingHostBridge;
 
 // Apple Native Speech Fallback / Hybrid ASR
 @property (nonatomic, strong, nullable) SFSpeechRecognizer *speechRecognizer;
@@ -119,6 +121,7 @@
     if (!viewController) viewController = self.activeInputViewController;
     if (!viewController || !viewController.view) return;
     self.activeInputViewController = viewController;
+    [[TypelessConfig sharedConfig] load];
 
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
@@ -176,8 +179,19 @@
 
 #pragma mark - Recording Lifecycle
 
+- (NSString *)friendlyAudioError:(nullable NSError *)err fallback:(NSString *)fallback {
+    if (![self hasFullAccess]) {
+        return @"请先在「系统设置 → 键盘 → Gboard」开启允许完全访问";
+    }
+    if (err && (err.code == 561145187 || err.code == 561015905 || [err.localizedDescription containsString:@"561145187"])) {
+        return @"iOS 18 限制键盘直接录音（561145187），请点击下方开启后台保活";
+    }
+    return err.localizedDescription ?: fallback;
+}
+
 - (void)startRecording {
     [self.haptic impactOccurred];
+    [[TypelessConfig sharedConfig] load];
     [self stopAudioCaptureOnly];
     self.sessionToken += 1;
     NSUInteger token = self.sessionToken;
@@ -186,6 +200,18 @@
     self.liveRecognizedText = @"";
     self.speechDidFinishFinal = NO;
     self.pendingSpeechFinalBlock = nil;
+    self.usingHostBridge = NO;
+
+    if (![self hasFullAccess]) {
+        self.state = TypelessSessionStateError;
+        [self.overlayView showErrorStatus:@"请先在「系统设置 → 键盘 → Gboard」开启允许完全访问"];
+        return;
+    }
+
+    if ([[TypelessHostBridge sharedBridge] isHostBridgeAlive]) {
+        [self beginAudioCaptureForToken:token];
+        return;
+    }
 
     AVAudioSession *session = [AVAudioSession sharedInstance];
     AVAudioSessionRecordPermission perm = [session recordPermission];
@@ -219,6 +245,21 @@
     self.recordingStartDate = [NSDate date];
     [self.overlayView refreshStateUI];
 
+    TypelessHostBridge *bridge = [TypelessHostBridge sharedBridge];
+    if ([bridge isHostBridgeAlive]) {
+        NSString *bridgeErr = nil;
+        __weak typeof(self) weakSelf = self;
+        BOOL started = [bridge startRemoteRecordingWithLevelHandler:^(CGFloat level, NSTimeInterval elapsed) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf || token != strongSelf.sessionToken || strongSelf.state != TypelessSessionStateRecording) return;
+            [strongSelf.overlayView updateAudioLevel:level elapsedSeconds:elapsed];
+        } errorMessage:&bridgeErr];
+        if (started) {
+            self.usingHostBridge = YES;
+            return;
+        }
+    }
+
     TypelessConfig *cfg = [TypelessConfig sharedConfig];
     if ([cfg shouldUseWhisperAPI]) {
         [self startWhisperAudioRecorder];
@@ -234,7 +275,12 @@
         [session setCategory:AVAudioSessionCategoryPlayAndRecord
                  withOptions:AVAudioSessionCategoryOptionMixWithOthers | AVAudioSessionCategoryOptionDefaultToSpeaker | AVAudioSessionCategoryOptionAllowBluetooth
                        error:&catErr];
-        [session setActive:YES error:nil];
+        [session setActive:YES error:&catErr];
+        if (catErr) {
+            self.state = TypelessSessionStateError;
+            [self.overlayView showErrorStatus:[self friendlyAudioError:catErr fallback:@"无法激活录音音频会话"]];
+            return;
+        }
 
         NSString *fileName = [NSString stringWithFormat:@"typeless_rec_%lld.m4a", (long long)([[NSDate date] timeIntervalSince1970] * 1000)];
         self.recordingFileURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:fileName]];
@@ -258,7 +304,7 @@
             }];
         } else {
             self.state = TypelessSessionStateError;
-            [self.overlayView showErrorStatus:error.localizedDescription ?: @"无法启动麦克风录音（请确认已开启完全访问权限）"];
+            [self.overlayView showErrorStatus:[self friendlyAudioError:error fallback:@"无法启动麦克风录音（561145187），请开启后台保活"]];
         }
     } @catch (NSException *e) {
         self.state = TypelessSessionStateError;
@@ -316,10 +362,18 @@
     if (token != self.sessionToken) return;
     @try {
         AVAudioSession *session = [AVAudioSession sharedInstance];
+        NSError *actErr = nil;
         [session setCategory:AVAudioSessionCategoryPlayAndRecord
                  withOptions:AVAudioSessionCategoryOptionMixWithOthers | AVAudioSessionCategoryOptionDefaultToSpeaker | AVAudioSessionCategoryOptionAllowBluetooth
-                       error:nil];
-        [session setActive:YES error:nil];
+                       error:&actErr];
+        if (!actErr) {
+            [session setActive:YES error:&actErr];
+        }
+        if (actErr) {
+            self.state = TypelessSessionStateError;
+            [self.overlayView showErrorStatus:[self friendlyAudioError:actErr fallback:@"无法启用麦克风（请开启后台语音保活）"]];
+            return;
+        }
 
         Class sfClass = NSClassFromString(@"SFSpeechRecognizer");
         if (!self.speechRecognizer) {
@@ -396,7 +450,7 @@
         NSError *startErr = nil;
         if (![self.speechAudioEngine startAndReturnError:&startErr]) {
             self.state = TypelessSessionStateError;
-            [self.overlayView showErrorStatus:startErr.localizedDescription ?: @"音频引擎启动失败"];
+            [self.overlayView showErrorStatus:[self friendlyAudioError:startErr fallback:@"音频引擎启动失败"]];
             return;
         }
 
@@ -414,6 +468,10 @@
 }
 
 - (void)stopAudioCaptureOnly {
+    if (self.usingHostBridge) {
+        [[TypelessHostBridge sharedBridge] cancelRemoteRecording];
+        self.usingHostBridge = NO;
+    }
     if (self.meterTimer) {
         [self.meterTimer invalidate];
         self.meterTimer = nil;
@@ -470,6 +528,73 @@
     if (self.meterTimer) {
         [self.meterTimer invalidate];
         self.meterTimer = nil;
+    }
+
+    if (self.usingHostBridge) {
+        self.usingHostBridge = NO;
+        self.state = TypelessSessionStateTranscribing;
+        [self.overlayView refreshStateUI];
+
+        __weak typeof(self) weakSelf = self;
+        [[TypelessHostBridge sharedBridge] stopRemoteRecordingWithCompletion:^(NSString * _Nullable wavPath, NSString * _Nullable errorMessage) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf || token != strongSelf.sessionToken) return;
+            if (errorMessage || wavPath.length == 0) {
+                strongSelf.state = TypelessSessionStateError;
+                [strongSelf.overlayView showErrorStatus:errorMessage ?: @"后台录音获取失败"];
+                return;
+            }
+            NSURL *wavURL = [NSURL fileURLWithPath:wavPath];
+            if ([cfg shouldUseWhisperAPI]) {
+                [strongSelf requestWhisperTranscriptionWithFileURL:wavURL
+                                                            config:cfg
+                                                 completionHandler:^(NSString * _Nullable rawText, NSError * _Nullable asrError) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        __strong typeof(weakSelf) s2 = weakSelf;
+                        if (!s2 || token != s2.sessionToken) return;
+                        if (asrError || rawText.length == 0) {
+                            s2.state = TypelessSessionStateError;
+                            [s2.overlayView showErrorStatus:asrError.localizedDescription ?: @"未识别到有效语音"];
+                            return;
+                        }
+                        [s2 handleTranscribedText:rawText config:cfg token:token];
+                    });
+                }];
+            } else {
+                Class sfClass = NSClassFromString(@"SFSpeechRecognizer");
+                Class reqClass = NSClassFromString(@"SFSpeechURLRecognitionRequest");
+                if (!sfClass || !reqClass || [sfClass authorizationStatus] != SFSpeechRecognizerAuthorizationStatusAuthorized) {
+                    strongSelf.state = TypelessSessionStateError;
+                    [strongSelf.overlayView showErrorStatus:@"未授权 Apple 语音识别，请在「模型」配置 Whisper API Key 或开启权限"];
+                    return;
+                }
+                SFSpeechRecognizer *rec = [[sfClass alloc] initWithLocale:[NSLocale localeWithLocaleIdentifier:@"zh-CN"]];
+                if (!rec) rec = [[sfClass alloc] initWithLocale:[NSLocale currentLocale]];
+                if (!rec || !rec.isAvailable) {
+                    strongSelf.state = TypelessSessionStateError;
+                    [strongSelf.overlayView showErrorStatus:@"系统语音识别暂不可用，请改用 Whisper API"];
+                    return;
+                }
+                SFSpeechURLRecognitionRequest *req = [[reqClass alloc] initWithURL:wavURL];
+                [rec recognitionTaskWithRequest:req resultHandler:^(SFSpeechRecognitionResult * _Nullable result, NSError * _Nullable err) {
+                    if (!result && !err) return;
+                    if (err || (result && result.isFinal)) {
+                        NSString *text = result ? result.bestTranscription.formattedString : @"";
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            __strong typeof(weakSelf) s2 = weakSelf;
+                            if (!s2 || token != s2.sessionToken) return;
+                            if (text.length == 0) {
+                                s2.state = TypelessSessionStateError;
+                                [s2.overlayView showErrorStatus:err.localizedDescription ?: @"未识别到有效语音"];
+                                return;
+                            }
+                            [s2 handleTranscribedText:text config:cfg token:token];
+                        });
+                    }
+                }];
+            }
+        }];
+        return;
     }
 
     if ([cfg shouldUseWhisperAPI]) {
