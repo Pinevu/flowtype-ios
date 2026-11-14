@@ -351,8 +351,15 @@ extension PiPKeepAliveManager: AVPictureInPictureControllerDelegate, AVPictureIn
 
     public func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
         DispatchQueue.main.async {
+            self.pendingStart = false
             self.isPiPActive = false
-            self.lastErrorMessage = "画中画启动失败：\(error.localizedDescription)"
+            let nsErr = error as NSError
+            if nsErr.code == AVAudioSession.ErrorCode.insufficientPriority.rawValue ||
+                nsErr.code == AVAudioSession.ErrorCode.cannotInterruptOthers.rawValue {
+                self.lastErrorMessage = "其他应用正占用高优先级音频（\(nsErr.code)），请先暂停其他媒体播放或通话后再试。"
+            } else {
+                self.lastErrorMessage = "画中画启动失败：\(error.localizedDescription)"
+            }
         }
     }
 

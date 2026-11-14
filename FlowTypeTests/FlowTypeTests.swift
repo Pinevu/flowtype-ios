@@ -110,12 +110,20 @@ final class FlowTypeTests: XCTestCase {
         <plist version="1.0">
         <dict>
             <key>Name</key><string>MockProfile</string>
+            <key>TeamIdentifier</key>
+            <array><string>TEAM123456</string></array>
             <key>Entitlements</key>
             <dict>
+                <key>application-identifier</key>
+                <string>TEAM123456.com.demo.flowtype</string>
                 <key>com.apple.security.application-groups</key>
                 <array>
-                    <string>group.com.example.one</string>
                     <string>group.com.example.two</string>
+                    <string>group.com.example.one</string>
+                </array>
+                <key>keychain-access-groups</key>
+                <array>
+                    <string>TEAM123456.*</string>
                 </array>
             </dict>
         </dict>
@@ -129,6 +137,18 @@ final class FlowTypeTests: XCTestCase {
         try blob.write(to: provURL)
 
         let extracted = AppConfig.extractProvisionAppGroups(from: provURL)
-        XCTAssertEqual(extracted, ["group.com.example.one", "group.com.example.two"])
+        XCTAssertEqual(extracted, ["group.com.example.two", "group.com.example.one"])
+
+        let info = AppConfig.extractProvisioningInfo(from: blob)
+        XCTAssertEqual(info?.teamID, "TEAM123456")
+        XCTAssertEqual(info?.keychainAccessGroups, ["TEAM123456.*"])
+
+        let candidates = AppConfig.candidateAppGroupIDs(
+            infoPlistGroupID: "group.com.flowtype.voice",
+            hostBundleID: "com.demo.flowtype",
+            provisioning: info ?? ProvisioningInfo()
+        )
+        XCTAssertEqual(Array(candidates.prefix(3)), ["group.com.flowtype.voice", "group.com.example.one", "group.com.example.two"])
+        XCTAssertTrue(candidates.contains("group.com.demo.flowtype"))
     }
 }

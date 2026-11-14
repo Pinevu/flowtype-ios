@@ -1,10 +1,99 @@
 import Foundation
+import Security
+
+private enum KeychainSyncBridge {
+    private static let serviceName = "com.flowtype.voice.shared.ipc"
+
+    static func candidateAccessGroups(from provisioning: ProvisioningInfo) -> [String] {
+        var candidates: [String] = []
+        var seen = Set<String>()
+
+        func add(_ val: String) {
+            guard !val.isEmpty, !val.contains("*"), seen.insert(val).inserted else { return }
+            candidates.append(val)
+        }
+
+        for raw in provisioning.keychainAccessGroups {
+            if raw.hasSuffix(".*") {
+                let prefix = String(raw.dropLast(1))
+                add(prefix + "com.flowtype.voice.shared")
+            } else if !raw.contains("*") {
+                add(raw)
+            }
+        }
+
+        if !provisioning.teamID.isEmpty {
+            add("\(provisioning.teamID).com.flowtype.voice.shared")
+        }
+
+        return candidates
+    }
+
+    static func probeWorkingGroup(provisioning: ProvisioningInfo) -> String? {
+        for group in candidateAccessGroups(from: provisioning) {
+            let probeData = Data("ok".utf8)
+            if write(data: probeData, key: "__flowtype_probe__", accessGroup: group),
+               read(key: "__flowtype_probe__", accessGroup: group) == probeData {
+                return group
+            }
+        }
+        return nil
+    }
+
+    static func read(key: String, accessGroup: String) -> Data? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: key,
+            kSecAttrAccessGroup as String: accessGroup,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess else { return nil }
+        return item as? Data
+    }
+
+    @discardableResult
+    static func write(data: Data, key: String, accessGroup: String) -> Bool {
+        let baseQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: key,
+            kSecAttrAccessGroup as String: accessGroup
+        ]
+        let attrs: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+        ]
+
+        let updateStatus = SecItemUpdate(baseQuery as CFDictionary, attrs as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return true
+        }
+        if updateStatus == errSecItemNotFound {
+            var addQuery = baseQuery
+            addQuery[kSecValueData as String] = data
+            addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+            return addStatus == errSecSuccess
+        }
+        return false
+    }
+}
 
 public final class SharedStore {
     public static let shared = SharedStore(containerURL: nil)
 
     public let baseDirectory: URL
     public let isUsingAppGroup: Bool
+    public let isUsingKeychainSync: Bool
+    public let activeKeychainAccessGroup: String?
+
+    public var hasSharedChannel: Bool {
+        isUsingAppGroup || isUsingKeychainSync
+    }
 
     private let lock = NSLock()
     private let encoder: JSONEncoder = {
@@ -24,14 +113,26 @@ public final class SharedStore {
         if let customURL = containerURL {
             self.baseDirectory = customURL
             self.isUsingAppGroup = true
-        } else if let groupURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AppConfig.appGroupID) {
+            self.isUsingKeychainSync = false
+            self.activeKeychainAccessGroup = nil
+        } else if let groupURL = AppConfig.activeContainerURL {
             self.baseDirectory = groupURL.appendingPathComponent("FlowTypeShared", isDirectory: true)
             self.isUsingAppGroup = true
+            self.isUsingKeychainSync = false
+            self.activeKeychainAccessGroup = nil
         } else {
             let fallback = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
                 ?? FileManager.default.temporaryDirectory
             self.baseDirectory = fallback.appendingPathComponent("FlowTypeShared", isDirectory: true)
             self.isUsingAppGroup = false
+
+            if let kcGroup = KeychainSyncBridge.probeWorkingGroup(provisioning: AppConfig.provisioningInfo) {
+                self.isUsingKeychainSync = true
+                self.activeKeychainAccessGroup = kcGroup
+            } else {
+                self.isUsingKeychainSync = false
+                self.activeKeychainAccessGroup = nil
+            }
         }
 
         try? FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
@@ -46,6 +147,11 @@ public final class SharedStore {
     public func readJSON<T: Decodable>(_ filename: String, as type: T.Type) -> T? {
         lock.lock()
         defer { lock.unlock() }
+        if isUsingKeychainSync, let kcGroup = activeKeychainAccessGroup,
+           let kcData = KeychainSyncBridge.read(key: filename, accessGroup: kcGroup),
+           let decoded = try? decoder.decode(T.self, from: kcData) {
+            return decoded
+        }
         let url = fileURL(filename)
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? decoder.decode(T.self, from: data)
@@ -57,6 +163,9 @@ public final class SharedStore {
         let url = fileURL(filename)
         guard let data = try? encoder.encode(value) else { return }
         try? data.write(to: url, options: [.atomic])
+        if isUsingKeychainSync, let kcGroup = activeKeychainAccessGroup {
+            _ = KeychainSyncBridge.write(data: data, key: filename, accessGroup: kcGroup)
+        }
     }
 
     // MARK: - AI Configuration
@@ -128,7 +237,8 @@ public final class SharedStore {
         if list.count > maxCount {
             list = Array(list.prefix(maxCount))
         }
-        writeJSON(list, to: "history.json")
+        let storeLimit = isUsingKeychainSync ? min(list.count, 80) : list.count
+        writeJSON(Array(list.prefix(storeLimit)), to: "history.json")
     }
 
     public func deleteHistory(ids: Set<UUID>) {

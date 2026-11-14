@@ -46,6 +46,7 @@ targets:
       - sdk: Speech.framework
       - sdk: CoreMedia.framework
       - sdk: CoreVideo.framework
+      - sdk: Security.framework
 
   FlowTypeKeyboard:
     type: app-extension
@@ -74,6 +75,7 @@ targets:
       - sdk: libsqlite3.tbd
       - sdk: UIKit.framework
       - sdk: SwiftUI.framework
+      - sdk: Security.framework
 
   FlowTypeTests:
     type: bundle.unit-test
@@ -91,6 +93,7 @@ targets:
         GENERATE_INFOPLIST_FILE: "YES"
     dependencies:
       - sdk: libsqlite3.tbd
+      - sdk: Security.framework
 
 schemes:
   FlowType:

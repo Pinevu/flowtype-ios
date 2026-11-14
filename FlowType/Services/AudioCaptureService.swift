@@ -5,6 +5,7 @@ import Speech
 public enum AudioCaptureError: LocalizedError {
     case permissionDenied
     case audioEngineUnavailable
+    case audioSessionConflict(Int)
     case speechRecognizerUnavailable(String)
 
     public var errorDescription: String? {
@@ -13,6 +14,8 @@ public enum AudioCaptureError: LocalizedError {
             return "请在系统设置中允许 FlowType 访问麦克风权限。"
         case .audioEngineUnavailable:
             return "无法初始化麦克风音频引擎。"
+        case .audioSessionConflict(let code):
+            return "麦克风被其他后台音频或系统策略占用（错误 \(code)），请暂停其他播放/通话或从主程序唤起录音。"
         case .speechRecognizerUnavailable(let reason):
             return "系统语音识别不可用：\(reason)"
         }
@@ -125,7 +128,11 @@ public final class AudioCaptureService {
             let nsErr = error as NSError
             if nsErr.code == AVAudioSession.ErrorCode.insufficientPriority.rawValue ||
                 nsErr.code == AVAudioSession.ErrorCode.cannotInterruptOthers.rawValue {
-                try session.setActive(true)
+                do {
+                    try session.setActive(true)
+                } catch {
+                    throw AudioCaptureError.audioSessionConflict((error as NSError).code)
+                }
             } else {
                 throw error
             }

@@ -120,8 +120,17 @@ struct HomeView: View {
                 Label("App Group 共享容器已就绪（\(AppConfig.appGroupID)）", systemImage: "checkmark.shield.fill")
                     .font(.caption)
                     .foregroundStyle(.green)
+            } else if SharedStore.shared.isUsingKeychainSync {
+                VStack(alignment: .leading, spacing: 3) {
+                    Label("跨进程共享通道已就绪（钥匙串同步：\(SharedStore.shared.activeKeychainAccessGroup ?? "已连接")）", systemImage: "checkmark.shield.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                    Text("已自动启用证书钥匙串通道同步配置、词典与语音状态。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             } else {
-                let provGroups = AppConfig.appGroupDiagnostics.provisionGroupIDs
+                let provGroups = AppConfig.provisionedAppGroups
                 if provGroups.isEmpty {
                     Label("当前未检测到 App Group 容器（签名 Profile 需包含 \(AppConfig.appGroupID)）", systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
@@ -292,7 +301,18 @@ struct HomeView: View {
 
     private func refreshKeyboardEnabledState() {
         let keyboards = UserDefaults.standard.object(forKey: "AppleKeyboards") as? [String] ?? []
-        let extBundle = (Bundle.main.bundleIdentifier ?? "") + ".keyboard"
-        isKeyboardEnabled = keyboards.contains { $0.contains("FlowType") || $0 == extBundle }
+        var candidateExtIDs = Set<String>()
+        if let mainID = Bundle.main.bundleIdentifier {
+            candidateExtIDs.insert(mainID + ".keyboard")
+        }
+        if let pluginsURL = Bundle.main.builtInPlugInsURL,
+           let items = try? FileManager.default.contentsOfDirectory(at: pluginsURL, includingPropertiesForKeys: nil) {
+            for item in items where item.pathExtension == "appex" {
+                if let extID = Bundle(url: item)?.bundleIdentifier {
+                    candidateExtIDs.insert(extID)
+                }
+            }
+        }
+        isKeyboardEnabled = keyboards.contains { $0.contains("FlowType") || candidateExtIDs.contains($0) }
     }
 }
