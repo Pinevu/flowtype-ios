@@ -161,9 +161,14 @@ jobs:
           test -s "$APP_PATH/PlugIns/FlowTypeKeyboard.appex/lexicon.sqlite"
 
           python3 - <<'PY'
-          import pathlib, yaml
-          proj = yaml.safe_load(pathlib.Path("project.yml").read_text())
-          app_group = proj["settings"]["base"]["FLOWTYPE_APP_GROUP_ID"]
+          import pathlib, plistlib, re
+          info_plist = pathlib.Path("build/DerivedData/Build/Products/Release-iphoneos/FlowType.app/Info.plist")
+          info = plistlib.loads(info_plist.read_bytes())
+          app_group = str(info.get("FlowTypeAppGroupID", "")).strip()
+          if not app_group or "$(" in app_group:
+              m = re.search(r"FLOWTYPE_APP_GROUP_ID:\s*([^\s#]+)", pathlib.Path("project.yml").read_text())
+              app_group = m.group(1) if m else "group.com.flowtype.voice"
+          print("Resolved unsigned entitlements app_group:", app_group)
           for src, dst in [
               ("FlowType/FlowType.entitlements", "build/unsigned-app.entitlements"),
               ("FlowTypeKeyboard/FlowTypeKeyboard.entitlements", "build/unsigned-ext.entitlements"),
