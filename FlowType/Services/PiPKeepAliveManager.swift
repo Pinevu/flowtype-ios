@@ -74,7 +74,7 @@ public final class PiPKeepAliveManager: NSObject, ObservableObject {
             controller.canStartPictureInPictureAutomaticallyFromInline = true
             possibleObservation = controller.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] ctrl, _ in
                 let isPossible = ctrl.isPictureInPicturePossible
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     if isPossible && self.pendingStart && self.pipController?.isPictureInPictureActive != true {
                         self.triggerStartNow()

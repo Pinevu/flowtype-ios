@@ -145,6 +145,13 @@ struct HomeView: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
+                        if let firstConcrete = provGroups.first(where: { !$0.contains("*") }) {
+                            Button("复制首条 App Group ID") {
+                                UIPasteboard.general.string = firstConcrete
+                            }
+                            .font(.caption2.weight(.semibold))
+                            .buttonStyle(.bordered)
+                        }
                         Text("请在全能签签名设置中开启「保留/注入应用组权限」或选中上述组后重签主 App 与键盘插件。")
                             .font(.caption2)
                             .foregroundStyle(.orange)
