@@ -13,6 +13,7 @@
 @property (nonatomic, strong) UIView *statusDot;
 @property (nonatomic, strong) UILabel *statusTitleLabel;
 @property (nonatomic, strong) UILabel *statusDetailLabel;
+@property (nonatomic, strong) UISegmentedControl *launchInterfaceSegment;
 @property (nonatomic, strong) UISwitch *keepAliveSwitch;
 @property (nonatomic, strong) UISwitch *pipSwitch;
 @property (nonatomic, strong) NSTimer *statusRefreshTimer;
@@ -469,9 +470,27 @@
 
     [card addArrangedSubview:[self makeHairline]];
 
+    UILabel *launchTitle = [[UILabel alloc] init];
+    launchTitle.text = @"默认启动界面（每次唤起键盘）";
+    launchTitle.font = [UIFont systemFontOfSize:14.5 weight:UIFontWeightSemibold];
+    [card addArrangedSubview:launchTitle];
+
+    self.launchInterfaceSegment = [[UISegmentedControl alloc] initWithItems:@[@"键盘界面 (九宫格)", @"语音输入界面"]];
+    [self.launchInterfaceSegment addTarget:self action:@selector(launchInterfaceChanged:) forControlEvents:UIControlEventValueChanged];
+    [card addArrangedSubview:self.launchInterfaceSegment];
+
+    UILabel *launchHint = [[UILabel alloc] init];
+    launchHint.text = @"提示：切换或默认进入语音界面时仅展示待命面板，需手动点击/长按麦克风才会录音";
+    launchHint.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    launchHint.numberOfLines = 0;
+    if (@available(iOS 13.0, *)) launchHint.textColor = [UIColor secondaryLabelColor];
+    [card addArrangedSubview:launchHint];
+
+    [card addArrangedSubview:[self makeHairline]];
+
     UISwitch *kaSw = nil;
-    [card addArrangedSubview:[self makeSwitchRowTitle:@"后台语音保活"
-                                             subtitle:@"保持主应用与 127.0.0.1 录音桥接在线"
+    [card addArrangedSubview:[self makeSwitchRowTitle:@"后台语音保活（纯音频 · 推荐）"
+                                             subtitle:@"无需画中画浮窗！依靠静音音频会话维持后台与 127.0.0.1 桥接在线"
                                              sfSymbol:@"waveform.badge.mic"
                                             iconColor:[UIColor colorWithRed:0.06 green:0.73 blue:0.51 alpha:1.0]
                                             outSwitch:&kaSw
@@ -481,8 +500,8 @@
     [card addArrangedSubview:[self makeHairline]];
 
     UISwitch *pipSw = nil;
-    [card addArrangedSubview:[self makeSwitchRowTitle:@"画中画 (PiP) 强力保活"
-                                             subtitle:@"切去微信/其他 App 时自动防系统挂起 (iOS 15+)"
+    [card addArrangedSubview:[self makeSwitchRowTitle:@"画中画 (PiP) 辅助保活（可选·默认关）"
+                                             subtitle:@"非必需；仅当纯音频保活在后台仍被系统中断时再按需开启 (iOS 15+)"
                                              sfSymbol:@"pip.fill"
                                             iconColor:[UIColor colorWithRed:0.39 green:0.40 blue:0.95 alpha:1.0]
                                             outSwitch:&pipSw
@@ -629,6 +648,7 @@
 
 - (void)loadConfigIntoUI {
     TypelessConfig *cfg = [TypelessConfig sharedConfig];
+    self.launchInterfaceSegment.selectedSegmentIndex = (cfg.launchInterface == TypelessLaunchInterfaceVoice) ? 1 : 0;
     self.keepAliveSwitch.on = [TypelessHostBridge sharedBridge].isKeepAliveActive || [[NSUserDefaults standardUserDefaults] boolForKey:@"LintypeHostKeepAlivePref"];
     self.pipSwitch.on = cfg.pipKeepAliveEnabled;
 
@@ -659,6 +679,9 @@
     }
 
     TypelessConfig *cfg = [TypelessConfig sharedConfig];
+    cfg.launchInterface = (self.launchInterfaceSegment.selectedSegmentIndex == 1)
+        ? TypelessLaunchInterfaceVoice
+        : TypelessLaunchInterfaceKeyboard;
     cfg.pipKeepAliveEnabled = self.pipSwitch.on;
     cfg.useAppleASR = (self.asrEngineSegment.selectedSegmentIndex == 0);
     cfg.asrBaseURL = self.asrUrlField.text ?: @"";
@@ -704,7 +727,7 @@
     NSString *pipDesc = @"";
     if (@available(iOS 15.0, *)) {
         pipDesc = [AVPictureInPictureController isPictureInPictureSupported]
-            ? (bridge.isPipActive ? @"PiP 活跃" : @"PiP 就绪")
+            ? (bridge.isPipActive ? @"PiP 活跃" : (cfg.pipKeepAliveEnabled ? @"PiP 就绪" : @"纯音频保活（PiP 未开）"))
             : @"设备不支持 PiP";
     }
     self.statusDetailLabel.text = [NSString stringWithFormat:@"麦克风：%@  ·  %@\n%@",
@@ -745,6 +768,14 @@
         [self loadConfigIntoUI];
     }]];
     [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)launchInterfaceChanged:(UISegmentedControl *)seg {
+    TypelessConfig *cfg = [TypelessConfig sharedConfig];
+    cfg.launchInterface = (seg.selectedSegmentIndex == 1)
+        ? TypelessLaunchInterfaceVoice
+        : TypelessLaunchInterfaceKeyboard;
+    [cfg save];
 }
 
 - (void)keepAliveSwitchChanged:(UISwitch *)sw {
@@ -806,11 +837,15 @@
     Class sfCls = NSClassFromString(@"SFSpeechRecognizer");
     NSInteger sfStatus = sfCls ? (NSInteger)[sfCls authorizationStatus] : -1;
 
+    NSString *launchDesc = (cfg.launchInterface == TypelessLaunchInterfaceVoice)
+        ? @"语音输入界面（手动点击开始录音）"
+        : @"键盘界面（iOS 风格九宫格）";
     NSString *report = [NSString stringWithFormat:
-                        @"• 保活总开关：%@\n• 127.0.0.1 本地桥接：%@\n• PiP 画中画：%@\n• AppGroup 共享：%@\n• 麦克风权限：%@\n• 系统语音识别：%@\n\n提示：只要开启了“后台语音保活”且授予了麦克风权限（及键盘“允许完全访问”），即使证书没有 AppGroup 权限也可通过 127.0.0.1 桥接免切录音。",
+                        @"• 启动默认界面：%@\n• 保活总开关：%@\n• 127.0.0.1 本地桥接：%@\n• PiP 画中画：%@\n• AppGroup 共享：%@\n• 麦克风权限：%@\n• 系统语音识别：%@\n\n提示：后台保活并非必须开启 PiP；默认纯音频保活已可在无悬浮窗的情况下维持 127.0.0.1 桥接在线。",
+                        launchDesc,
                         bridge.isKeepAliveActive ? @"运行中" : @"未开启",
                         bridge.isLoopbackServerActive ? @"已监听 48912 端口" : @"未监听",
-                        bridge.isPipActive ? @"活跃中" : (cfg.pipKeepAliveEnabled ? @"就绪（切出后台时自动触发）" : @"已关闭"),
+                        bridge.isPipActive ? @"活跃中" : (cfg.pipKeepAliveEnabled ? @"就绪（切出后台时自动触发）" : @"已关闭（默认纯音频保活）"),
                         cfg.hasSharedAppGroup ? (cfg.detectedAppGroupIdentifier ?: @"可用") : @"无（已启用本地直连）",
                         micOK ? @"已授权" : @"未授权",
                         (sfStatus == 3) ? @"已授权" : @"未授权"];

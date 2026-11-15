@@ -120,7 +120,8 @@
 }
 
 - (void)presentVoiceOverlayInViewController:(nullable UIInputViewController *)viewController {
-    [self presentVoiceOverlayInViewController:viewController autoStart:YES];
+    // Always open in Idle/Ready state; recording only starts on manual user interaction.
+    [self presentVoiceOverlayInViewController:viewController autoStart:NO];
 }
 
 - (void)presentVoiceOverlayInViewController:(nullable UIInputViewController *)viewController autoStart:(BOOL)autoStart {

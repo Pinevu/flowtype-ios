@@ -474,7 +474,7 @@
     self.bottomBarView.translatesAutoresizingMaskIntoConstraints = NO;
     [self addSubview:self.bottomBarView];
 
-    self.pinyinBtn = [self makeKeycapButton:@"拼音" bgColor:[TypelessOverlayView chipInactiveColor] textColor:[TypelessOverlayView primaryTextColor]];
+    self.pinyinBtn = [self makeKeycapButton:@"键盘" bgColor:[TypelessOverlayView chipInactiveColor] textColor:[TypelessOverlayView primaryTextColor]];
     [self.pinyinBtn addTarget:self action:@selector(onBackToKeyboardTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.bottomBarView addSubview:self.pinyinBtn];
 

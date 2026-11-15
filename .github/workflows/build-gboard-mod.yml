@@ -96,18 +96,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG_NAME="v1.0.8-gboard"
+          TAG_NAME="v1.0.9-gboard"
           gh release delete "$TAG_NAME" -y 2>/dev/null || true
           git tag -d "$TAG_NAME" 2>/dev/null || true
           git push origin :refs/tags/"$TAG_NAME" 2>/dev/null || true
 
           gh release create "$TAG_NAME" build/Gboard-Lintype-unsigned.ipa \
-            --title "Gboard + Typeless AI iOS 18 独立双模型与保活交互重制版 (v1.0.8)" \
-            --notes "本版本（v1.0.8）完成以下核心重构与体验优化：
-          1. 【设置页全面重制（图1）】：脱离 Gboard 顶部旧式导航栏遮挡问题，采用系统原生自适应卡片排版；支持「语音识别模型 (ASR)」与「文本润色大模型 (LLM)」完全独立配置、测试及一键复用。
-          2. 【iOS 18 多重后台保活 + 无 AppGroup 通信】：集成静音音频保活、画中画（PiP）保活开关与本机回环 HTTP 通道（127.0.0.1:48912）+ Keychain 同步，解决自签包无 AppGroup 时无法联动与录音受限问题。
-          3. 【强制默认简体中文九宫格 + 顶栏重平衡（图2）】：新增 GKBCurrentLanguageManager 布局钩子，确保首次打开即为简体中文九宫格；替换顶栏旧灰麦按钮为「AI 语音 | 免切/保活」平衡胶囊。
-          4. 【语音面板交互重制（图3）】：彻底移除冗余弹窗模型设置；修复胶囊按钮文字截断；新增实时风格/语言切换、按住对讲与点按双模式、波形动效及「重写上句/撤销/复制/最近历史」快捷交互条。"
+            --title "Gboard + Typeless AI iOS 原生九宫格与双语语音版 (v1.0.9)" \
+            --notes "本版本（v1.0.9）完成以下界面与交互升级：
+          1. 【iOS 原生九宫格风格重塑】：去除九宫格分割线，采用浮动圆角实体按键、微阴影、原生浅灰/深灰底色与蓝色完成/搜索键；隐藏顶栏多余 (G) 与小灰麦，保持候选条简洁。
+          2. 【键盘内集成语音与英文切换】：移除顶栏拼接式 AI 语音大按钮，直接在九宫格底部左下角集成语音切换键与「英文」键，并在英文 26 键内集成「中」与语音切换键，中英双语均可一键切入。
+          3. 【手控录音不自动触发】：切入语音输入界面保持待机状态，仅响应点击或长按手势后才开始录音。
+          4. 【可自定义启动界面】：主 App 设置新增「默认启动界面」选择，可自由设定打开键盘时默认进入九宫格键盘界面或语音输入界面。
+          5. 【保活机制优化（默认关闭画中画）】：静默后台音频保活 + 本机回环服务已默认生效，画中画（PiP）保持可选开关且默认关闭，无悬浮窗打扰。"
 
       - name: Deploy to GitHub Pages
         run: |
@@ -124,5 +125,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Gboard-Lintype-unsigned.ipa
-          git commit -m "Deploy Gboard Typeless AI Mod v1.0.8" || true
+          git commit -m "Deploy Gboard Typeless AI Mod v1.0.9" || true
           git push -u origin gh-pages --force

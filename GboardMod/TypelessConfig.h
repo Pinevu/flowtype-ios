@@ -16,6 +16,11 @@ typedef NS_ENUM(NSInteger, TypelessPolishStyle) {
     TypelessPolishStyleLight = 3
 };
 
+typedef NS_ENUM(NSInteger, TypelessLaunchInterface) {
+    TypelessLaunchInterfaceKeyboard = 0,
+    TypelessLaunchInterfaceVoice = 1
+};
+
 @interface TypelessConfig : NSObject
 
 + (instancetype)sharedConfig;
@@ -27,6 +32,7 @@ typedef NS_ENUM(NSInteger, TypelessPolishStyle) {
 @property (nonatomic, copy) NSString *targetLanguage;
 @property (nonatomic, assign) TypelessPolishStyle polishStyle;
 @property (nonatomic, assign) BOOL pipKeepAliveEnabled;
+@property (nonatomic, assign) TypelessLaunchInterface launchInterface;
 
 // Separated Voice Model (ASR) configuration
 @property (nonatomic, copy) NSString *asrBaseURL;

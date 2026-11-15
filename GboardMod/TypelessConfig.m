@@ -92,7 +92,8 @@ static NSString *const kDefaultPromptHelpWrite =
     _voiceMode = TypelessVoiceModeDictate;
     _targetLanguage = @"英语";
     _polishStyle = TypelessPolishStyleSmart;
-    _pipKeepAliveEnabled = YES;
+    _pipKeepAliveEnabled = NO;
+    _launchInterface = TypelessLaunchInterfaceKeyboard;
 
     _asrBaseURL = kDefaultAsrBaseURL;
     _asrApiKey = @"";
@@ -259,12 +260,13 @@ static NSString *const kDefaultPromptHelpWrite =
 
 - (NSDictionary<NSString *, id> *)exportConfigDictionary {
     return @{
-        @"version": @(2),
+        @"version": @(3),
         @"updatedAt": @(self.lastUpdatedAt > 0 ? self.lastUpdatedAt : [[NSDate date] timeIntervalSince1970]),
         @"voiceMode": @(self.voiceMode),
         @"targetLanguage": self.targetLanguage ?: @"英语",
         @"polishStyle": @(self.polishStyle),
         @"pipKeepAliveEnabled": @(self.pipKeepAliveEnabled),
+        @"launchInterface": @(self.launchInterface),
         @"asrBaseURL": [self normalizedURL:self.asrBaseURL fallback:kDefaultAsrBaseURL],
         @"asrApiKey": self.asrApiKey ?: @"",
         @"asrModel": self.asrModel.length > 0 ? self.asrModel : kDefaultAsrModel,
@@ -294,7 +296,14 @@ static NSString *const kDefaultPromptHelpWrite =
         self.targetLanguage = dict[@"targetLanguage"];
     }
     if (dict[@"polishStyle"]) self.polishStyle = (TypelessPolishStyle)[dict[@"polishStyle"] integerValue];
-    if (dict[@"pipKeepAliveEnabled"]) self.pipKeepAliveEnabled = [dict[@"pipKeepAliveEnabled"] boolValue];
+    NSInteger cfgVersion = [dict[@"version"] integerValue];
+    if (cfgVersion >= 3 && dict[@"pipKeepAliveEnabled"]) {
+        self.pipKeepAliveEnabled = [dict[@"pipKeepAliveEnabled"] boolValue];
+    } else if (cfgVersion < 3) {
+        // v1.0.9+ defaults to pure audio keep-alive (PiP optional, default OFF)
+        self.pipKeepAliveEnabled = NO;
+    }
+    if (dict[@"launchInterface"]) self.launchInterface = (TypelessLaunchInterface)[dict[@"launchInterface"] integerValue];
 
     // Migration support from v1.0.7 shared keys (`baseURL` / `apiKey`)
     NSString *legacyURL = [dict[@"baseURL"] isKindOfClass:[NSString class]] ? dict[@"baseURL"] : nil;
