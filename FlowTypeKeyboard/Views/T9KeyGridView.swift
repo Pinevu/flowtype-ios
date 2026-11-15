@@ -155,6 +155,7 @@ struct T9GridState: Equatable {
     var syllableOptions: [String]
     var returnTitle: String
     var returnIsAccent: Bool
+    var isHostAlive: Bool
     var isTranslucent: Bool
 }
 
@@ -208,7 +209,27 @@ struct T9KeyGridView: View, Equatable {
                 capKey("#@¥", size: 15, kind: .special, width: colWidth, height: rowHeight) {
                     model.switchLayoutPage(.symbols)
                 }
-                capKey("ABC", size: 16, kind: .special, width: colWidth, height: span2Height) {
+                T9ResponsiveKey(
+                    fill: palette.special,
+                    pressedFill: palette.specialPressed,
+                    edge: palette.edge,
+                    cornerRadius: 6
+                ) {
+                    model.switchToPanel(.voice)
+                } label: {
+                    VStack(spacing: 1.5) {
+                        Image(systemName: state.isHostAlive ? "mic.fill" : "mic")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(state.isHostAlive ? Color.blue : Color.primary)
+                        Text("语音")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(state.isHostAlive ? Color.blue : Color.primary)
+                    }
+                }
+                .frame(width: colWidth, height: rowHeight)
+                .accessibilityLabel("切换语音输入")
+
+                capKey("ABC", size: 16, kind: .special, width: colWidth, height: rowHeight) {
                     model.toggleManualLanguage()
                 }
             }
@@ -238,9 +259,9 @@ struct T9KeyGridView: View, Equatable {
                 let filterActive = state.selectedFilter != nil || state.isPickerExpanded
                 capKey(
                     state.selectedFilter ?? "选拼音",
-                    size: 14,
+                    size: 15,
                     kind: filterActive ? .accent : .normal,
-                    foreground: filterActive ? .blue : (state.isComposing ? .primary : .secondary),
+                    foreground: filterActive ? .blue : .primary,
                     width: colWidth,
                     height: rowHeight
                 ) {
@@ -248,12 +269,14 @@ struct T9KeyGridView: View, Equatable {
                 }
 
                 SpacebarTrackpadKey(
-                    title: "空格",
+                    title: state.isComposing ? "选定" : "空格",
                     fixedWidth: span2Width,
                     height: rowHeight,
                     keyColor: palette.key,
                     pressedColor: palette.keyPressed,
                     edgeColor: palette.edge,
+                    titleFontSize: 15,
+                    titleColor: .primary,
                     onTap: { model.handleT9SpaceTap() },
                     onTrackpadDrag: { dx in model.handleSpaceTrackpadDrag(deltaX: dx) },
                     onTrackpadEnd: { model.resetSpaceTrackpad() }
@@ -279,26 +302,30 @@ struct T9KeyGridView: View, Equatable {
             .frame(width: colWidth, height: rowHeight)
 
             capKey(
-                "^_^",
+                state.isComposing ? "分隔" : "^_^",
                 size: 15,
-                kind: state.isEmoticonOpen ? .accent : .special,
-                foreground: state.isEmoticonOpen ? .blue : .primary,
+                kind: (!state.isComposing && state.isEmoticonOpen) ? .accent : .special,
+                foreground: (!state.isComposing && state.isEmoticonOpen) ? .blue : .primary,
                 width: colWidth,
                 height: rowHeight
             ) {
-                model.toggleEmoticonDrawer()
+                if state.isComposing {
+                    model.insertT9SyllableSeparator()
+                } else {
+                    model.toggleEmoticonDrawer()
+                }
             }
 
             T9ResponsiveKey(
                 fill: state.returnIsAccent ? Color.blue : palette.special,
                 pressedFill: state.returnIsAccent ? Color.blue.opacity(0.75) : palette.specialPressed,
                 edge: palette.edge,
-                cornerRadius: 7
+                cornerRadius: 6
             ) {
                 model.handleReturnTap()
             } label: {
                 Text(state.returnTitle)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(state.returnIsAccent ? Color.white : Color.primary)
             }
             .frame(width: colWidth, height: span2Height)
@@ -312,7 +339,7 @@ struct T9KeyGridView: View, Equatable {
             fill: palette.key,
             pressedFill: palette.keyPressed,
             edge: palette.edge,
-            cornerRadius: 7
+            cornerRadius: 6
         ) {
             model.handleT9KeyTap(digit)
         } label: {
@@ -353,7 +380,7 @@ struct T9KeyGridView: View, Equatable {
             fill: fill,
             pressedFill: pressed,
             edge: palette.edge,
-            cornerRadius: 7,
+            cornerRadius: 6,
             action: action
         ) {
             Text(title)

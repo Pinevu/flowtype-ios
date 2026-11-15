@@ -24,9 +24,13 @@ public final class KeyboardViewController: UIInputViewController {
 
         let rootView = KeyboardRootView(model: stateModel)
         let host = UIHostingController(rootView: rootView)
+        if #available(iOS 16.0, *) {
+            host.sizingOptions = []
+        }
         host.view.translatesAutoresizingMaskIntoConstraints = false
         host.view.backgroundColor = .clear
         host.view.isOpaque = false
+        inputView?.allowsSelfSizing = true
 
         addChild(host)
         view.addSubview(host.view)

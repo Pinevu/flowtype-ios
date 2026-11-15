@@ -46,6 +46,11 @@ public final class HostVoiceCoordinator: ObservableObject {
 
         if loadedConfig.enableAudioBackgroundKeepAlive {
             audioService.startSilentKeepAliveIfNeeded(enabled: true)
+            self.status.isAudioKeepAliveActive = audioService.isSilentKeepAliveRunning
+            if self.status.isAudioKeepAliveActive {
+                self.status.state = .standbyPiP
+            }
+            publishStatus()
         }
     }
 
@@ -102,7 +107,10 @@ public final class HostVoiceCoordinator: ObservableObject {
                 guard let self else { return }
                 self.status.heartbeatAt = Date()
                 self.status.isPiPActive = self.pipManager.isPiPActive
-                self.status.isAudioKeepAliveActive = self.config.enableAudioBackgroundKeepAlive
+                if self.config.enableAudioBackgroundKeepAlive && self.status.state != .recording && !self.audioService.isSilentKeepAliveRunning {
+                    self.audioService.startSilentKeepAliveIfNeeded(enabled: true)
+                }
+                self.status.isAudioKeepAliveActive = self.audioService.isSilentKeepAliveRunning
                 if self.status.state == .recording, let start = self.recordingStartTime {
                     let elapsed = Date().timeIntervalSince(start)
                     self.status.elapsedSeconds = elapsed
@@ -122,13 +130,22 @@ public final class HostVoiceCoordinator: ObservableObject {
         dictionary = store.loadDictionary()
         history = store.loadHistory()
         audioService.startSilentKeepAliveIfNeeded(enabled: config.enableAudioBackgroundKeepAlive)
+        status.isAudioKeepAliveActive = audioService.isSilentKeepAliveRunning
     }
 
     public func saveConfiguration(_ updated: AIConfiguration) {
         config = updated
         store.saveConfig(updated)
         audioService.startSilentKeepAliveIfNeeded(enabled: updated.enableAudioBackgroundKeepAlive)
+        status.isAudioKeepAliveActive = audioService.isSilentKeepAliveRunning
         notifyBridge.post(name: AppConfig.Notify.configChanged)
+        publishStatus()
+    }
+
+    public func toggleAudioBackgroundKeepAlive() {
+        var updated = config
+        updated.enableAudioBackgroundKeepAlive.toggle()
+        saveConfiguration(updated)
     }
 
     public func addWord(term: String, pinyinHint: String, category: WordCategory) {
@@ -168,6 +185,23 @@ public final class HostVoiceCoordinator: ObservableObject {
         case "start-pip":
             selectedTab = 0
             pipManager.startPiP()
+        case "keep-alive":
+            selectedTab = 0
+            var updated = config
+            if !updated.enableAudioBackgroundKeepAlive {
+                updated.enableAudioBackgroundKeepAlive = true
+                saveConfiguration(updated)
+            } else {
+                audioService.startSilentKeepAliveIfNeeded(enabled: true)
+            }
+            if config.autoKeepAlivePiP {
+                pipManager.startPiP()
+            }
+            status.isAudioKeepAliveActive = audioService.isSilentKeepAliveRunning
+            if status.state == .idle && (status.isAudioKeepAliveActive || pipManager.isPiPActive) {
+                status.state = .standbyPiP
+            }
+            publishStatus()
         case "record":
             selectedTab = 0
             if config.autoKeepAlivePiP {
@@ -289,7 +323,11 @@ public final class HostVoiceCoordinator: ObservableObject {
         meterTimer?.invalidate()
         _ = audioService.stopRecording()
         activeCommand = nil
-        status.state = pipManager.isPiPActive ? .standbyPiP : .idle
+        if config.enableAudioBackgroundKeepAlive {
+            audioService.startSilentKeepAliveIfNeeded(enabled: true)
+        }
+        status.isAudioKeepAliveActive = audioService.isSilentKeepAliveRunning
+        status.state = (pipManager.isPiPActive || status.isAudioKeepAliveActive) ? .standbyPiP : .idle
         status.audioLevel = 0
         status.partialText = ""
         publishStatus()
@@ -360,7 +398,13 @@ public final class HostVoiceCoordinator: ObservableObject {
             if config.enableAudioBackgroundKeepAlive {
                 audioService.startSilentKeepAliveIfNeeded(enabled: true)
             }
+            status.isAudioKeepAliveActive = audioService.isSilentKeepAliveRunning
+            publishStatus()
         } catch {
+            if config.enableAudioBackgroundKeepAlive {
+                audioService.startSilentKeepAliveIfNeeded(enabled: true)
+            }
+            status.isAudioKeepAliveActive = audioService.isSilentKeepAliveRunning
             status.state = .error
             status.activeRequestId = cmd.requestId
             status.errorMessage = error.localizedDescription

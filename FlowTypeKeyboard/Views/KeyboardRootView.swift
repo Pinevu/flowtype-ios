@@ -14,22 +14,21 @@ public struct KeyboardRootView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            topToolbar
-                .frame(height: 34)
-                .padding(.horizontal, 8)
+            if model.activePanel == .voice {
+                topToolbar
+                    .frame(height: 34)
+                    .padding(.horizontal, 8)
 
-            Divider()
-                .opacity(0.35)
+                Divider()
+                    .opacity(0.35)
 
-            Group {
-                if model.activePanel == .voice {
-                    VoiceKeyboardPanel(model: model)
-                        .gesture(swipeToSwitchGesture)
-                } else {
-                    ManualKeyboardPanel(model: model)
-                }
+                VoiceKeyboardPanel(model: model)
+                    .gesture(swipeToSwitchGesture)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ManualKeyboardPanel(model: model)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(
             KeyboardBackgroundView(
@@ -44,6 +43,7 @@ public struct KeyboardRootView: View {
             )
             .equatable()
         )
+        .ignoresSafeArea(.all)
         .preferredColorScheme(effectiveColorScheme)
     }
 
@@ -165,10 +165,10 @@ public struct KeyboardRootView: View {
             .padding(.vertical, 3)
             .background(Color.green.opacity(0.14))
             .clipShape(Capsule())
-        } else if let url = AppConfig.deepLinkURL(action: "start-pip") {
+        } else if let url = AppConfig.deepLinkURL(action: model.config.autoKeepAlivePiP ? "start-pip" : "keep-alive") {
             Link(destination: url) {
                 HStack(spacing: 3) {
-                    Image(systemName: "pip.enter")
+                    Image(systemName: model.config.autoKeepAlivePiP ? "pip.enter" : "waveform")
                         .font(.system(size: 10))
                     Text("保活")
                         .font(.system(size: 11, weight: .medium))
@@ -223,7 +223,7 @@ struct KeyboardBackgroundView: View, Equatable {
     private var baseSurface: Color {
         isDark
             ? Color(red: 0.11, green: 0.11, blue: 0.13)
-            : Color(red: 0.83, green: 0.84, blue: 0.87)
+            : Color(red: 0.820, green: 0.827, blue: 0.851)
     }
 
     private func colorFromHex(_ hex: String) -> Color {

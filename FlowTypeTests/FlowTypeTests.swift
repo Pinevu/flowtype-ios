@@ -359,4 +359,84 @@ final class FlowTypeTests: XCTestCase {
         store.removeCustomBackgroundImage()
         XCTAssertNil(store.loadCustomBackgroundImageData())
     }
+
+    func testConcurrentLexiconReadsAndWritesDoNotCrash() throws {
+        let userDBURL = tempDir.appendingPathComponent("concurrent_stress.sqlite")
+        let db = LexiconDatabase(
+            bundleDBURL: Bundle(for: LexiconDatabase.self).url(forResource: "lexicon", withExtension: "sqlite"),
+            userDBURL: userDBURL
+        )
+
+        let group = DispatchGroup()
+        let writeQueue = DispatchQueue(label: "test.stress.write", attributes: .concurrent)
+        let readQueue = DispatchQueue(label: "test.stress.read", attributes: .concurrent)
+
+        for i in 0..<80 {
+            group.enter()
+            writeQueue.async {
+                if i.isMultiple(of: 2) {
+                    db.recordT9Selection(digits: "64", word: "米", pinyin: "mi", previousWord: "吃")
+                } else {
+                    db.recordChineseSelection(pinyin: "zhongwen", word: "中文", previousWord: "输入")
+                }
+                group.leave()
+            }
+
+            group.enter()
+            readQueue.async {
+                _ = db.queryT9Candidates(digits: "64426")
+                _ = db.queryPinyinCandidates(rawInput: "nihao", fuzzy: true)
+                _ = db.fetchUserAssociations(prevWord: "吃")
+                _ = db.fetchUserCharsByT9(t9: "64")
+                group.leave()
+            }
+        }
+
+        XCTAssertEqual(group.wait(timeout: .now() + 10.0), .success)
+    }
+
+    func testPinyinAutoCorrectionAndBoostLearning() throws {
+        let userDBURL = tempDir.appendingPathComponent("autocorrect_learning.sqlite")
+        let db = LexiconDatabase(
+            bundleDBURL: Bundle(for: LexiconDatabase.self).url(forResource: "lexicon", withExtension: "sqlite"),
+            userDBURL: userDBURL
+        )
+
+        // 1. Typo "zhognwen" -> auto-corrected to "zhongwen" ("中文")
+        let repairs = PinyinSyllableParser.correctedInputs(for: "zhognwen")
+        XCTAssertTrue(repairs.contains(where: { $0.corrected == "zhongwen" }))
+        let (_, correctedCands) = db.queryPinyinCandidates(rawInput: "zhognwen", fuzzy: true)
+        XCTAssertTrue(correctedCands.contains(where: { $0.text == "中文" }))
+
+        // 2. QWERTY single-character learning & correction boost (weight 3 beats weight 1)
+        let exp = expectation(description: "boost learning")
+        db.recordChineseSelection(pinyin: "mi", word: "迷", boostWeight: 1)
+        db.recordChineseSelection(pinyin: "mi", word: "米", boostWeight: 3)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 2.0)
+
+        let (_, candsMi) = db.queryPinyinCandidates(rawInput: "mi")
+        XCTAssertEqual(candsMi.first?.text, "米")
+        XCTAssertEqual(candsMi.first?.source, .userLearned)
+    }
+
+    func testPiPFreeKeepAliveConfigurationDefaults() throws {
+        let defaults = AIConfiguration()
+        XCTAssertFalse(defaults.autoKeepAlivePiP)
+        XCTAssertTrue(defaults.enableAudioBackgroundKeepAlive)
+        XCTAssertTrue(defaults.enablePinyinFuzzy)
+
+        let decodedEmpty = try JSONDecoder().decode(AIConfiguration.self, from: Data("{}".utf8))
+        XCTAssertFalse(decodedEmpty.autoKeepAlivePiP)
+        XCTAssertTrue(decodedEmpty.enableAudioBackgroundKeepAlive)
+
+        let decodedWithPiP = try JSONDecoder().decode(
+            AIConfiguration.self,
+            from: Data(#"{"autoKeepAlivePiP":true,"enableAudioBackgroundKeepAlive":false}"#.utf8)
+        )
+        XCTAssertTrue(decodedWithPiP.autoKeepAlivePiP)
+        XCTAssertFalse(decodedWithPiP.enableAudioBackgroundKeepAlive)
+    }
 }

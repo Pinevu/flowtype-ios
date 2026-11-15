@@ -214,4 +214,57 @@ public enum PinyinSyllableParser {
 
         return Array(set).filter { validSyllables.contains($0) }
     }
+
+    /// Generates clean Pinyin corrections for common touch-typing slips (e.g. "zhogn"->"zhong",
+    /// "shuo"<->"shou", "laing"->"liang", "jve"->"jue", adjacent letter swaps in malformed parts).
+    public static func correctedInputs(for cleanInput: String, maxResults: Int = 4) -> [(corrected: String, display: String)] {
+        let clean = cleanInput.lowercased().filter { $0 >= "a" && $0 <= "z" }
+        guard clean.count >= 2, clean.count <= 28 else { return [] }
+
+        var rawVariants: [String] = []
+        var seenRaw = Set<String>([clean])
+
+        func enqueue(_ s: String) {
+            guard rawVariants.count < 24, s != clean, !s.isEmpty, seenRaw.insert(s).inserted else { return }
+            rawVariants.append(s)
+        }
+
+        // 1. Common nasal & vowel-pair swap patterns
+        let commonPairs: [(String, String)] = [
+            ("gn", "ng"),
+            ("iu", "ui"), ("ui", "iu"),
+            ("ou", "uo"), ("uo", "ou"),
+            ("ie", "ei"), ("ei", "ie"),
+            ("iao", "aio"), ("ian", "ain"), ("iang", "aing"),
+            ("uan", "aun"), ("uang", "aung"),
+            ("v", "u")
+        ]
+        for (bad, good) in commonPairs where clean.contains(bad) {
+            enqueue(clean.replacingOccurrences(of: bad, with: good))
+        }
+
+        // 2. Adjacent character transpositions (bounded for low latency)
+        let chars = Array(clean)
+        if chars.count >= 3 && chars.count <= 14 {
+            for i in 0..<(chars.count - 1) where chars[i] != chars[i + 1] {
+                var swapped = chars
+                swapped.swapAt(i, i + 1)
+                enqueue(String(swapped))
+            }
+        }
+
+        var accepted: [(corrected: String, display: String)] = []
+        var seenClean = Set<String>([clean])
+        for cand in rawVariants {
+            let seg = segment(rawInput: cand)
+            guard !seg.primarySyllables.isEmpty,
+                  seg.primarySyllables.allSatisfy({ !$0.isPartial }),
+                  seenClean.insert(seg.cleanInput).inserted else {
+                continue
+            }
+            accepted.append((seg.cleanInput, seg.displayPinyin))
+            if accepted.count >= maxResults { break }
+        }
+        return accepted
+    }
 }

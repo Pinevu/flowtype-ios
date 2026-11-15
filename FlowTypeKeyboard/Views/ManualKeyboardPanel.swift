@@ -7,11 +7,14 @@ public struct ManualKeyboardPanel: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            candidateOrAccessoryBar
-                .frame(height: 36)
-                .padding(.horizontal, 6)
+            // Band 1 (32pt): Pinyin Syllable Preview Bar ABOVE candidates (matches native iOS)
+            pinyinPreviewBar
+                .frame(height: 32)
+                .padding(.horizontal, 10)
 
-            Divider().opacity(0.25)
+            Rectangle()
+                .fill(colorScheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.22))
+                .frame(height: 0.5)
 
             if model.isEmoticonDrawerOpen {
                 emoticonDrawerView
@@ -20,11 +23,133 @@ public struct ManualKeyboardPanel: View {
                 expandedCandidateDrawer
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                // Band 2 (43.5pt): Full-width Candidate Words Bar
+                candidateOrAccessoryBar
+                    .frame(height: 43.5)
+                    .padding(.horizontal, 6)
+
+                // Band 3 (7pt top + 205pt keys + 5pt bottom = 217pt -> 293pt total)
                 keyGrid
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(.horizontal, 4)
-                    .padding(.top, 4)
-                    .padding(.bottom, 4)
+                    .padding(.horizontal, 3)
+                    .padding(.top, 7)
+                    .padding(.bottom, 5)
+            }
+        }
+    }
+
+    // MARK: - 0. Native Pinyin Preview Bar (Above Candidates)
+
+    @ViewBuilder
+    private var pinyinPreviewBar: some View {
+        if model.manualLanguage == .chinesePinyin && model.pinyinLayoutMode == .t9 && model.layoutPage == .letters && !model.t9ComposingDigits.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 16) {
+                    let display = model.displayPinyin
+                    let firstSyl = model.t9SyllableOptions.first
+                    let showSeparateDisplay = !display.isEmpty && (display != firstSyl || model.selectedT9SyllableFilter != nil)
+
+                    if showSeparateDisplay {
+                        Button {
+                            model.commitComposingAsRawLetters()
+                        } label: {
+                            Text(display)
+                                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                                .foregroundStyle(model.selectedT9SyllableFilter != nil ? Color.blue : Color.primary)
+                                .lineLimit(1)
+                                .frame(height: 32)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    ForEach(model.t9SyllableOptions.prefix(8), id: \.self) { syll in
+                        let isSelected = model.selectedT9SyllableFilter == syll
+                            || (!showSeparateDisplay && syll == firstSyl)
+                        Button {
+                            model.selectT9SyllableFilter(syll)
+                        } label: {
+                            Text(syll)
+                                .font(.system(size: 16, weight: isSelected ? .semibold : .regular))
+                                .foregroundStyle(
+                                    model.selectedT9SyllableFilter == syll
+                                        ? Color.blue
+                                        : (isSelected ? Color.primary : Color.secondary)
+                                )
+                                .lineLimit(1)
+                                .frame(height: 32)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if model.selectedT9SyllableFilter != nil {
+                        Button {
+                            model.selectT9SyllableFilter(nil)
+                        } label: {
+                            Text("重选")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.blue)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(Color.blue.opacity(0.12))
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        } else if model.manualLanguage == .chinesePinyin && !model.composingPinyin.isEmpty {
+            HStack(spacing: 10) {
+                Button {
+                    model.commitComposingAsRawLetters()
+                } label: {
+                    Text(model.displayPinyin)
+                        .font(.system(size: 16, weight: .medium, design: .rounded))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                }
+                .buttonStyle(.plain)
+
+                if let topDisplay = model.pinyinCandidates.first?.displayPinyin,
+                   !topDisplay.isEmpty,
+                   topDisplay != model.displayPinyin {
+                    Text("自动更正 → \(topDisplay)")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.blue)
+                        .lineLimit(1)
+                }
+                Spacer()
+            }
+        } else {
+            HStack(spacing: 8) {
+                if model.canUndoLastAIInsert {
+                    Button {
+                        model.undoLastAIInsert()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.uturn.backward")
+                            Text("撤销语音")
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.orange)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Spacer()
+
+                if model.needsInputModeSwitchKey {
+                    Button {
+                        model.triggerHaptic()
+                        model.advanceInputModeHandler?()
+                    } label: {
+                        Image(systemName: "globe")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         }
     }
@@ -61,7 +186,7 @@ public struct ManualKeyboardPanel: View {
                                 .foregroundStyle(.primary)
                                 .lineLimit(1)
                                 .padding(.horizontal, 15)
-                                .frame(height: 36)
+                                .frame(height: 43.5)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
@@ -69,7 +194,7 @@ public struct ManualKeyboardPanel: View {
                 }
             }
 
-            Divider().frame(height: 20)
+            Divider().frame(height: 22)
 
             candidateChevronButton(isOpen: model.isEmoticonDrawerOpen) {
                 model.toggleEmoticonDrawer()
@@ -79,30 +204,9 @@ public struct ManualKeyboardPanel: View {
 
     private var t9CandidateBar: some View {
         HStack(spacing: 0) {
-            // iOS Native Pinyin chip preview at left
-            if !model.displayPinyin.isEmpty {
-                Button {
-                    model.commitComposingAsRawLetters()
-                } label: {
-                    Text(model.displayPinyin)
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Color.blue)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.blue.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .padding(.leading, 6)
-
-                Divider()
-                    .frame(height: 20)
-                    .padding(.horizontal, 4)
-            }
-
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 20) {
-                    ForEach(Array(model.pinyinCandidates.prefix(24).enumerated()), id: \.element.id) { idx, cand in
+                    ForEach(Array(model.pinyinCandidates.prefix(20).enumerated()), id: \.element.id) { idx, cand in
                         Button {
                             model.selectPinyinCandidate(cand)
                         } label: {
@@ -110,16 +214,16 @@ public struct ManualKeyboardPanel: View {
                                 .font(.system(size: 20, weight: idx == 0 ? .medium : .regular))
                                 .foregroundStyle(.primary)
                                 .lineLimit(1)
-                                .frame(height: 36)
+                                .frame(height: 43.5)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 10)
             }
 
-            Divider().frame(height: 20)
+            Divider().frame(height: 22)
 
             candidateChevronButton(isOpen: model.isCandidateDrawerExpanded) {
                 model.triggerHaptic()
@@ -134,7 +238,7 @@ public struct ManualKeyboardPanel: View {
             Image(systemName: isOpen ? "chevron.up" : "chevron.down")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 36, height: 36)
+                .frame(width: 38, height: 43.5)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -142,37 +246,24 @@ public struct ManualKeyboardPanel: View {
 
     private var qwertyCandidateBar: some View {
         HStack(spacing: 6) {
-            // Tap composing pinyin preview to insert raw ASCII letters
-            Button {
-                model.commitComposingAsRawLetters()
-            } label: {
-                Text(model.displayPinyin)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.blue)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(Color.blue.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            .buttonStyle(.plain)
-
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 6) {
+                LazyHStack(spacing: 10) {
                     ForEach(Array(model.pinyinCandidates.prefix(18).enumerated()), id: \.element.id) { idx, cand in
                         Button {
                             model.selectPinyinCandidate(cand)
                         } label: {
                             Text(idx == 0 ? "\(cand.text)" : "\(idx + 1).\(cand.text)")
-                                .font(.system(size: 16, weight: idx == 0 ? .semibold : .regular))
+                                .font(.system(size: 18, weight: idx == 0 ? .semibold : .regular))
                                 .foregroundStyle(idx == 0 ? Color.blue : Color.primary)
                                 .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
+                                .padding(.vertical, 6)
                                 .background(idx == 0 ? Color.blue.opacity(0.12) : Color.clear)
                                 .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                         }
                         .buttonStyle(.plain)
                     }
                 }
+                .padding(.horizontal, 6)
             }
 
             Button {
@@ -180,9 +271,9 @@ public struct ManualKeyboardPanel: View {
                 model.isCandidateDrawerExpanded.toggle()
             } label: {
                 Image(systemName: model.isCandidateDrawerExpanded ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.secondary)
-                    .frame(width: 28, height: 28)
+                    .frame(width: 34, height: 43.5)
             }
             .buttonStyle(.plain)
         }
@@ -393,6 +484,7 @@ public struct ManualKeyboardPanel: View {
             syllableOptions: model.isT9PinyinPickerExpanded ? model.t9SyllableOptions : [],
             returnTitle: effectiveReturnTitle,
             returnIsAccent: isComposingChinesePinyin || model.returnKeyLabel != "换行",
+            isHostAlive: model.isHostAlive,
             isTranslucent: isCustomOrTranslucentBackdrop
         )
     }
@@ -667,38 +759,24 @@ private struct QwertyKeyGridView: View, Equatable {
                         let pageBackTitle = (state.manualLanguage == .chinesePinyin && state.pinyinLayoutMode == .t9) ? "九键" : "ABC"
                         Text(state.layoutPage == .letters ? "123" : pageBackTitle)
                             .font(.system(size: 14, weight: .medium))
-                            .frame(width: standardKeyWidth * 1.45, height: rowHeight)
+                            .frame(width: standardKeyWidth * 1.30, height: rowHeight)
                             .background(palette.special)
                             .foregroundStyle(.primary)
                             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
                     .buttonStyle(.plain)
 
-                    if state.manualLanguage == .chinesePinyin && state.layoutPage == .letters {
-                        Button {
-                            model.togglePinyinLayoutMode()
-                        } label: {
-                            Text("九键")
-                                .font(.system(size: 13, weight: .semibold))
-                                .frame(width: standardKeyWidth * 1.15, height: rowHeight)
-                                .background(palette.special)
-                                .foregroundStyle(.primary)
-                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        Button {
-                            model.switchToPanel(.voice)
-                        } label: {
-                            Image(systemName: state.isHostAlive ? "mic.fill" : "mic")
-                                .font(.system(size: 16, weight: .medium))
-                                .frame(width: standardKeyWidth * 1.15, height: rowHeight)
-                                .background(palette.special)
-                                .foregroundStyle(.blue)
-                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
+                    Button {
+                        model.switchToPanel(.voice)
+                    } label: {
+                        Image(systemName: state.isHostAlive ? "mic.fill" : "mic")
+                            .font(.system(size: 16, weight: .medium))
+                            .frame(width: standardKeyWidth * 1.15, height: rowHeight)
+                            .background(palette.special)
+                            .foregroundStyle(state.isHostAlive ? .blue : .primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
+                    .buttonStyle(.plain)
 
                     Button {
                         model.toggleManualLanguage()
@@ -905,6 +983,8 @@ struct SpacebarTrackpadKey: View {
     let keyColor: Color
     var pressedColor: Color? = nil
     var edgeColor: Color? = nil
+    var titleFontSize: CGFloat = 13
+    var titleColor: Color = .secondary
     let onTap: () -> Void
     let onTrackpadDrag: (CGFloat) -> Void
     let onTrackpadEnd: () -> Void
@@ -929,12 +1009,12 @@ struct SpacebarTrackpadKey: View {
                     .frame(maxHeight: .infinity, alignment: .bottom)
                     .offset(y: 1)
             }
-            RoundedRectangle(cornerRadius: edgeColor == nil ? 6 : 7, style: .continuous)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(currentFill)
 
             Text(isTrackpadActive ? "◀ 滑动移动光标 ▶" : title)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(isTrackpadActive ? .blue : .secondary)
+                .font(.system(size: isTrackpadActive ? 13 : titleFontSize, weight: .regular))
+                .foregroundStyle(isTrackpadActive ? Color.blue : titleColor)
         }
         .frame(maxWidth: fixedWidth == nil ? .infinity : fixedWidth)
         .frame(width: fixedWidth, height: height)

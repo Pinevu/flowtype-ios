@@ -42,14 +42,17 @@ public final class LexiconDatabase: @unchecked Sendable {
     private var bundleDB: OpaquePointer?
     private var userDB: OpaquePointer?
     private let queue = DispatchQueue(label: "com.flowtype.lexicon.sqlite", qos: .userInteractive)
+    private let dbLock = NSRecursiveLock()
     private var bundleStmtCache: [String: OpaquePointer] = [:]
 
     // MARK: - In-Memory T9 Cache (0ms instant hits for repetitive typing and backspaces)
     private var t9Cache: [String: (syllableOptions: [String], candidates: [PinyinCandidate])] = [:]
     private var t9CacheKeys: [String] = []
-    private let t9CacheCapacity = 384
+    private let t9CacheCapacity = 192
 
     public func clearT9Cache() {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         t9Cache.removeAll()
         t9CacheKeys.removeAll()
     }
@@ -61,8 +64,8 @@ public final class LexiconDatabase: @unchecked Sendable {
 
         if let url = resolvedBundleURL, FileManager.default.fileExists(atPath: url.path) {
             var db: OpaquePointer?
-            if sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK {
-                sqlite3_exec(db, "PRAGMA temp_store=MEMORY; PRAGMA mmap_size=33554432; PRAGMA cache_size=-8000;", nil, nil, nil)
+            if sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK {
+                sqlite3_exec(db, "PRAGMA temp_store=MEMORY; PRAGMA mmap_size=8388608; PRAGMA cache_size=-2000;", nil, nil, nil)
                 self.bundleDB = db
             }
         }
@@ -72,19 +75,24 @@ public final class LexiconDatabase: @unchecked Sendable {
         if sqlite3_open_v2(
             resolvedUserURL.path,
             &udb,
-            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
             nil
         ) == SQLITE_OK {
+            sqlite3_exec(udb, "PRAGMA busy_timeout=1500;", nil, nil, nil)
             self.userDB = udb
             createUserTablesIfNeeded()
         }
     }
 
     deinit {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         for stmt in bundleStmtCache.values {
             sqlite3_finalize(stmt)
         }
         bundleStmtCache.removeAll()
+        t9Cache.removeAll()
+        t9CacheKeys.removeAll()
         if let db = bundleDB { sqlite3_close(db) }
         if let udb = userDB { sqlite3_close(udb) }
     }
@@ -141,23 +149,28 @@ public final class LexiconDatabase: @unchecked Sendable {
         digits: String,
         word: String,
         pinyin: String,
-        previousWord: String? = nil
+        previousWord: String? = nil,
+        boostWeight: Int = 1
     ) {
         let cleanDigits = digits.filter { $0 >= "2" && $0 <= "9" }
         let cleanPy = pinyin.lowercased().filter { ($0 >= "a" && $0 <= "z") || $0 == "'" }.replacingOccurrences(of: "'", with: "")
         guard !word.isEmpty else { return }
         let now = Int64(Date().timeIntervalSince1970)
+        let weight = Int64(max(1, min(10, boostWeight)))
 
         queue.async { [weak self] in
-            guard let self, let udb = self.userDB else { return }
+            guard let self else { return }
+            self.dbLock.lock()
+            defer { self.dbLock.unlock() }
+            guard let udb = self.userDB else { return }
 
             // 1. Single character frequency learning (e.g. typing 64 and selecting 米 instead of 你)
             if word.count == 1, !cleanDigits.isEmpty {
                 let sql = """
                 INSERT INTO user_chars (hanzi, t9, pinyin, freq, updated_at)
-                VALUES (?, ?, ?, 1, ?)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(hanzi, t9) DO UPDATE SET
-                    freq = freq + 1,
+                    freq = freq + excluded.freq,
                     pinyin = CASE WHEN excluded.pinyin != '' THEN excluded.pinyin ELSE user_chars.pinyin END,
                     updated_at = excluded.updated_at;
                 """
@@ -166,7 +179,8 @@ public final class LexiconDatabase: @unchecked Sendable {
                     sqlite3_bind_text(stmt, 1, word, -1, SQLITE_TRANSIENT)
                     sqlite3_bind_text(stmt, 2, cleanDigits, -1, SQLITE_TRANSIENT)
                     sqlite3_bind_text(stmt, 3, cleanPy, -1, SQLITE_TRANSIENT)
-                    sqlite3_bind_int64(stmt, 4, now)
+                    sqlite3_bind_int64(stmt, 4, weight)
+                    sqlite3_bind_int64(stmt, 5, now)
                     sqlite3_step(stmt)
                     sqlite3_finalize(stmt)
                 }
@@ -177,10 +191,10 @@ public final class LexiconDatabase: @unchecked Sendable {
                 let resolvedPy = cleanPy.isEmpty ? "phrase" : cleanPy
                 let sql = """
                 INSERT INTO user_phrases (pinyin, word, t9, freq, updated_at)
-                VALUES (?, ?, ?, 1, ?)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(pinyin, word) DO UPDATE SET
                     t9 = CASE WHEN excluded.t9 != '' THEN excluded.t9 ELSE user_phrases.t9 END,
-                    freq = freq + 1,
+                    freq = freq + excluded.freq,
                     updated_at = excluded.updated_at;
                 """
                 var stmt: OpaquePointer?
@@ -188,7 +202,8 @@ public final class LexiconDatabase: @unchecked Sendable {
                     sqlite3_bind_text(stmt, 1, resolvedPy, -1, SQLITE_TRANSIENT)
                     sqlite3_bind_text(stmt, 2, word, -1, SQLITE_TRANSIENT)
                     sqlite3_bind_text(stmt, 3, cleanDigits, -1, SQLITE_TRANSIENT)
-                    sqlite3_bind_int64(stmt, 4, now)
+                    sqlite3_bind_int64(stmt, 4, weight)
+                    sqlite3_bind_int64(stmt, 5, now)
                     sqlite3_step(stmt)
                     sqlite3_finalize(stmt)
                 }
@@ -221,6 +236,8 @@ public final class LexiconDatabase: @unchecked Sendable {
     }
 
     public func fetchUserPhrasesByT9(t9: String, limit: Int = 10) -> [(word: String, freq: Int, pinyin: String)] {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         guard let udb = userDB, !t9.isEmpty else { return [] }
         let sql = "SELECT word, freq, pinyin FROM user_phrases WHERE t9 = ? ORDER BY freq DESC, updated_at DESC LIMIT ?;"
         var stmt: OpaquePointer?
@@ -238,6 +255,8 @@ public final class LexiconDatabase: @unchecked Sendable {
     }
 
     public func fetchUserCharsByT9(t9: String, limit: Int = 10) -> [(hanzi: String, freq: Int, pinyin: String)] {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         guard let udb = userDB, !t9.isEmpty else { return [] }
         let sql = "SELECT hanzi, freq, pinyin FROM user_chars WHERE t9 = ? ORDER BY freq DESC, updated_at DESC LIMIT ?;"
         var stmt: OpaquePointer?
@@ -255,6 +274,8 @@ public final class LexiconDatabase: @unchecked Sendable {
     }
 
     public func fetchUserChars(pinyin: String, limit: Int = 10) -> [(String, Int)] {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         guard let udb = userDB, !pinyin.isEmpty else { return [] }
         let sql = "SELECT hanzi, freq FROM user_chars WHERE pinyin = ? ORDER BY freq DESC, updated_at DESC LIMIT ?;"
         var stmt: OpaquePointer?
@@ -272,6 +293,8 @@ public final class LexiconDatabase: @unchecked Sendable {
     }
 
     public func fetchUserAssociations(prevWord: String, limit: Int = 8) -> [String] {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         guard let udb = userDB, !prevWord.isEmpty else { return [] }
         let sql = "SELECT next_word FROM user_associations WHERE prev_word = ? ORDER BY freq DESC, updated_at DESC LIMIT ?;"
         var stmt: OpaquePointer?
@@ -290,35 +313,32 @@ public final class LexiconDatabase: @unchecked Sendable {
 
     // MARK: - User Frequency Learning
 
-    public func recordChineseSelection(pinyin: String, word: String) {
+    public func recordChineseSelection(
+        pinyin: String,
+        word: String,
+        previousWord: String? = nil,
+        boostWeight: Int = 1
+    ) {
         let cleanPy = pinyin.lowercased().filter { $0 >= "a" && $0 <= "z" }
         guard !cleanPy.isEmpty, !word.isEmpty else { return }
-        queue.async { [weak self] in
-            guard let self, let udb = self.userDB else { return }
-            let now = Int64(Date().timeIntervalSince1970)
-            let sql = """
-            INSERT INTO user_phrases (pinyin, word, freq, updated_at)
-            VALUES (?, ?, 1, ?)
-            ON CONFLICT(pinyin, word) DO UPDATE SET
-                freq = freq + 1,
-                updated_at = excluded.updated_at;
-            """
-            var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(udb, sql, -1, &stmt, nil) == SQLITE_OK {
-                defer { sqlite3_finalize(stmt) }
-                sqlite3_bind_text(stmt, 1, cleanPy, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_text(stmt, 2, word, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_int64(stmt, 3, now)
-                sqlite3_step(stmt)
-            }
-        }
+        let t9Digits = Self.pinyinToT9Digits(cleanPy)
+        recordT9Selection(
+            digits: t9Digits,
+            word: word,
+            pinyin: cleanPy,
+            previousWord: previousWord,
+            boostWeight: boostWeight
+        )
     }
 
     public func recordEnglishSelection(word: String) {
         let clean = word.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         queue.async { [weak self] in
-            guard let self, let udb = self.userDB else { return }
+            guard let self else { return }
+            self.dbLock.lock()
+            defer { self.dbLock.unlock() }
+            guard let udb = self.userDB else { return }
             let sql = """
             INSERT INTO user_en_words (word, freq)
             VALUES (?, 1)
@@ -347,8 +367,9 @@ public final class LexiconDatabase: @unchecked Sendable {
             return (seg, [])
         }
 
-        return queue.sync {
-            var results: [PinyinCandidate] = []
+        dbLock.lock()
+        defer { dbLock.unlock() }
+        var results: [PinyinCandidate] = []
             var seenTexts = Set<String>()
 
             func appendCandidate(_ cand: PinyinCandidate) {
@@ -485,7 +506,16 @@ public final class LexiconDatabase: @unchecked Sendable {
                 let isFull = consumed == clean.count
                 let charVariants = fuzzy ? PinyinSyllableParser.fuzzyVariants(for: firstSyllable.text) : [firstSyllable.text]
 
-                // User learned single chars first
+                // User learned single chars first (checks both user_chars and user_phrases)
+                for (hanzi, _) in fetchUserChars(pinyin: firstSyllable.text, limit: 6) {
+                    appendCandidate(PinyinCandidate(
+                        text: hanzi,
+                        consumedChars: consumed,
+                        displayPinyin: firstSyllable.text,
+                        isFullMatch: isFull,
+                        source: .userLearned
+                    ))
+                }
                 for (word, _) in fetchUserPhrases(pinyin: firstSyllable.text, limit: 4) where word.count == 1 {
                     appendCandidate(PinyinCandidate(
                         text: word,
@@ -526,8 +556,55 @@ public final class LexiconDatabase: @unchecked Sendable {
                 }
             }
 
+            // 8. Automatic Pinyin typo & transposition correction (e.g. "zhogn"->"zhong", "laing"->"liang")
+            let hasPartial = seg.primarySyllables.contains(where: \.isPartial)
+            let hasStrongPhraseHit = results.contains { $0.source == .personalDictionary || $0.source == .userLearned || $0.source == .exactPhrase }
+            if (hasPartial || (clean.count >= 3 && !hasStrongPhraseHit)) && results.count < limit {
+                for repair in PinyinSyllableParser.correctedInputs(for: clean, maxResults: 3) {
+                    let repairedSeg = PinyinSyllableParser.segment(rawInput: repair.corrected)
+                    for (word, _) in fetchUserPhrases(pinyin: repair.corrected, limit: 4) {
+                        appendCandidate(PinyinCandidate(
+                            text: word,
+                            consumedChars: clean.count,
+                            displayPinyin: repair.display,
+                            isFullMatch: true,
+                            source: .userLearned
+                        ))
+                    }
+                    for (word, _) in fetchBundlePhrases(pinyin: repair.corrected, limit: 6) {
+                        appendCandidate(PinyinCandidate(
+                            text: word,
+                            consumedChars: clean.count,
+                            displayPinyin: repair.display,
+                            isFullMatch: true,
+                            source: .exactPhrase
+                        ))
+                    }
+                    if repairedSeg.primarySyllables.count >= 2 {
+                        for sentence in decodeViterbiSentences(cleanInput: repair.corrected, seg: repairedSeg, fuzzy: fuzzy, topK: 2) {
+                            appendCandidate(PinyinCandidate(
+                                text: sentence,
+                                consumedChars: clean.count,
+                                displayPinyin: repair.display,
+                                isFullMatch: true,
+                                source: .viterbiSentence
+                            ))
+                        }
+                    } else if repairedSeg.primarySyllables.count == 1 {
+                        for (hanzi, _) in fetchBundleChars(pinyin: repair.corrected, limit: 6) {
+                            appendCandidate(PinyinCandidate(
+                                text: hanzi,
+                                consumedChars: clean.count,
+                                displayPinyin: repair.display,
+                                isFullMatch: true,
+                                source: .singleChar
+                            ))
+                        }
+                    }
+                }
+            }
+
             return (seg, results)
-        }
     }
 
     // MARK: - T9 (九宫格) Pinyin Decoding
@@ -675,10 +752,11 @@ public final class LexiconDatabase: @unchecked Sendable {
 
         let cacheKey = "\(pureDigits)|\(pinyinFilter ?? "")|\(personalWords.count)|\(includeSentenceDecoding ? 1 : 0)"
 
-        return queue.sync {
-            if let cached = t9Cache[cacheKey] {
-                return cached
-            }
+        dbLock.lock()
+        defer { dbLock.unlock() }
+        if let cached = t9Cache[cacheKey] {
+            return cached
+        }
 
             var results: [PinyinCandidate] = []
             var seenTexts = Set<String>()
@@ -1018,8 +1096,7 @@ public final class LexiconDatabase: @unchecked Sendable {
                 }
             }
 
-            return finishResult(syllableOptions, results)
-        }
+        return finishResult(syllableOptions, results)
     }
 
     private func decodeT9ViterbiSentences(
@@ -1205,8 +1282,9 @@ public final class LexiconDatabase: @unchecked Sendable {
         let lower = prefix.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !lower.isEmpty else { return [] }
 
-        return queue.sync {
-            var results: [String] = []
+        dbLock.lock()
+        defer { dbLock.unlock() }
+        var results: [String] = []
             var seen = Set<String>()
 
             func add(_ w: String) {
@@ -1264,7 +1342,6 @@ public final class LexiconDatabase: @unchecked Sendable {
             }
 
             return results
-        }
     }
 
     // MARK: - Viterbi / Beam Search Decoding

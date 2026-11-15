@@ -34,11 +34,41 @@ public final class AudioCaptureService {
     private var latestSpeechTranscript: String = ""
 
     private var keepAlivePlayer: AVAudioPlayer?
+    private var shouldKeepAlive: Bool = false
+    private var interruptionObserver: NSObjectProtocol?
+    private lazy var silentLoopWAVData: Data = {
+        let silentSamples = [Int16](repeating: 0, count: 16000)
+        return AudioWAVEncoder.encodePCM16Mono(samples: silentSamples, sampleRate: 16000)
+    }()
+
+    public var isSilentKeepAliveRunning: Bool {
+        keepAlivePlayer?.isPlaying == true
+    }
 
     public var onAudioLevel: ((Float) -> Void)?
     public var onPartialTranscript: ((String) -> Void)?
 
-    public init() {}
+    public init() {
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] note in
+            guard let self,
+                  let info = note.userInfo,
+                  let typeRaw = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: typeRaw) else { return }
+            if type == .ended && self.shouldKeepAlive && !self.isCapturing {
+                self.startSilentKeepAliveIfNeeded(enabled: true)
+            }
+        }
+    }
+
+    deinit {
+        if let obs = interruptionObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
+    }
 
     public func ensureMicrophonePermission() async -> Bool {
         if #available(iOS 17.0, *) {
@@ -76,18 +106,17 @@ public final class AudioCaptureService {
     }
 
     public func startSilentKeepAliveIfNeeded(enabled: Bool) {
+        shouldKeepAlive = enabled
         guard enabled else {
             stopSilentKeepAlive()
             return
         }
         if keepAlivePlayer?.isPlaying == true { return }
-        let silentSamples = [Int16](repeating: 0, count: 16000)
-        let wavData = AudioWAVEncoder.encodePCM16Mono(samples: silentSamples, sampleRate: 16000)
         do {
             try configureAudioSessionForPiPOnly()
-            let player = try AVAudioPlayer(data: wavData)
+            let player = try AVAudioPlayer(data: silentLoopWAVData)
             player.numberOfLoops = -1
-            player.volume = 0.001
+            player.volume = 0.0
             player.prepareToPlay()
             player.play()
             keepAlivePlayer = player
@@ -114,6 +143,8 @@ public final class AudioCaptureService {
         }
 
         stopRecordingInternal(deactivateSession: false)
+        // Pause silent playback cleanly before switching audio session into measurement capture mode
+        keepAlivePlayer?.stop()
 
         let session = AVAudioSession.sharedInstance()
         #if compiler(>=6.2)

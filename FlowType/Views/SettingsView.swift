@@ -294,10 +294,10 @@ struct SettingsView: View {
                     Text(mode.title).tag(mode)
                 }
             }
-            Toggle("跳转唤醒时自动启动画中画 (PiP)", isOn: $draft.autoKeepAlivePiP)
-            Toggle("静音后台音频辅助保活", isOn: $draft.enableAudioBackgroundKeepAlive)
+            Toggle("无画中画后台音频保活（推荐，无浮窗）", isOn: $draft.enableAudioBackgroundKeepAlive)
+            Toggle("跳转唤醒时启动画中画 (PiP)", isOn: $draft.autoKeepAlivePiP)
             Toggle("左右滑动切换手打键盘 (Swipe-to-type)", isOn: $draft.enableSwipeToType)
-            Toggle("拼音模糊音 (zh/z, ch/c, sh/s, an/ang...)", isOn: $draft.enablePinyinFuzzy)
+            Toggle("拼音模糊音与自动纠错 (zh/z, sh/s, an/ang...)", isOn: $draft.enablePinyinFuzzy)
             Toggle("按键触感反馈", isOn: $draft.hapticFeedback)
             Toggle("双击空格输入句号", isOn: $draft.doubleSpacePeriod)
         }
@@ -458,7 +458,7 @@ struct SettingsView: View {
             case .system:
                 let baseColor = previewPrefersDarkTextScheme
                     ? Color(red: 0.11, green: 0.11, blue: 0.13)
-                    : Color(red: 0.83, green: 0.84, blue: 0.87)
+                    : Color(red: 0.820, green: 0.827, blue: 0.851)
                 baseColor.opacity(draft.backgroundOpacity)
             case .pureDark:
                 Color.black.opacity(draft.backgroundOpacity)
@@ -609,43 +609,31 @@ private struct KeyboardNineKeyMockOverlay: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Mock Top Toolbar (38pt)
-            HStack(spacing: 8) {
-                Text("语音")
-                    .font(.system(size: 11, weight: .semibold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.blue.opacity(0.20))
-                    .foregroundStyle(wireframeOnly ? .white : .blue)
-                    .clipShape(Capsule())
-
-                Text("九宫格")
-                    .font(.system(size: 11, weight: .semibold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.secondary.opacity(0.18))
-                    .foregroundStyle(labelColor.opacity(0.85))
-                    .clipShape(Capsule())
-
-                Spacer()
-
-                Text("免切")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.green)
-                Image(systemName: "globe")
-                    .font(.system(size: 13))
-                    .foregroundStyle(labelColor.opacity(0.7))
-            }
-            .frame(height: 34)
-            .padding(.horizontal, 8)
-
-            Divider().opacity(0.22)
-
-            // Mock Candidate Bar (36pt)
+            // Mock Band 1: Native Pinyin Preview Bar above candidates (32pt)
             HStack(spacing: 14) {
-                ForEach(["的", "一", "我", "你", "在", "是", "了", "不"], id: \.self) { ch in
+                Text("wo")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.blue)
+                Text("yo")
+                    .font(.system(size: 15))
+                    .foregroundStyle(labelColor.opacity(0.65))
+                Text("w  x  y  z")
+                    .font(.system(size: 14))
+                    .foregroundStyle(labelColor.opacity(0.5))
+                Spacer()
+            }
+            .frame(height: 32)
+            .padding(.horizontal, 14)
+
+            Rectangle()
+                .fill(Color.black.opacity(0.18))
+                .frame(height: 0.5)
+
+            // Mock Band 2: Native Candidate Bar (43.5pt)
+            HStack(spacing: 16) {
+                ForEach(["我", "的", "一", "你", "在", "是", "了"], id: \.self) { ch in
                     Text(ch)
-                        .font(.system(size: 16))
+                        .font(.system(size: 19))
                         .foregroundStyle(labelColor)
                 }
                 Spacer()
@@ -653,12 +641,10 @@ private struct KeyboardNineKeyMockOverlay: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(labelColor.opacity(0.6))
             }
-            .frame(height: 36)
+            .frame(height: 43.5)
             .padding(.horizontal, 12)
 
-            Divider().opacity(0.22)
-
-            // Mock 5x4 T9 Grid
+            // Mock Band 3: 5x4 T9 Grid matching exact 293pt iOS height
             GeometryReader { geo in
                 let rowSpacing: CGFloat = 7
                 let colSpacing: CGFloat = 6
@@ -671,7 +657,8 @@ private struct KeyboardNineKeyMockOverlay: View {
                     VStack(spacing: rowSpacing) {
                         mockKey("123", width: colWidth, height: rowHeight, fill: specialFill, fontSize: 14)
                         mockKey("#@¥", width: colWidth, height: rowHeight, fill: specialFill, fontSize: 14)
-                        mockKey("ABC", width: colWidth, height: span2Height, fill: specialFill, fontSize: 15)
+                        mockKey("语音", width: colWidth, height: rowHeight, fill: specialFill, fontSize: 13)
+                        mockKey("ABC", width: colWidth, height: rowHeight, fill: specialFill, fontSize: 14)
                     }
 
                     VStack(spacing: rowSpacing) {
@@ -703,13 +690,14 @@ private struct KeyboardNineKeyMockOverlay: View {
                             .background(specialFill)
                             .foregroundStyle(labelColor)
                             .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        mockKey("^_^", width: colWidth, height: rowHeight, fill: specialFill, fontSize: 14)
-                        mockKey("换行", width: colWidth, height: span2Height, fill: specialFill, fontSize: 15)
+                        mockKey("分隔", width: colWidth, height: rowHeight, fill: specialFill, fontSize: 13)
+                        mockKey("确认", width: colWidth, height: span2Height, fill: specialFill, fontSize: 15)
                     }
                 }
             }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 3)
+            .padding(.top, 7)
+            .padding(.bottom, 5)
         }
     }
 

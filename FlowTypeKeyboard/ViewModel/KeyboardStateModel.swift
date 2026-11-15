@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import SwiftUI
 import UIKit
 
@@ -92,6 +93,18 @@ public final class KeyboardStateModel: ObservableObject {
     private var lastInsertedLength: Int = 0
     private var lastReplacedOriginal: String = ""
 
+    private struct CommittedChineseToken {
+        let word: String
+        let digits: String
+        let pinyin: String
+        let timestamp: Date
+    }
+
+    private var pendingPhraseTokens: [CommittedChineseToken] = []
+    private var lastCommittedSelection: CommittedChineseToken?
+    private var lastDeletedMistakeWord: CommittedChineseToken?
+    private var sequentialPhraseCounts: [String: Int] = [:]
+
     private let hapticGenerator = UIImpactFeedbackGenerator(style: .light)
     private let statusQueue = DispatchQueue(label: "com.flowtype.keyboard.status", qos: .utility)
     private var isStatusPollInFlight = false
@@ -138,6 +151,9 @@ public final class KeyboardStateModel: ObservableObject {
         }
         self.lastObservedHostHeartbeatAt = self.hostStatus.heartbeatAt
 
+        if cfg.hapticFeedback {
+            hapticGenerator.prepare()
+        }
         queryQueue.async {
             _ = LexiconDatabase.shared
         }
@@ -226,10 +242,26 @@ public final class KeyboardStateModel: ObservableObject {
             let store = self.store
             statusQueue.async { [weak self] in
                 let prepared: UIImage?
-                if let data = store.loadCustomBackgroundImageData(),
-                   let decoded = UIImage(data: data) {
-                    // Decode JPEG off main thread so keyboard display stays at full frame rate.
-                    prepared = decoded.preparingForDisplay() ?? decoded
+                if let data = store.loadCustomBackgroundImageData() {
+                    if let source = CGImageSourceCreateWithData(data as CFData, nil) {
+                        let opts: [CFString: Any] = [
+                            kCGImageSourceCreateThumbnailFromImageAlways: true,
+                            kCGImageSourceThumbnailMaxPixelSize: 900,
+                            kCGImageSourceCreateThumbnailWithTransform: true
+                        ]
+                        if let cgThumb = CGImageSourceCreateThumbnailAtIndex(source, 0, opts as CFDictionary) {
+                            let img = UIImage(cgImage: cgThumb)
+                            prepared = img.preparingForDisplay() ?? img
+                        } else if let decoded = UIImage(data: data) {
+                            prepared = decoded.preparingForDisplay() ?? decoded
+                        } else {
+                            prepared = nil
+                        }
+                    } else if let decoded = UIImage(data: data) {
+                        prepared = decoded.preparingForDisplay() ?? decoded
+                    } else {
+                        prepared = nil
+                    }
                 } else {
                     prepared = nil
                 }
@@ -395,12 +427,14 @@ public final class KeyboardStateModel: ObservableObject {
         // Check if host is alive via PiP or background audio keep-alive
         syncHostStatusFromStore()
         if !isHostAlive {
-            // Wake Host App via Deep Link so it activates microphone & PiP
+            // Wake Host App via Deep Link so it activates microphone (and optional PiP)
             let query = [URLQueryItem(name: "mode", value: voiceMode.rawValue)]
             if let url = AppConfig.deepLinkURL(action: "record", queryItems: query) {
                 openURLHandler?(url)
             }
-            statusBannerMessage = "正在唤醒 FlowType 主程序开启麦克风与画中画..."
+            statusBannerMessage = config.autoKeepAlivePiP
+                ? "正在唤醒 FlowType 主程序开启麦克风与画中画..."
+                : "正在跳转 FlowType 主程序开启麦克风与后台音频保活..."
             return
         }
 
@@ -443,6 +477,8 @@ public final class KeyboardStateModel: ObservableObject {
             proxy.deleteBackward()
         }
         proxy.insertText(text)
+        pendingPhraseTokens.removeAll()
+        lastCommittedSelection = nil
 
         lastInsertedLength = text.count
         lastReplacedOriginal = previousSelected
@@ -485,6 +521,8 @@ public final class KeyboardStateModel: ObservableObject {
             layoutPage = .letters
         }
         activePanel = panel
+        pendingPhraseTokens.removeAll()
+        lastCommittedSelection = nil
         isCandidateDrawerExpanded = false
         isT9PinyinPickerExpanded = false
         isEmoticonDrawerOpen = false
@@ -515,6 +553,8 @@ public final class KeyboardStateModel: ObservableObject {
             commitT9AsRawDigits()
         }
         manualLanguage = (manualLanguage == .chinesePinyin) ? .english : .chinesePinyin
+        pendingPhraseTokens.removeAll()
+        lastCommittedSelection = nil
         layoutPage = .letters
         isCandidateDrawerExpanded = false
         isT9PinyinPickerExpanded = false
@@ -625,6 +665,8 @@ public final class KeyboardStateModel: ObservableObject {
             learnCurrentEnglishWordIfNeeded()
         }
         proxy.insertText(" ")
+        pendingPhraseTokens.removeAll()
+        lastCommittedSelection = nil
         scheduleContextRefresh()
     }
 
@@ -642,6 +684,8 @@ public final class KeyboardStateModel: ObservableObject {
             learnCurrentEnglishWordIfNeeded()
         }
         proxyProvider?()?.insertText("\n")
+        pendingPhraseTokens.removeAll()
+        lastCommittedSelection = nil
         scheduleContextRefresh()
     }
 
@@ -659,6 +703,15 @@ public final class KeyboardStateModel: ObservableObject {
                 updatePinyinCandidates()
             }
             return
+        }
+
+        if let last = lastCommittedSelection,
+           Date().timeIntervalSince(last.timestamp) < 6.0,
+           let before = proxyProvider?()?.documentContextBeforeInput,
+           before.hasSuffix(last.word) {
+            lastDeletedMistakeWord = last
+            lastCommittedSelection = nil
+            pendingPhraseTokens.removeAll()
         }
 
         proxyProvider?()?.deleteBackward()
@@ -777,18 +830,12 @@ public final class KeyboardStateModel: ObservableObject {
             let pureDigits = t9ComposingDigits.replacingOccurrences(of: "'", with: "")
             let consumedDigits = String(pureDigits.prefix(candidate.consumedChars))
             let prevWord = lastCommittedWord
-            let wordText = candidate.text
-            let candPinyin = candidate.displayPinyin
-            let lexiconDB = LexiconDatabase.shared
-
-            queryQueue.async {
-                lexiconDB.recordT9Selection(
-                    digits: consumedDigits,
-                    word: wordText,
-                    pinyin: candPinyin,
-                    previousWord: prevWord
-                )
-            }
+            recordLearnedChineseSelection(
+                digits: consumedDigits,
+                pinyin: candidate.displayPinyin,
+                word: candidate.text,
+                previousWord: prevWord
+            )
             lastCommittedWord = candidate.text
             maybeAutoLearnCorrection(term: candidate.text, pinyinHint: candidate.displayPinyin)
 
@@ -812,21 +859,21 @@ public final class KeyboardStateModel: ObservableObject {
 
         let clean = composingPinyin.lowercased().filter { $0 >= "a" && $0 <= "z" }
         let usedPinyin = String(clean.prefix(candidate.consumedChars))
-        let wordText = candidate.text
-        let lexiconDB = LexiconDatabase.shared
-        queryQueue.async {
-            lexiconDB.recordChineseSelection(pinyin: usedPinyin, word: wordText)
-        }
-        lexicon.recordT9Selection(
-            digits: LexiconDatabase.pinyinToT9Digits(usedPinyin),
+        let resolvedPy = candidate.displayPinyin.isEmpty ? usedPinyin : candidate.displayPinyin
+        let cleanPy = resolvedPy.lowercased().filter { $0 >= "a" && $0 <= "z" }
+        let digits = LexiconDatabase.pinyinToT9Digits(cleanPy)
+        let prevWord = lastCommittedWord
+
+        recordLearnedChineseSelection(
+            digits: digits,
+            pinyin: cleanPy,
             word: candidate.text,
-            pinyin: usedPinyin,
-            previousWord: lastCommittedWord
+            previousWord: prevWord
         )
         lastCommittedWord = candidate.text
 
         // Typeless v2.8.0: auto-learn correction into Personal Dictionary if user edits shortly after dictation
-        maybeAutoLearnCorrection(term: candidate.text, pinyinHint: usedPinyin)
+        maybeAutoLearnCorrection(term: candidate.text, pinyinHint: cleanPy)
 
         let remainingClean = String(clean.dropFirst(candidate.consumedChars))
         if remainingClean.isEmpty {
@@ -837,7 +884,111 @@ public final class KeyboardStateModel: ObservableObject {
             isCandidateDrawerExpanded = false
             updatePinyinCandidates()
         }
-        refreshContextFromProxy()
+        scheduleContextRefresh()
+    }
+
+    private func recordLearnedChineseSelection(
+        digits: String,
+        pinyin: String,
+        word: String,
+        previousWord: String?
+    ) {
+        let now = Date()
+        let cleanPy = pinyin.lowercased().filter { $0 >= "a" && $0 <= "z" }
+        let cleanDigits = digits.filter { $0 >= "2" && $0 <= "9" }
+
+        var boostWeight = 1
+        if let mistake = lastDeletedMistakeWord,
+           now.timeIntervalSince(mistake.timestamp) < 6.0,
+           mistake.word != word,
+           (!cleanDigits.isEmpty && mistake.digits == cleanDigits)
+            || (!cleanPy.isEmpty && mistake.pinyin == cleanPy)
+            || (!mistake.word.isEmpty && mistake.word.count == word.count) {
+            boostWeight = 3
+            lastDeletedMistakeWord = nil
+        }
+
+        let lexiconDB = lexicon
+        let weightSnapshot = boostWeight
+        queryQueue.async {
+            lexiconDB.recordT9Selection(
+                digits: cleanDigits,
+                word: word,
+                pinyin: cleanPy,
+                previousWord: previousWord,
+                boostWeight: weightSnapshot
+            )
+        }
+
+        let token = CommittedChineseToken(word: word, digits: cleanDigits, pinyin: cleanPy, timestamp: now)
+        lastCommittedSelection = token
+
+        // Sequential compound phrase auto-learning: combines consecutive Chinese picks into higher-ranked user phrases
+        if Self.isPureChineseCharacters(word), word.count <= 4 {
+            if let lastToken = pendingPhraseTokens.last, now.timeIntervalSince(lastToken.timestamp) > 8.0 {
+                pendingPhraseTokens.removeAll()
+            }
+            pendingPhraseTokens.append(token)
+            if pendingPhraseTokens.count > 3 {
+                pendingPhraseTokens.removeFirst()
+            }
+
+            if pendingPhraseTokens.count >= 2 {
+                let tailPair = Array(pendingPhraseTokens.suffix(2))
+                learnCombinedPhraseTokensIfValid(tailPair)
+                if pendingPhraseTokens.count == 3 {
+                    learnCombinedPhraseTokensIfValid(pendingPhraseTokens)
+                }
+            }
+        } else {
+            pendingPhraseTokens.removeAll()
+        }
+    }
+
+    private func learnCombinedPhraseTokensIfValid(_ tokens: [CommittedChineseToken]) {
+        guard tokens.count >= 2 else { return }
+        let combinedWord = tokens.map(\.word).joined()
+        let combinedPy = tokens.map(\.pinyin).joined()
+        let combinedDigits = tokens.map(\.digits).joined()
+        guard combinedWord.count >= 2,
+              combinedWord.count <= 6,
+              !combinedPy.isEmpty,
+              !combinedDigits.isEmpty else { return }
+
+        let lexiconDB = lexicon
+        queryQueue.async {
+            lexiconDB.recordT9Selection(
+                digits: combinedDigits,
+                word: combinedWord,
+                pinyin: combinedPy,
+                boostWeight: 1
+            )
+        }
+
+        let count = (sequentialPhraseCounts[combinedWord] ?? 0) + 1
+        if sequentialPhraseCounts.count > 64 {
+            sequentialPhraseCounts.removeAll()
+        }
+        sequentialPhraseCounts[combinedWord] = count
+
+        if count >= 2 {
+            let store = self.store
+            statusQueue.async { [weak self] in
+                if store.addOrLearnWord(term: combinedWord, pinyinHint: combinedPy, category: .phrase, autoLearned: true) != nil {
+                    let updated = store.loadDictionary()
+                    Task { @MainActor [weak self] in
+                        self?.personalWords = updated
+                    }
+                }
+            }
+        }
+    }
+
+    private static func isPureChineseCharacters(_ text: String) -> Bool {
+        !text.isEmpty && text.unicodeScalars.allSatisfy { scalar in
+            (scalar.value >= 0x4E00 && scalar.value <= 0x9FFF) ||
+            (scalar.value >= 0x3400 && scalar.value <= 0x4DBF)
+        }
     }
 
     public func commitTopPinyinCandidate() {
@@ -1044,7 +1195,9 @@ public final class KeyboardStateModel: ObservableObject {
                 isCancelled: { counter.value != token }
             )
             guard counter.value == token else { return }
-            publish(full.syllableOptions, full.candidates)
+            if full.syllableOptions != fast.syllableOptions || full.candidates != fast.candidates {
+                publish(full.syllableOptions, full.candidates)
+            }
         }
     }
 

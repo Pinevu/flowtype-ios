@@ -96,7 +96,11 @@ public struct VoiceKeyboardPanel: View {
                 .background(keyBackgroundColor.opacity(0.65))
                 .clipShape(Capsule())
             } else {
-                Text(model.isHostAlive ? "后台保活中 · 轻点即说，无需切出当前应用" : "首次使用将短暂切到主程序开启画中画保活")
+                Text(model.isHostAlive
+                     ? "后台保活中 · 轻点即说，无需切出当前应用"
+                     : (model.config.autoKeepAlivePiP
+                        ? "首次使用将短暂切到主程序开启麦克风与画中画保活"
+                        : "首次或系统回收后点语音将短暂打开主程序录音并维持后台保活"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

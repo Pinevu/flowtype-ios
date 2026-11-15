@@ -38,60 +38,94 @@ struct HomeView: View {
         }
     }
 
-    // MARK: - 1. PiP Keep-Alive Card
+    // MARK: - 1. Background Keep-Alive Card (Silent Audio & Optional PiP)
 
     private var pipKeepAliveCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let isAudioAlive = coordinator.status.isAudioKeepAliveActive
+        let isPiPAlive = coordinator.pipManager.isPiPActive
+        let anyAlive = isAudioAlive || isPiPAlive
+
+        return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("画中画免切 App 保活", systemImage: "pip.fill")
+                    Label("后台免切语音保活", systemImage: anyAlive ? "waveform.circle.fill" : "waveform.circle")
                         .font(.headline)
-                    Text(coordinator.pipManager.isPiPActive
-                         ? "PiP 已激活：现在切到任意 App，点键盘即可直接录音"
-                         : "开启后切到其他 App 时主程序保持后台待命，无需来回跳转")
+                    Text(keepAliveSubtitle(isAudioAlive: isAudioAlive, isPiPAlive: isPiPAlive))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Circle()
-                    .fill(coordinator.pipManager.isPiPActive ? Color.green : Color.orange)
+                    .fill(anyAlive ? Color.green : Color.orange)
                     .frame(width: 10, height: 10)
             }
 
-            // Live PiP sample buffer display view (must stay visible/attached for iOS PiP)
-            PiPHostPreviewRepresentable(view: coordinator.pipManager.hostView)
-                .frame(height: 68)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
-                )
-
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 Button {
-                    coordinator.togglePiPStandby()
+                    coordinator.toggleAudioBackgroundKeepAlive()
                 } label: {
                     Label(
-                        coordinator.pipManager.isPiPActive ? "关闭画中画保活" : "启动画中画待命",
-                        systemImage: coordinator.pipManager.isPiPActive ? "stop.circle.fill" : "play.circle.fill"
+                        coordinator.config.enableAudioBackgroundKeepAlive ? "无浮窗音频保活：已开" : "开启无浮窗音频保活",
+                        systemImage: coordinator.config.enableAudioBackgroundKeepAlive ? "checkmark.circle.fill" : "speaker.wave.2.circle"
                     )
                     .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(coordinator.pipManager.isPiPActive ? .red : .blue)
+                .tint(coordinator.config.enableAudioBackgroundKeepAlive ? .green : .blue)
             }
 
-            if let err = coordinator.pipManager.lastErrorMessage {
-                Text(err)
-                    .font(.caption)
-                    .foregroundStyle(.red)
+            DisclosureGroup("画中画 (PiP) 增强保活（可选）") {
+                VStack(alignment: .leading, spacing: 10) {
+                    PiPHostPreviewRepresentable(view: coordinator.pipManager.hostView)
+                        .frame(height: 60)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
+                        )
+
+                    Button {
+                        coordinator.togglePiPStandby()
+                    } label: {
+                        Label(
+                            isPiPAlive ? "关闭画中画浮窗" : "启用画中画 (PiP) 保活",
+                            systemImage: isPiPAlive ? "stop.circle.fill" : "pip.enter"
+                        )
+                        .font(.caption.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(isPiPAlive ? .red : .secondary)
+
+                    if let err = coordinator.pipManager.lastErrorMessage {
+                        Text(err)
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    }
+                }
+                .padding(.top, 8)
             }
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
         }
         .padding(16)
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func keepAliveSubtitle(isAudioAlive: Bool, isPiPAlive: Bool) -> String {
+        if isAudioAlive && isPiPAlive {
+            return "无浮窗音频 + 画中画双重保活中，切到任意 App 点语音即可录音"
+        } else if isAudioAlive {
+            return "静音后台音频保活中（无画中画浮窗），短时间内点键盘语音直接录音"
+        } else if isPiPAlive {
+            return "PiP 画中画保活中：现在切到任意 App，点键盘即可直接录音"
+        } else {
+            return "开启静音音频保活后无需挂画中画浮窗即可后台待命；若被系统回收将自动短跳唤醒"
+        }
     }
 
     // MARK: - 2. Keyboard Setup & App Group Check
