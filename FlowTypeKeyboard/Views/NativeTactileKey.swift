@@ -252,7 +252,7 @@ struct NativeKeyPresentation: Equatable {
     var textColor: UIColor = .label
     var tintColor: UIColor = .label
     var isDark: Bool = false
-    var showsPopover: Bool = true
+    var showsPopover: Bool = false
     var popoverTitle: String? = nil
     var swipeUpText: String? = nil
     var longPressOptions: [String] = []

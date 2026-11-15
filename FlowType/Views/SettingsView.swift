@@ -137,7 +137,7 @@ struct SettingsView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
 
-                TextField("ASR 模型（如 whisper-1）", text: $draft.asrModel)
+                TextField("ASR 模型（如 whisper-1、grok-stt）", text: $draft.asrModel)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
             }
@@ -153,7 +153,7 @@ struct SettingsView: View {
         } header: {
             Text("语音识别 (ASR) 自定义")
         } footer: {
-            Text("支持 OpenAI Whisper、Groq、硅基流动 SenseVoice、Google Gemini 音频直出，以及免 Key 的 Apple 系统语音识别。")
+            Text("兼容 OpenAI Whisper、Grok STT (grok-stt)、Groq、硅基流动 SenseVoice、OneAPI/中转站、Gemini 与 Apple 语音；可直接填「域名/v1」，将自动补全 https:// 并兼容精简参数。")
         }
     }
 

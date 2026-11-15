@@ -9,8 +9,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.1.9"
-    CURRENT_PROJECT_VERSION: "5"
+    MARKETING_VERSION: "0.1.10"
+    CURRENT_PROJECT_VERSION: "6"
     DEVELOPMENT_TEAM: ""
     FLOWTYPE_APP_GROUP_ID: group.com.flowtype.voice
     FLOWTYPE_URL_SCHEME: flowtype

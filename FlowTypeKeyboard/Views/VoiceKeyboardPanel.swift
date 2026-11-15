@@ -5,49 +5,63 @@ public struct VoiceKeyboardPanel: View {
     @Environment(\.colorScheme) private var colorScheme
 
     public var body: some View {
-        VStack(spacing: 10) {
-            if !model.hasFullAccess {
-                fullAccessBanner
-            } else {
-                contextAccessoryBar
-            }
+        GeometryReader { geo in
+            let compact = geo.size.height < 225
+            let bannerMsg = model.statusBannerMessage ?? ""
+            let hasBanner = !bannerMsg.isEmpty
+            let needsAudioRecovery = hasBanner && (
+                KeyboardKeyGestureMap.isAudioSessionConflictError(message: bannerMsg)
+                || bannerMsg.contains("麦克风")
+                || bannerMsg.contains("权限")
+                || bannerMsg.contains("保活")
+            )
 
-            Spacer(minLength: 2)
+            VStack(spacing: (compact || hasBanner) ? 5 : 8) {
+                if !model.hasFullAccess {
+                    fullAccessBanner
+                } else {
+                    contextAccessoryBar
+                }
 
-            centerVoiceArea
+                Spacer(minLength: 0)
 
-            if let banner = model.statusBannerMessage, !banner.isEmpty {
-                VStack(spacing: 5) {
-                    Text(banner)
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 16)
+                centerVoiceArea(compact: compact, hasBanner: hasBanner)
 
-                    if model.hostStatus.state == .error || KeyboardKeyGestureMap.isAudioSessionConflictError(message: banner) {
-                        Button {
-                            model.openHostAppForVoiceRecording()
-                        } label: {
-                            Label("前往主程序激活录音", systemImage: "arrow.up.forward.app.fill")
-                                .font(.caption.weight(.semibold))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 5)
-                                .background(Color.blue.opacity(0.16))
-                                .foregroundStyle(.blue)
-                                .clipShape(Capsule())
+                if hasBanner {
+                    VStack(spacing: 4) {
+                        Text(bannerMsg)
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.85)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 12)
+
+                        if needsAudioRecovery {
+                            Button {
+                                model.openHostAppForVoiceRecording()
+                            } label: {
+                                Label("前往主程序激活录音", systemImage: "arrow.up.forward.app.fill")
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 4)
+                                    .background(Color.blue.opacity(0.16))
+                                    .foregroundStyle(.blue)
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
+
+                Spacer(minLength: 0)
+
+                bottomUtilityRow
             }
-
-            Spacer(minLength: 2)
-
-            bottomUtilityRow
+            .padding(.horizontal, 10)
+            .padding(.vertical, compact ? 4 : 6)
+            .frame(width: geo.size.width, height: geo.size.height)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
     }
 
     // MARK: - Full Access Warning
@@ -129,17 +143,17 @@ public struct VoiceKeyboardPanel: View {
     // MARK: - Center Microphone Control
 
     @ViewBuilder
-    private var centerVoiceArea: some View {
+    private func centerVoiceArea(compact: Bool, hasBanner: Bool) -> some View {
         switch model.hostStatus.state {
         case .recording:
-            VStack(spacing: 10) {
+            VStack(spacing: compact ? 6 : 10) {
                 waveformBars(level: model.hostStatus.audioLevel)
 
                 if !model.hostStatus.partialText.isEmpty {
                     Text(model.hostStatus.partialText)
                         .font(.caption)
                         .foregroundStyle(.primary)
-                        .lineLimit(2)
+                        .lineLimit(compact ? 1 : 2)
                         .padding(.horizontal, 12)
                 }
 
@@ -150,7 +164,7 @@ public struct VoiceKeyboardPanel: View {
                         Label("取消", systemImage: "xmark")
                             .font(.subheadline.weight(.medium))
                             .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
+                            .padding(.vertical, compact ? 7 : 10)
                             .background(keyBackgroundColor)
                             .foregroundStyle(.primary)
                             .clipShape(Capsule())
@@ -166,7 +180,7 @@ public struct VoiceKeyboardPanel: View {
                         }
                         .font(.subheadline.weight(.semibold))
                         .padding(.horizontal, 22)
-                        .padding(.vertical, 11)
+                        .padding(.vertical, compact ? 8 : 11)
                         .background(Color.red)
                         .foregroundStyle(.white)
                         .clipShape(Capsule())
@@ -176,21 +190,23 @@ public struct VoiceKeyboardPanel: View {
             }
 
         case .transcribing, .polishing:
-            VStack(spacing: 10) {
+            VStack(spacing: compact ? 6 : 10) {
                 ProgressView()
                     .controlSize(.regular)
                 Text(model.hostStatus.state == .transcribing ? "正在转写语音..." : "AI 正在整理润色...")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.secondary)
             }
-            .frame(height: 112)
+            .frame(height: compact ? 80 : 104)
 
         default:
-            VStack(spacing: 8) {
+            let micSize: CGFloat = compact ? 48 : (hasBanner ? 58 : 70)
+            let iconSize: CGFloat = compact ? 22 : (hasBanner ? 26 : 29)
+            VStack(spacing: compact ? 4 : 7) {
                 Button {
                     model.toggleVoiceRecording()
                 } label: {
-                    VStack(spacing: 6) {
+                    VStack(spacing: compact ? 3 : 6) {
                         ZStack {
                             Circle()
                                 .fill(
@@ -202,22 +218,22 @@ public struct VoiceKeyboardPanel: View {
                                         endPoint: .bottomTrailing
                                     )
                                 )
-                                .frame(width: 74, height: 74)
+                                .frame(width: micSize, height: micSize)
                                 .shadow(color: .black.opacity(0.14), radius: 6, y: 3)
 
                             Image(systemName: model.isHostAlive ? "mic.fill" : "mic")
-                                .font(.system(size: 30, weight: .semibold))
+                                .font(.system(size: iconSize, weight: .semibold))
                                 .foregroundStyle(model.isHostAlive ? .white : .blue)
                         }
 
                         Text("点击开始「\(model.voiceMode.title)」")
-                            .font(.subheadline.weight(.semibold))
+                            .font((compact ? Font.caption : Font.subheadline).weight(.semibold))
                             .foregroundStyle(.primary)
                     }
                 }
                 .buttonStyle(.plain)
 
-                if model.config.enableSwipeToType {
+                if model.config.enableSwipeToType && !compact && !hasBanner {
                     Text("左右滑动切出全拼 / 英文键盘")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)

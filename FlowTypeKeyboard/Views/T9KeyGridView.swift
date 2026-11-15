@@ -288,7 +288,7 @@ struct T9KeyGridView: View, Equatable {
                 edgeColor: uiPalette.edge,
                 textColor: uiPalette.primaryText,
                 isDark: isDark,
-                showsPopover: true,
+                showsPopover: false,
                 popoverTitle: letters,
                 swipeUpText: KeyboardKeyGestureMap.t9SwipeUp(digit: digit),
                 longPressOptions: KeyboardKeyGestureMap.t9LongPressOptions(digit: digit),

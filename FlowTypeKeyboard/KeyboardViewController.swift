@@ -30,6 +30,7 @@ public final class KeyboardViewController: UIInputViewController {
         host.view.translatesAutoresizingMaskIntoConstraints = false
         host.view.backgroundColor = .clear
         host.view.isOpaque = false
+        host.view.clipsToBounds = true
         inputView?.allowsSelfSizing = true
 
         addChild(host)

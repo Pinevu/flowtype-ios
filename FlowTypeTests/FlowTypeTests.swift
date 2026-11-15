@@ -609,4 +609,210 @@ final class FlowTypeTests: XCTestCase {
         XCTAssertFalse(KeyboardKeyGestureMap.isAudioSessionConflictError(message: nil))
         XCTAssertFalse(KeyboardKeyGestureMap.isAudioSessionConflictError(message: "网络连接正常"))
     }
+
+    func testAIServiceURLNormalizationAndModelDefaults() {
+        XCTAssertEqual(
+            AIServiceClient.normalizedBase("stt.example.com/v1/"),
+            "https://stt.example.com/v1"
+        )
+        XCTAssertEqual(
+            AIServiceClient.normalizedBase("https://stt.example.com/v1/"),
+            "https://stt.example.com/v1"
+        )
+        XCTAssertEqual(
+            AIServiceClient.normalizedBase("127.0.0.1:8080/v1"),
+            "http://127.0.0.1:8080/v1"
+        )
+        XCTAssertEqual(
+            AIServiceClient.buildOpenAIURL(base: "stt.example.com/v1", suffix: "audio/transcriptions")?.absoluteString,
+            "https://stt.example.com/v1/audio/transcriptions"
+        )
+        XCTAssertTrue(AIServiceClient.modelPrefersNoPrompt("grok-stt"))
+        XCTAssertTrue(AIServiceClient.modelPrefersNoPrompt("SenseVoiceSmall"))
+        XCTAssertFalse(AIServiceClient.modelPrefersNoPrompt("whisper-1"))
+    }
+
+    func testOpenAITranscriptResponseParserFormatsAndErrors() throws {
+        XCTAssertEqual(
+            try AIServiceClient.parseOpenAITranscriptResponse(data: Data(#"{"text":" 你好世界 "}"#.utf8)),
+            "你好世界"
+        )
+        XCTAssertEqual(
+            try AIServiceClient.parseOpenAITranscriptResponse(data: Data(#"{"transcript":"语音识别成功"}"#.utf8)),
+            "语音识别成功"
+        )
+        XCTAssertEqual(
+            try AIServiceClient.parseOpenAITranscriptResponse(data: Data(#"{"data":{"text":"嵌套结果"}}"#.utf8)),
+            "嵌套结果"
+        )
+        XCTAssertEqual(
+            try AIServiceClient.parseOpenAITranscriptResponse(data: Data(#"{"choices":[{"message":{"content":"对话格式"}}]}"#.utf8)),
+            "对话格式"
+        )
+        XCTAssertEqual(
+            try AIServiceClient.parseOpenAITranscriptResponse(data: Data(#""纯文本JSON""#.utf8)),
+            "纯文本JSON"
+        )
+        XCTAssertThrowsError(
+            try AIServiceClient.parseOpenAITranscriptResponse(
+                data: Data(#"{"error":{"code":"bad_key","message":"invalid token"}}"#.utf8)
+            )
+        )
+        XCTAssertThrowsError(
+            try AIServiceClient.parseOpenAITranscriptResponse(
+                data: Data("<!DOCTYPE html><html><body>404</body></html>".utf8)
+            )
+        )
+    }
+
+    func testOpenAIWhisperCompatibilityRetriesAndGrokSTT() async throws {
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [MockSTTURLProtocol.self]
+        let mockSession = URLSession(configuration: sessionConfig)
+        let client = AIServiceClient(session: mockSession)
+        let dummyWAV = Data(repeating: 0x5A, count: 128)
+        let hotwords = [PersonalWord(term: "FlowType"), PersonalWord(term: "热词测试")]
+
+        defer { MockSTTURLProtocol.setHandler(nil) }
+
+        // Case 1: Custom model sends prompt, server rejects with 400 unsupported_parameter -> auto retry without prompt
+        var customBodies: [String] = []
+        MockSTTURLProtocol.setHandler { request, body in
+            XCTAssertEqual(request.url?.absoluteString, "https://stt.example.com/v1/audio/transcriptions")
+            customBodies.append(body)
+            if body.contains("name=\"prompt\"") {
+                return (400, Data(#"{"error":{"code":"unsupported_parameter","message":"prompt 暂不支持"}}"#.utf8))
+            }
+            XCTAssertTrue(body.contains("name=\"language\"\r\n\r\nzh"))
+            return (200, Data(#"{"text":"自动重试成功"}"#.utf8))
+        }
+        let cfgCustom = AIConfiguration(
+            asrProvider: .openAIWhisperCompatible,
+            asrBaseURL: "stt.example.com/v1",
+            asrAPIKey: "test_key_123",
+            asrModel: "whisper-custom",
+            asrLanguage: "zh"
+        )
+        let customOut = try await client.transcribeAudio(wavData: dummyWAV, config: cfgCustom, personalWords: hotwords)
+        XCTAssertEqual(customOut, "自动重试成功")
+        XCTAssertEqual(customBodies.count, 2)
+
+        // Case 2: grok-stt skips prompt proactively on first attempt and succeeds cleanly
+        var grokCalls = 0
+        MockSTTURLProtocol.setHandler { request, body in
+            grokCalls += 1
+            XCTAssertEqual(request.url?.absoluteString, "https://stt.example.com/v1/audio/transcriptions")
+            XCTAssertTrue(body.contains("name=\"model\"\r\n\r\ngrok-stt"))
+            XCTAssertFalse(body.contains("name=\"prompt\""))
+            return (200, Data(#"{"text":"直连成功"}"#.utf8))
+        }
+        let cfgGrok = AIConfiguration(
+            asrProvider: .openAIWhisperCompatible,
+            asrBaseURL: "stt.example.com/v1",
+            asrAPIKey: "test_key_123",
+            asrModel: "grok-stt",
+            asrLanguage: "zh"
+        )
+        let grokOut = try await client.transcribeAudio(wavData: dummyWAV, config: cfgGrok, personalWords: hotwords)
+        XCTAssertEqual(grokOut, "直连成功")
+        XCTAssertEqual(grokCalls, 1)
+
+        // Case 3: Endpoint rejecting language also falls back to model + file only
+        var langFallbackCalls = 0
+        MockSTTURLProtocol.setHandler { _, body in
+            langFallbackCalls += 1
+            if body.contains("name=\"language\"") {
+                return (422, Data(#"{"error":{"message":"language unsupported"}}"#.utf8))
+            }
+            return (200, Data(#"{"data":{"text":"极简参数成功"}}"#.utf8))
+        }
+        let langOut = try await client.transcribeAudio(wavData: dummyWAV, config: cfgGrok, personalWords: hotwords)
+        XCTAssertEqual(langOut, "极简参数成功")
+        XCTAssertEqual(langFallbackCalls, 2)
+
+        // Case 4: Bare domain without /v1 gets 404 on /audio/transcriptions and falls back to /v1/audio/transcriptions
+        var pathsVisited: [String] = []
+        MockSTTURLProtocol.setHandler { request, _ in
+            let path = request.url?.path ?? ""
+            pathsVisited.append(path)
+            if path == "/audio/transcriptions" {
+                return (404, Data(#"{"error":"not found"}"#.utf8))
+            }
+            return (200, Data(#"{"transcript":"自动补全v1成功"}"#.utf8))
+        }
+        let cfgBare = AIConfiguration(
+            asrProvider: .openAIWhisperCompatible,
+            asrBaseURL: "stt.example.com",
+            asrAPIKey: "test_key_123",
+            asrModel: "grok-stt",
+            asrLanguage: "auto"
+        )
+        let bareOut = try await client.transcribeAudio(wavData: dummyWAV, config: cfgBare, personalWords: hotwords)
+        XCTAssertEqual(bareOut, "自动补全v1成功")
+        XCTAssertEqual(pathsVisited, ["/audio/transcriptions", "/v1/audio/transcriptions"])
+    }
+}
+
+private final class MockSTTURLProtocol: URLProtocol {
+    typealias Handler = (URLRequest, String) throws -> (Int, Data)
+    private static let lock = NSLock()
+    private static var handler: Handler?
+
+    static func setHandler(_ newHandler: Handler?) {
+        lock.lock()
+        handler = newHandler
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lock.lock()
+        let currentHandler = Self.handler
+        Self.lock.unlock()
+
+        guard let currentHandler, let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+
+        var bodyData = request.httpBody ?? Data()
+        if bodyData.isEmpty, let stream = request.httpBodyStream {
+            stream.open()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let readCount = stream.read(&buffer, maxLength: buffer.count)
+                if readCount > 0 {
+                    bodyData.append(buffer, count: readCount)
+                } else {
+                    break
+                }
+            }
+            stream.close()
+        }
+        let bodyString = String(decoding: bodyData, as: UTF8.self)
+
+        do {
+            let (statusCode, responseData) = try currentHandler(request, bodyString)
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: responseData)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
 }

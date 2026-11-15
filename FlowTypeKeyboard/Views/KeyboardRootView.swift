@@ -16,8 +16,9 @@ public struct KeyboardRootView: View {
         VStack(spacing: 0) {
             if model.activePanel == .voice {
                 topToolbar
-                    .frame(height: 34)
+                    .padding(.top, 4)
                     .padding(.horizontal, 8)
+                    .frame(height: 38)
 
                 Divider()
                     .opacity(0.35)
@@ -25,11 +26,13 @@ public struct KeyboardRootView: View {
                 VoiceKeyboardPanel(model: model)
                     .gesture(swipeToSwitchGesture)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
             } else {
                 ManualKeyboardPanel(model: model)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(
             KeyboardBackgroundView(
                 style: model.config.backgroundStyle,
@@ -93,6 +96,8 @@ public struct KeyboardRootView: View {
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .clipped()
             } else {
                 // Quick manual layout switch pill & language indicator
                 HStack(spacing: 6) {

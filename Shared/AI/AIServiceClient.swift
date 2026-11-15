@@ -128,6 +128,130 @@ public final class AIServiceClient {
         }
     }
 
+    public static func modelPrefersNoPrompt(_ model: String) -> Bool {
+        let lower = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lower.contains("grok")
+            || lower.contains("sensevoice")
+            || lower.contains("paraformer")
+            || lower.contains("glm-asr")
+            || lower.contains("voxtral")
+            || (lower.contains("qwen") && lower.contains("asr"))
+    }
+
+    public static func buildOpenAIWhisperMultipartBody(
+        wavData: Data,
+        model: String,
+        language: String?,
+        prompt: String?,
+        boundary: String
+    ) -> Data {
+        var body = Data()
+
+        func appendField(name: String, value: String) {
+            body.append(contentsOf: "--\(boundary)\r\n".utf8)
+            body.append(contentsOf: "Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".utf8)
+            body.append(contentsOf: "\(value)\r\n".utf8)
+        }
+
+        appendField(name: "model", value: model.isEmpty ? "whisper-1" : model)
+        if let language, !language.isEmpty, language != "auto" {
+            appendField(name: "language", value: language)
+        }
+        if let prompt, !prompt.isEmpty {
+            appendField(name: "prompt", value: prompt)
+        }
+
+        body.append(contentsOf: "--\(boundary)\r\n".utf8)
+        body.append(contentsOf: "Content-Disposition: form-data; name=\"file\"; filename=\"speech.wav\"\r\n".utf8)
+        body.append(contentsOf: "Content-Type: audio/wav\r\n\r\n".utf8)
+        body.append(wavData)
+        body.append(contentsOf: "\r\n--\(boundary)--\r\n".utf8)
+        return body
+    }
+
+    public static func parseOpenAITranscriptResponse(data: Data) throws -> String {
+        if let json = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+            if let dict = json as? [String: Any] {
+                if let errorValue = dict["error"] {
+                    let message: String
+                    if let errorDict = errorValue as? [String: Any] {
+                        message = (errorDict["message"] as? String)
+                            ?? (errorDict["code"] as? String)
+                            ?? String(describing: errorDict)
+                    } else if let errorText = errorValue as? String {
+                        message = errorText
+                    } else {
+                        message = String(describing: errorValue)
+                    }
+                    throw AIServiceError.serverError(200, String(message.prefix(300)))
+                }
+
+                for key in ["text", "transcript", "result", "output", "content"] {
+                    if let text = dict[key] as? String {
+                        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+
+                if let nestedData = dict["data"] as? [String: Any] {
+                    for key in ["text", "transcript", "result", "content"] {
+                        if let text = nestedData[key] as? String {
+                            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
+                    }
+                }
+
+                if let nestedResult = dict["result"] as? [String: Any] {
+                    for key in ["text", "transcript", "content"] {
+                        if let text = nestedResult[key] as? String {
+                            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
+                    }
+                }
+
+                if let results = dict["results"] as? [[String: Any]], let first = results.first {
+                    for key in ["transcript", "text", "content"] {
+                        if let text = first[key] as? String {
+                            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
+                    }
+                    if let alts = first["alternatives"] as? [[String: Any]],
+                       let transcript = alts.first?["transcript"] as? String {
+                        return transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+
+                if let choices = dict["choices"] as? [[String: Any]], let first = choices.first {
+                    if let message = first["message"] as? [String: Any],
+                       let content = message["content"] as? String {
+                        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    if let text = first["text"] as? String {
+                        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+
+                throw AIServiceError.invalidResponse("ASR JSON 未包含 text/transcript 字段")
+            }
+
+            if let text = json as? String {
+                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        if let plain = String(data: data, encoding: .utf8) {
+            let trimmed = plain.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                let lower = trimmed.lowercased()
+                if lower.hasPrefix("<!doctype html") || lower.hasPrefix("<html") {
+                    throw AIServiceError.invalidResponse("接口返回了 HTML 页面，请检查 ASR 接口地址是否正确")
+                }
+                return trimmed
+            }
+        }
+
+        throw AIServiceError.invalidResponse("ASR 未返回 text 字段")
+    }
+
     private func transcribeOpenAIWhisper(
         wavData: Data,
         config: AIConfiguration,
@@ -137,53 +261,80 @@ public final class AIServiceClient {
         if key.isEmpty && !isLocalURL(config.asrBaseURL) {
             throw AIServiceError.missingAPIKey("ASR 语音识别")
         }
-        guard let url = buildURL(base: config.asrBaseURL, suffix: "audio/transcriptions") else {
+        guard let primaryURL = buildURL(base: config.asrBaseURL, suffix: "audio/transcriptions"),
+              primaryURL.host != nil else {
             throw AIServiceError.invalidEndpoint(config.asrBaseURL)
         }
 
-        let boundary = "FlowTypeBoundary-\(UUID().uuidString)"
-        var body = Data()
-
-        func appendField(name: String, value: String) {
-            body.append(contentsOf: "--\(boundary)\r\n".utf8)
-            body.append(contentsOf: "Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".utf8)
-            body.append(contentsOf: "\(value)\r\n".utf8)
-        }
-
-        appendField(name: "model", value: config.asrModel.isEmpty ? "whisper-1" : config.asrModel)
-        if config.asrLanguage != "auto" && !config.asrLanguage.isEmpty {
-            appendField(name: "language", value: config.asrLanguage)
-        }
+        let cleanBase = Self.normalizedBase(config.asrBaseURL)
+        let model = config.asrModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "whisper-1"
+            : config.asrModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawLang = config.asrLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
+        var currentLanguage: String? = (rawLang.isEmpty || rawLang == "auto") ? nil : rawLang
         let hotwords = PromptComposer.whisperHotwordPrompt(personalWords: personalWords)
-        if !hotwords.isEmpty {
-            appendField(name: "prompt", value: hotwords)
+        var currentPrompt: String? = (hotwords.isEmpty || Self.modelPrefersNoPrompt(model)) ? nil : hotwords
+
+        var targetURL = primaryURL
+        let v1FallbackURL: URL? = {
+            guard let baseURL = URL(string: cleanBase),
+                  baseURL.path.isEmpty || baseURL.path == "/" else {
+                return nil
+            }
+            return buildURL(base: "\(cleanBase)/v1", suffix: "audio/transcriptions")
+        }()
+        var triedV1Fallback = false
+
+        for _ in 0..<4 {
+            let boundary = "FlowTypeBoundary-\(UUID().uuidString)"
+            let body = Self.buildOpenAIWhisperMultipartBody(
+                wavData: wavData,
+                model: model,
+                language: currentLanguage,
+                prompt: currentPrompt,
+                boundary: boundary
+            )
+
+            var request = URLRequest(url: targetURL)
+            request.httpMethod = "POST"
+            request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+            if !key.isEmpty {
+                request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            }
+            request.httpBody = body
+
+            let (data, response) = try await session.data(for: request)
+            do {
+                try validateHTTP(response: response, data: data)
+                let text = try Self.parseOpenAITranscriptResponse(data: data)
+                guard !text.isEmpty else {
+                    throw AIServiceError.emptyAudio
+                }
+                return text
+            } catch let AIServiceError.serverError(statusCode, detail) {
+                if statusCode == 404, !triedV1Fallback, let fallback = v1FallbackURL {
+                    triedV1Fallback = true
+                    targetURL = fallback
+                    continue
+                }
+
+                let lower = detail.lowercased()
+                let isParamStatus = (statusCode == 400 || statusCode == 422)
+                    || (statusCode == 200 && (lower.contains("unsupported") || lower.contains("prompt") || lower.contains("parameter")))
+
+                if isParamStatus && currentPrompt != nil {
+                    currentPrompt = nil
+                    continue
+                }
+                if isParamStatus && currentLanguage != nil {
+                    currentLanguage = nil
+                    continue
+                }
+                throw AIServiceError.serverError(statusCode, detail)
+            }
         }
 
-        body.append(contentsOf: "--\(boundary)\r\n".utf8)
-        body.append(contentsOf: "Content-Disposition: form-data; name=\"file\"; filename=\"speech.wav\"\r\n".utf8)
-        body.append(contentsOf: "Content-Type: audio/wav\r\n\r\n".utf8)
-        body.append(wavData)
-        body.append(contentsOf: "\r\n--\(boundary)--\r\n".utf8)
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        if !key.isEmpty {
-            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        }
-        request.httpBody = body
-
-        let (data, response) = try await session.data(for: request)
-        try validateHTTP(response: response, data: data)
-
-        struct WhisperJSON: Decodable { let text: String }
-        if let decoded = try? JSONDecoder().decode(WhisperJSON.self, from: data) {
-            return decoded.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        if let plain = String(data: data, encoding: .utf8), !plain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return plain.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        throw AIServiceError.invalidResponse("ASR 未返回 text 字段")
+        throw AIServiceError.invalidResponse("ASR 请求重试后仍失败")
     }
 
     private func transcribeWithGemini(
@@ -423,24 +574,47 @@ public final class AIServiceClient {
         }
     }
 
-    private func normalizedBase(_ raw: String) -> String {
+    public static func normalizedBase(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return "" }
+        if !s.contains("://") {
+            let scheme = isLocalURL(s) ? "http://" : "https://"
+            s = scheme + s
+        }
         while s.hasSuffix("/") {
             s.removeLast()
         }
         return s
     }
 
-    private func buildURL(base: String, suffix: String) -> URL? {
+    public static func buildOpenAIURL(base: String, suffix: String) -> URL? {
         let cleanBase = normalizedBase(base)
+        guard !cleanBase.isEmpty else { return nil }
         if cleanBase.hasSuffix("/" + suffix) {
             return URL(string: cleanBase)
         }
         return URL(string: "\(cleanBase)/\(suffix)")
     }
 
-    private func isLocalURL(_ raw: String) -> Bool {
+    public static func isLocalURL(_ raw: String) -> Bool {
         let lower = raw.lowercased()
-        return lower.contains("127.0.0.1") || lower.contains("localhost") || lower.contains("192.168.") || lower.contains(".local")
+        return lower.contains("127.0.0.1")
+            || lower.contains("localhost")
+            || lower.contains("192.168.")
+            || lower.contains(".local")
+            || lower.contains("[::1]")
+            || lower.contains("0.0.0.0")
+    }
+
+    private func normalizedBase(_ raw: String) -> String {
+        Self.normalizedBase(raw)
+    }
+
+    private func buildURL(base: String, suffix: String) -> URL? {
+        Self.buildOpenAIURL(base: base, suffix: suffix)
+    }
+
+    private func isLocalURL(_ raw: String) -> Bool {
+        Self.isLocalURL(raw)
     }
 }

@@ -357,22 +357,6 @@ public struct ManualKeyboardPanel: View {
                 }
                 .buttonStyle(.plain)
             }
-
-            Button {
-                model.switchToPanel(.voice)
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: model.isHostAlive ? "mic.fill" : "mic")
-                    Text("语音")
-                }
-                .font(.system(size: 12, weight: .semibold))
-                .padding(.horizontal, 10)
-                .frame(height: 28)
-                .background(Color.blue.opacity(0.15))
-                .foregroundStyle(.blue)
-                .clipShape(Capsule())
-            }
-            .buttonStyle(.plain)
         }
     }
 
@@ -951,7 +935,7 @@ private struct QwertyKeyGridView: View, Equatable {
                 edgeColor: uiPalette.edge,
                 textColor: uiPalette.primaryText,
                 isDark: isDark,
-                showsPopover: true,
+                showsPopover: false,
                 popoverTitle: title,
                 swipeUpText: swipeUp,
                 longPressOptions: longOpts,
