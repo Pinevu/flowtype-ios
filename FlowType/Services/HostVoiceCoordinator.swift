@@ -422,6 +422,10 @@ public final class HostVoiceCoordinator: ObservableObject {
             }
         } catch {
             meterTimer?.invalidate()
+            if config.enableAudioBackgroundKeepAlive {
+                audioService.startSilentKeepAliveIfNeeded(enabled: true)
+            }
+            status.isAudioKeepAliveActive = audioService.isSilentKeepAliveRunning
             status.state = .error
             status.errorMessage = error.localizedDescription
             publishStatus()

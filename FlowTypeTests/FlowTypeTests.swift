@@ -546,4 +546,67 @@ final class FlowTypeTests: XCTestCase {
         db.syncOnlineLexiconIfNeeded(store: store)
         XCTAssertEqual(db.onlineWordsCount(), 0)
     }
+
+    func testKeyboardKeyGestureMapT9SwipeUpAndLongPress() {
+        for digit in 1...9 {
+            XCTAssertEqual(KeyboardKeyGestureMap.t9SwipeUp(digit: "\(digit)"), "\(digit)")
+        }
+        XCTAssertNil(KeyboardKeyGestureMap.t9SwipeUp(digit: "0"))
+
+        XCTAssertEqual(
+            KeyboardKeyGestureMap.t9LongPressOptions(digit: "1"),
+            ["1", "，", "。", "？", "！", "、", "：", "；"]
+        )
+        XCTAssertEqual(
+            KeyboardKeyGestureMap.t9LongPressOptions(digit: "2"),
+            ["2", "a", "b", "c", "A", "B", "C"]
+        )
+        XCTAssertEqual(
+            KeyboardKeyGestureMap.t9LongPressOptions(digit: "9"),
+            ["9", "w", "x", "y", "z", "W", "X", "Y", "Z"]
+        )
+    }
+
+    func testKeyboardKeyGestureMapQwertySwipeUpAndAccents() {
+        XCTAssertEqual(KeyboardKeyGestureMap.qwertySwipeUp(key: "q", isChinese: true), "1")
+        XCTAssertEqual(KeyboardKeyGestureMap.qwertySwipeUp(key: "P", isChinese: false), "0")
+        XCTAssertEqual(KeyboardKeyGestureMap.qwertySwipeUp(key: "b", isChinese: true), "；")
+        XCTAssertEqual(KeyboardKeyGestureMap.qwertySwipeUp(key: "b", isChinese: false), ";")
+        XCTAssertEqual(KeyboardKeyGestureMap.qwertySwipeUp(key: "n", isChinese: true), "！")
+        XCTAssertEqual(KeyboardKeyGestureMap.qwertySwipeUp(key: "n", isChinese: false), "!")
+        XCTAssertEqual(KeyboardKeyGestureMap.qwertySwipeUp(key: "m", isChinese: true), "？")
+        XCTAssertEqual(KeyboardKeyGestureMap.qwertySwipeUp(key: "m", isChinese: false), "?")
+
+        XCTAssertEqual(
+            KeyboardKeyGestureMap.qwertyLongPressOptions(key: "e", isChinese: true, isShifted: false),
+            ["3", "e", "E"]
+        )
+        let enLower = KeyboardKeyGestureMap.qwertyLongPressOptions(key: "e", isChinese: false, isShifted: false)
+        XCTAssertEqual(enLower.first, "e")
+        XCTAssertTrue(enLower.contains("é"))
+        XCTAssertEqual(enLower.last, "3")
+
+        let enUpperS = KeyboardKeyGestureMap.qwertyLongPressOptions(key: "s", isChinese: false, isShifted: true)
+        XCTAssertTrue(enUpperS.contains("SS"))
+        XCTAssertTrue(enUpperS.contains("S"))
+
+        XCTAssertEqual(
+            KeyboardKeyGestureMap.qwertyLongPressOptions(key: "。", isChinese: true, isShifted: false),
+            ["。", "，", "、", "：", "；", "？", "！"]
+        )
+    }
+
+    func testMinimalPiPDimensionsAndAudioConflictDetection() {
+        let w = KeyboardKeyGestureMap.pipOptimalRenderWidth
+        let h = KeyboardKeyGestureMap.pipOptimalRenderHeight
+        XCTAssertEqual(w, 240)
+        XCTAssertEqual(h, 100)
+        XCTAssertEqual(Double(w) / Double(h), 2.4, accuracy: 0.01)
+
+        XCTAssertTrue(KeyboardKeyGestureMap.isAudioSessionConflictError(message: "未能完成操作。（OSStatus 错误 560557684。）"))
+        XCTAssertTrue(KeyboardKeyGestureMap.isAudioSessionConflictError(message: "AVAudioSessionErrorCode.cannotInterruptOthers"))
+        XCTAssertTrue(KeyboardKeyGestureMap.isAudioSessionConflictError(message: "错误 561017449"))
+        XCTAssertFalse(KeyboardKeyGestureMap.isAudioSessionConflictError(message: nil))
+        XCTAssertFalse(KeyboardKeyGestureMap.isAudioSessionConflictError(message: "网络连接正常"))
+    }
 }

@@ -143,7 +143,7 @@ public final class AudioCaptureService {
         }
 
         stopRecordingInternal(deactivateSession: false)
-        // Pause silent playback cleanly before switching audio session into measurement capture mode
+        // Pause silent playback cleanly before switching audio session into capture mode
         keepAlivePlayer?.stop()
 
         let session = AVAudioSession.sharedInstance()
@@ -152,21 +152,17 @@ public final class AudioCaptureService {
         #else
         let options: AVAudioSession.CategoryOptions = [.allowBluetooth, .defaultToSpeaker, .mixWithOthers]
         #endif
-        try session.setCategory(.playAndRecord, mode: .measurement, options: options)
         do {
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
+            try session.setCategory(.playAndRecord, mode: .default, options: options)
+            try session.setActive(true)
         } catch {
             let nsErr = error as NSError
             if nsErr.code == AVAudioSession.ErrorCode.insufficientPriority.rawValue ||
-                nsErr.code == AVAudioSession.ErrorCode.cannotInterruptOthers.rawValue {
-                do {
-                    try session.setActive(true)
-                } catch {
-                    throw AudioCaptureError.audioSessionConflict((error as NSError).code)
-                }
-            } else {
-                throw error
+                nsErr.code == AVAudioSession.ErrorCode.cannotInterruptOthers.rawValue ||
+                nsErr.code == 561015905 {
+                throw AudioCaptureError.audioSessionConflict(nsErr.code)
             }
+            throw error
         }
 
         resetCapturedSamples()
@@ -262,8 +258,19 @@ public final class AudioCaptureService {
         }
 
         audioEngine.prepare()
-        try audioEngine.start()
-        isCapturing = true
+        do {
+            try audioEngine.start()
+            isCapturing = true
+        } catch {
+            stopRecordingInternal(deactivateSession: false)
+            let nsErr = error as NSError
+            if nsErr.code == AVAudioSession.ErrorCode.insufficientPriority.rawValue ||
+                nsErr.code == AVAudioSession.ErrorCode.cannotInterruptOthers.rawValue ||
+                nsErr.code == 561015905 {
+                throw AudioCaptureError.audioSessionConflict(nsErr.code)
+            }
+            throw error
+        }
     }
 
     private func resetCapturedSamples() {

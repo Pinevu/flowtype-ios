@@ -121,6 +121,7 @@ public final class KeyboardStateModel: ObservableObject {
     private var lastPunctuationIndex: Int = 0
     private var lastPunctuationValue: String = ""
     private var cursorDragAccumulator: CGFloat = 0
+    private var touchDownHapticTimestamp: TimeInterval = 0
 
     public var proxyProvider: (() -> UITextDocumentProxy?)?
     public var advanceInputModeHandler: (() -> Void)?
@@ -416,6 +417,16 @@ public final class KeyboardStateModel: ObservableObject {
             && abs(Date().timeIntervalSince(latestHeartbeat)) < 4.5
     }
 
+    public func openHostAppForVoiceRecording() {
+        let query = [URLQueryItem(name: "mode", value: voiceMode.rawValue)]
+        if let url = AppConfig.deepLinkURL(action: "record", queryItems: query) {
+            openURLHandler?(url)
+        }
+        statusBannerMessage = config.autoKeepAlivePiP
+            ? "正在唤醒 FlowType 主程序开启麦克风与画中画..."
+            : "正在跳转 FlowType 主程序激活麦克风录音..."
+    }
+
     public func toggleVoiceRecording() {
         triggerHaptic()
         statusBannerMessage = nil
@@ -435,15 +446,10 @@ public final class KeyboardStateModel: ObservableObject {
 
         // Check if host is alive via PiP or background audio keep-alive
         syncHostStatusFromStore()
-        if !isHostAlive {
-            // Wake Host App via Deep Link so it activates microphone (and optional PiP)
-            let query = [URLQueryItem(name: "mode", value: voiceMode.rawValue)]
-            if let url = AppConfig.deepLinkURL(action: "record", queryItems: query) {
-                openURLHandler?(url)
-            }
-            statusBannerMessage = config.autoKeepAlivePiP
-                ? "正在唤醒 FlowType 主程序开启麦克风与画中画..."
-                : "正在跳转 FlowType 主程序开启麦克风与后台音频保活..."
+        let hasAudioConflict = hostStatus.state == .error
+            && KeyboardKeyGestureMap.isAudioSessionConflictError(message: hostStatus.errorMessage)
+        if !isHostAlive || hasAudioConflict {
+            openHostAppForVoiceRecording()
             return
         }
 
@@ -625,6 +631,37 @@ public final class KeyboardStateModel: ObservableObject {
         }
 
         proxyProvider?()?.insertText(output)
+        scheduleContextRefresh()
+    }
+
+    public func handleSwipeUpOrLongPressSymbol(_ symbol: String) {
+        triggerHaptic()
+        statusBannerMessage = nil
+        isEmoticonDrawerOpen = false
+        guard !symbol.isEmpty else { return }
+
+        if manualLanguage == .chinesePinyin && pinyinLayoutMode == .t9 && !t9ComposingDigits.isEmpty {
+            if let first = pinyinCandidates.first {
+                selectPinyinCandidate(first)
+            } else {
+                clearT9Composing()
+            }
+        } else if manualLanguage == .chinesePinyin && !composingPinyin.isEmpty {
+            if symbol == "'" {
+                if !composingPinyin.hasSuffix("'") {
+                    composingPinyin.append("'")
+                    updatePinyinCandidates()
+                }
+                return
+            }
+            commitTopPinyinCandidate()
+        }
+
+        proxyProvider?()?.insertText(symbol)
+        if manualLanguage == .english && layoutPage == .letters && shiftState == .shifted,
+           symbol.count == 1, symbol.first?.isLetter == true {
+            shiftState = .off
+        }
         scheduleContextRefresh()
     }
 
@@ -1636,8 +1673,21 @@ public final class KeyboardStateModel: ObservableObject {
         }
     }
 
+    public func triggerTouchDownHaptic() {
+        guard config.hapticFeedback else { return }
+        touchDownHapticTimestamp = ProcessInfo.processInfo.systemUptime
+        hapticGenerator.impactOccurred()
+        hapticGenerator.prepare()
+    }
+
     public func triggerHaptic() {
         guard config.hapticFeedback else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if touchDownHapticTimestamp > 0 && (now - touchDownHapticTimestamp) < 0.45 {
+            touchDownHapticTimestamp = 0
+            return
+        }
+        touchDownHapticTimestamp = 0
         hapticGenerator.impactOccurred()
         hapticGenerator.prepare()
     }

@@ -18,13 +18,13 @@ public final class PiPSampleBufferView: UIView {
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
-        displayLayer.videoGravity = .resizeAspect
+        displayLayer.videoGravity = .resizeAspectFill
         backgroundColor = .clear
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
-        displayLayer.videoGravity = .resizeAspect
+        displayLayer.videoGravity = .resizeAspectFill
         backgroundColor = .clear
     }
 }
@@ -34,7 +34,14 @@ public final class PiPKeepAliveManager: NSObject, ObservableObject {
     @Published public private(set) var isPiPActive: Bool = false
     @Published public private(set) var lastErrorMessage: String?
 
-    public let hostView = PiPSampleBufferView(frame: CGRect(x: 0, y: 0, width: 320, height: 84))
+    public let hostView = PiPSampleBufferView(
+        frame: CGRect(
+            x: 0,
+            y: 0,
+            width: KeyboardKeyGestureMap.pipOptimalRenderWidth,
+            height: KeyboardKeyGestureMap.pipOptimalRenderHeight
+        )
+    )
 
     private var pipController: AVPictureInPictureController?
     private var possibleObservation: NSKeyValueObservation?
@@ -72,6 +79,7 @@ public final class PiPKeepAliveManager: NSObject, ObservableObject {
             let controller = AVPictureInPictureController(contentSource: contentSource)
             controller.delegate = self
             controller.canStartPictureInPictureAutomaticallyFromInline = true
+            controller.requiresLinearPlayback = true
             possibleObservation = controller.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] ctrl, _ in
                 let isPossible = ctrl.isPictureInPicturePossible
                 DispatchQueue.main.async { [weak self] in
@@ -170,7 +178,10 @@ public final class PiPKeepAliveManager: NSObject, ObservableObject {
     }
 
     private func enqueueStatusFrame() {
-        guard let pixelBuffer = renderStatusPixelBuffer(width: 360, height: 96) else { return }
+        guard let pixelBuffer = renderStatusPixelBuffer(
+            width: KeyboardKeyGestureMap.pipOptimalRenderWidth,
+            height: KeyboardKeyGestureMap.pipOptimalRenderHeight
+        ) else { return }
         var formatDesc: CMVideoFormatDescription?
         let fmtStatus = CMVideoFormatDescriptionCreateForImageBuffer(
             allocator: kCFAllocatorDefault,
@@ -267,63 +278,63 @@ public final class PiPKeepAliveManager: NSObject, ObservableObject {
         UIColor(red: 0.09, green: 0.11, blue: 0.16, alpha: 1.0).setFill()
         UIBezierPath(rect: rect).fill()
 
-        // Status accent dot
+        // Status accent dot & ultra-compact HUD (240x100 @ 2.4:1)
         let dotColor: UIColor
         let title: String
         let subtitle: String
         switch currentState {
         case .recording:
             dotColor = UIColor.systemRed
-            title = String(format: "正在聆听 %.1fs", currentElapsed)
-            subtitle = "点击键盘完成按钮结束并润色"
+            title = String(format: "录音 %.1fs", currentElapsed)
+            subtitle = "点键盘停止"
         case .transcribing:
             dotColor = UIColor.systemOrange
             title = "语音转写中..."
-            subtitle = "FlowType 后台实时识别"
+            subtitle = "实时识别中"
         case .polishing:
             dotColor = UIColor.systemBlue
-            title = "AI 智能整理中..."
-            subtitle = "即将自动上屏到当前输入框"
+            title = "AI 整理中..."
+            subtitle = "即将自动上屏"
         case .ready:
             dotColor = UIColor.systemGreen
             title = "已就绪并上屏"
-            subtitle = "可继续点击键盘麦克风说话"
+            subtitle = "轻点键盘即说"
         case .error:
             dotColor = UIColor.systemYellow
-            title = "识别异常"
-            subtitle = "请检查网络或 AI 配置"
+            title = "录音需重连"
+            subtitle = "点键盘修复重试"
         case .idle, .standbyPiP:
             dotColor = UIColor.systemGreen
-            title = "FlowType 语音引擎待命中"
-            subtitle = "切回任意 App · 轻点键盘即可说话"
+            title = "Lintype 保活中"
+            subtitle = "可双指缩至最小·滑边隐藏"
         }
 
         dotColor.setFill()
-        UIBezierPath(ovalIn: CGRect(x: 18, y: 24, width: 14, height: 14)).fill()
+        UIBezierPath(ovalIn: CGRect(x: 14, y: 24, width: 10, height: 10)).fill()
 
         let titleAttrs: [NSAttributedString.Key: Any] = [
-            .font: UIFont.systemFont(ofSize: 16, weight: .semibold),
+            .font: UIFont.systemFont(ofSize: 15, weight: .semibold),
             .foregroundColor: UIColor.white
         ]
-        (title as NSString).draw(at: CGPoint(x: 42, y: 19), withAttributes: titleAttrs)
+        (title as NSString).draw(at: CGPoint(x: 30, y: 20), withAttributes: titleAttrs)
 
         let subAttrs: [NSAttributedString.Key: Any] = [
-            .font: UIFont.systemFont(ofSize: 12, weight: .regular),
+            .font: UIFont.systemFont(ofSize: 11, weight: .regular),
             .foregroundColor: UIColor(white: 0.78, alpha: 1.0)
         ]
-        (subtitle as NSString).draw(at: CGPoint(x: 42, y: 46), withAttributes: subAttrs)
+        (subtitle as NSString).draw(at: CGPoint(x: 30, y: 46), withAttributes: subAttrs)
 
-        // Mini waveform bars on the right side
-        let barCount = 5
-        let baseX = width - 84
+        // Compact waveform bars on the right side
+        let barCount = 4
+        let baseX = width - 48
         for idx in 0..<barCount {
             let phase = abs(sin(Double(frameCounter) * 0.9 + Double(idx) * 0.8))
             let amp = currentState == .recording ? max(0.25, Double(currentLevel) * phase + 0.2) : 0.22
-            let barH = CGFloat(8.0 + amp * 34.0)
+            let barH = CGFloat(8.0 + amp * 32.0)
             let barY = (CGFloat(height) - barH) / 2.0
-            let barRect = CGRect(x: CGFloat(baseX + idx * 12), y: barY, width: 6, height: barH)
+            let barRect = CGRect(x: CGFloat(baseX + idx * 9), y: barY, width: 5, height: barH)
             UIColor(red: 0.35, green: 0.72, blue: 1.0, alpha: 0.9).setFill()
-            UIBezierPath(roundedRect: barRect, cornerRadius: 3).fill()
+            UIBezierPath(roundedRect: barRect, cornerRadius: 2.5).fill()
         }
 
         return pb

@@ -76,21 +76,26 @@ struct HomeView: View {
                 .tint(coordinator.config.enableAudioBackgroundKeepAlive ? .green : .blue)
             }
 
-            DisclosureGroup("画中画 (PiP) 增强保活（可选）") {
+            DisclosureGroup("极小画中画 (PiP) 增强保活（可选）") {
                 VStack(alignment: .leading, spacing: 10) {
                     PiPHostPreviewRepresentable(view: coordinator.pipManager.hostView)
-                        .frame(height: 60)
+                        .frame(width: 144, height: 60)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
                                 .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
                         )
 
+                    Text("可不依赖 PiP 直接用无浮窗音频保活；若遇系统拦截后台开麦（560557684），开启 2.4:1 极小 PiP 最稳定，支持双指捏至系统最小或向左右边缘轻滑藏成小箭头。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
                     Button {
                         coordinator.togglePiPStandby()
                     } label: {
                         Label(
-                            isPiPAlive ? "关闭画中画浮窗" : "启用画中画 (PiP) 保活",
+                            isPiPAlive ? "关闭画中画浮窗" : "启用极小画中画 (PiP)",
                             systemImage: isPiPAlive ? "stop.circle.fill" : "pip.enter"
                         )
                         .font(.caption.weight(.semibold))
@@ -118,13 +123,13 @@ struct HomeView: View {
 
     private func keepAliveSubtitle(isAudioAlive: Bool, isPiPAlive: Bool) -> String {
         if isAudioAlive && isPiPAlive {
-            return "无浮窗音频 + 画中画双重保活中，切到任意 App 点语音即可录音"
+            return "无浮窗音频 + 极小画中画双重保活中，切到任意 App 点语音即可录音"
         } else if isAudioAlive {
-            return "静音后台音频保活中（无画中画浮窗），短时间内点键盘语音直接录音"
+            return "无浮窗音频保活中（无需 PiP）；若遇 560557684 冲突点一下「前往主程序激活录音」即可"
         } else if isPiPAlive {
-            return "PiP 画中画保活中：现在切到任意 App，点键盘即可直接录音"
+            return "极小画中画 (2.4:1) 保活中：可双指捏小或滑藏至屏幕边缘"
         } else {
-            return "开启静音音频保活后无需挂画中画浮窗即可后台待命；若被系统回收将自动短跳唤醒"
+            return "并非必须开启 PiP：可先用无浮窗静音保活；如后台开麦受系统策略限制，再开启极小 PiP"
         }
     }
 

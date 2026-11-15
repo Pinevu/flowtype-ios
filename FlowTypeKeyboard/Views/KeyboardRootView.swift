@@ -43,6 +43,10 @@ public struct KeyboardRootView: View {
             )
             .equatable()
         )
+        .overlay(
+            NativeKeyPopupOverlayView(isDark: effectiveColorScheme == .dark)
+                .allowsHitTesting(false)
+        )
         .ignoresSafeArea(.all)
         .preferredColorScheme(effectiveColorScheme)
     }

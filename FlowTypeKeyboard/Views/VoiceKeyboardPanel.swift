@@ -17,12 +17,29 @@ public struct VoiceKeyboardPanel: View {
             centerVoiceArea
 
             if let banner = model.statusBannerMessage, !banner.isEmpty {
-                Text(banner)
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 16)
+                VStack(spacing: 5) {
+                    Text(banner)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 16)
+
+                    if model.hostStatus.state == .error || KeyboardKeyGestureMap.isAudioSessionConflictError(message: banner) {
+                        Button {
+                            model.openHostAppForVoiceRecording()
+                        } label: {
+                            Label("前往主程序激活录音", systemImage: "arrow.up.forward.app.fill")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 5)
+                                .background(Color.blue.opacity(0.16))
+                                .foregroundStyle(.blue)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
             }
 
             Spacer(minLength: 2)
@@ -226,76 +243,104 @@ public struct VoiceKeyboardPanel: View {
     // MARK: - Bottom Utility Bar
 
     private var bottomUtilityRow: some View {
-        HStack(spacing: 6) {
-            Button {
-                model.switchToPanel(.manual)
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "keyboard")
-                    Text(model.manualLanguage == .chinesePinyin ? "拼音" : "EN")
-                }
-                .font(.system(size: 13, weight: .medium))
-                .frame(width: 68, height: 38)
-                .background(specialKeyBackgroundColor)
-                .foregroundStyle(.primary)
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            }
-            .buttonStyle(.plain)
+        let isDark = colorScheme == .dark
+        let uiPalette = KeyPaletteUIColors(
+            isDark: isDark,
+            isTranslucent: model.config.backgroundStyle != .system || model.config.backgroundOpacity < 0.98
+        )
+        let hapticEnabled = model.config.hapticFeedback
 
-            Button {
-                model.handleSpaceTap()
-            } label: {
-                Text("空格")
-                    .font(.system(size: 14))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 38)
-                    .background(keyBackgroundColor)
-                    .foregroundStyle(.primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            }
-            .buttonStyle(.plain)
+        return GeometryReader { geo in
+            let spacing: CGFloat = 6
+            let wLeft: CGFloat = 68
+            let wDel: CGFloat = 52
+            let wReturn: CGFloat = 68
+            let wSpace = max(60, geo.size.width - wLeft - wDel - wReturn - spacing * 3)
 
-            // Backspace with continuous delete
-            Image(systemName: "delete.left")
-                .font(.system(size: 16))
-                .frame(width: 52, height: 38)
-                .background(specialKeyBackgroundColor)
-                .foregroundStyle(.primary)
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .onTapGesture {
-                    model.handleBackspaceTap()
-                }
-                .onLongPressGesture(minimumDuration: 0.35, perform: {}, onPressingChanged: { pressing in
-                    if pressing {
-                        model.startContinuousBackspace()
-                    } else {
-                        model.stopContinuousBackspace()
-                    }
-                })
+            HStack(spacing: spacing) {
+                NativeTactileKey(
+                    presentation: NativeKeyPresentation(
+                        title: "",
+                        systemImage: "keyboard",
+                        subtitle: model.manualLanguage == .chinesePinyin ? "拼音" : "EN",
+                        fontSize: 13,
+                        fontWeight: .medium,
+                        subtitleFontSize: 10.5,
+                        cornerRadius: 7,
+                        fillColor: uiPalette.special,
+                        pressedColor: uiPalette.specialPressed,
+                        edgeColor: uiPalette.edge,
+                        textColor: uiPalette.primaryText,
+                        tintColor: uiPalette.primaryText,
+                        isDark: isDark,
+                        showsPopover: false,
+                        participatesInRollover: false,
+                        hapticEnabled: hapticEnabled
+                    ),
+                    onTap: { model.switchToPanel(.manual) },
+                    onTouchDown: { model.triggerTouchDownHaptic() }
+                )
+                .frame(width: wLeft, height: 38)
 
-            Button {
-                model.handleReturnTap()
-            } label: {
-                Text(model.returnKeyLabel)
-                    .font(.system(size: 14, weight: .semibold))
-                    .frame(width: 68, height: 38)
-                    .background(Color.blue)
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                NativeSpacebarKey(
+                    title: "空格",
+                    fontSize: 14,
+                    cornerRadius: 7,
+                    fillColor: uiPalette.key,
+                    pressedColor: uiPalette.keyPressed,
+                    edgeColor: uiPalette.edge,
+                    textColor: uiPalette.primaryText,
+                    hapticEnabled: hapticEnabled,
+                    onTouchDown: { model.triggerTouchDownHaptic() },
+                    onTap: { model.handleSpaceTap() },
+                    onTrackpadDrag: { dx in model.handleSpaceTrackpadDrag(deltaX: dx) },
+                    onTrackpadEnd: { model.resetSpaceTrackpad() }
+                )
+                .frame(width: wSpace, height: 38)
+
+                NativeHoldRepeatKey(
+                    systemImage: "delete.left",
+                    fontSize: 16,
+                    cornerRadius: 7,
+                    fillColor: uiPalette.special,
+                    pressedColor: uiPalette.specialPressed,
+                    edgeColor: uiPalette.edge,
+                    tintColor: uiPalette.primaryText,
+                    hapticEnabled: hapticEnabled,
+                    onTouchDown: { model.triggerTouchDownHaptic() },
+                    onTap: { model.handleBackspaceTap() },
+                    onHoldStart: { model.startContinuousBackspace() },
+                    onHoldEnd: { model.stopContinuousBackspace() }
+                )
+                .frame(width: wDel, height: 38)
+
+                NativeTactileKey(
+                    presentation: NativeKeyPresentation(
+                        title: model.returnKeyLabel,
+                        fontSize: 14,
+                        fontWeight: .semibold,
+                        cornerRadius: 7,
+                        fillColor: .systemBlue,
+                        pressedColor: UIColor.systemBlue.withAlphaComponent(0.75),
+                        edgeColor: uiPalette.edge,
+                        textColor: .white,
+                        isDark: isDark,
+                        showsPopover: false,
+                        participatesInRollover: false,
+                        hapticEnabled: hapticEnabled
+                    ),
+                    onTap: { model.handleReturnTap() },
+                    onTouchDown: { model.triggerTouchDownHaptic() }
+                )
+                .frame(width: wReturn, height: 38)
             }
-            .buttonStyle(.plain)
         }
+        .frame(height: 38)
     }
 
     private var keyBackgroundColor: Color {
         colorScheme == .dark
             ? Color(white: 0.27)
             : Color.white
-    }
-
-    private var specialKeyBackgroundColor: Color {
-        colorScheme == .dark
-            ? Color(white: 0.19)
-            : Color(red: 0.68, green: 0.70, blue: 0.75)
     }
 }

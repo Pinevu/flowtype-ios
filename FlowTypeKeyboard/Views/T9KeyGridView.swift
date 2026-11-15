@@ -37,114 +37,6 @@ struct KeyPalette: Equatable {
 }
 
 /// Zero-latency keycap with instant pressed-state feedback on touch-down (DragGesture minimumDistance: 0).
-struct T9ResponsiveKey<Label: View>: View {
-    let fill: Color
-    let pressedFill: Color
-    let edge: Color
-    var cornerRadius: CGFloat = 7
-    let action: () -> Void
-    @ViewBuilder let label: () -> Label
-
-    @State private var isPressed = false
-
-    var body: some View {
-        label()
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(
-                ZStack(alignment: .bottom) {
-                    Capsule()
-                        .fill(edge)
-                        .frame(height: 1.5)
-                        .padding(.horizontal, 3)
-                        .offset(y: 1)
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(isPressed ? pressedFill : fill)
-                }
-            )
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        if !isPressed {
-                            isPressed = true
-                        }
-                    }
-                    .onEnded { value in
-                        isPressed = false
-                        if abs(value.translation.width) < 44 && abs(value.translation.height) < 44 {
-                            action()
-                        }
-                    }
-            )
-    }
-}
-
-/// Key that supports tap on release and press-and-hold repeat (used for backspace).
-struct HoldRepeatKey<Label: View>: View {
-    let fill: Color
-    let pressedFill: Color
-    let edge: Color
-    let onTap: () -> Void
-    let onHoldStart: () -> Void
-    let onHoldEnd: () -> Void
-    @ViewBuilder let label: () -> Label
-
-    @State private var isPressed = false
-    @State private var didHold = false
-    @State private var holdWork: DispatchWorkItem?
-
-    var body: some View {
-        label()
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(
-                ZStack(alignment: .bottom) {
-                    Capsule()
-                        .fill(edge)
-                        .frame(height: 1.5)
-                        .padding(.horizontal, 3)
-                        .offset(y: 1)
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(isPressed ? pressedFill : fill)
-                }
-            )
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        guard !isPressed else { return }
-                        isPressed = true
-                        didHold = false
-                        let work = DispatchWorkItem {
-                            didHold = true
-                            onHoldStart()
-                        }
-                        holdWork = work
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
-                    }
-                    .onEnded { value in
-                        isPressed = false
-                        holdWork?.cancel()
-                        holdWork = nil
-                        if didHold {
-                            onHoldEnd()
-                        } else if abs(value.translation.width) < 44, abs(value.translation.height) < 44 {
-                            onTap()
-                        }
-                        didHold = false
-                    }
-            )
-            .onDisappear {
-                holdWork?.cancel()
-                holdWork = nil
-                if didHold {
-                    didHold = false
-                    onHoldEnd()
-                }
-                isPressed = false
-            }
-    }
-}
-
 // MARK: - Nine-Key Grid (isolated so typing does not re-render it)
 
 struct T9GridState: Equatable {
@@ -157,6 +49,7 @@ struct T9GridState: Equatable {
     var returnIsAccent: Bool
     var isHostAlive: Bool
     var isTranslucent: Bool
+    var hapticEnabled: Bool = true
 }
 
 struct T9KeyGridView: View, Equatable {
@@ -174,8 +67,16 @@ struct T9KeyGridView: View, Equatable {
         case accent
     }
 
+    private var isDark: Bool {
+        colorScheme == .dark
+    }
+
     private var palette: KeyPalette {
         KeyPalette(colorScheme: colorScheme, isTranslucent: state.isTranslucent)
+    }
+
+    private var uiPalette: KeyPaletteUIColors {
+        KeyPaletteUIColors(isDark: isDark, isTranslucent: state.isTranslucent)
     }
 
     var body: some View {
@@ -209,23 +110,28 @@ struct T9KeyGridView: View, Equatable {
                 capKey("#@¥", size: 15, kind: .special, width: colWidth, height: rowHeight) {
                     model.switchLayoutPage(.symbols)
                 }
-                T9ResponsiveKey(
-                    fill: palette.special,
-                    pressedFill: palette.specialPressed,
-                    edge: palette.edge,
-                    cornerRadius: 6
-                ) {
-                    model.switchToPanel(.voice)
-                } label: {
-                    VStack(spacing: 1.5) {
-                        Image(systemName: state.isHostAlive ? "mic.fill" : "mic")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(state.isHostAlive ? Color.blue : Color.primary)
-                        Text("语音")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(state.isHostAlive ? Color.blue : Color.primary)
-                    }
-                }
+                NativeTactileKey(
+                    presentation: NativeKeyPresentation(
+                        title: "",
+                        systemImage: state.isHostAlive ? "mic.fill" : "mic",
+                        subtitle: "语音",
+                        fontSize: 15,
+                        fontWeight: .semibold,
+                        subtitleFontSize: 11,
+                        cornerRadius: 6,
+                        fillColor: uiPalette.special,
+                        pressedColor: uiPalette.specialPressed,
+                        edgeColor: uiPalette.edge,
+                        textColor: state.isHostAlive ? .systemBlue : uiPalette.primaryText,
+                        tintColor: state.isHostAlive ? .systemBlue : uiPalette.primaryText,
+                        isDark: isDark,
+                        showsPopover: false,
+                        participatesInRollover: false,
+                        hapticEnabled: state.hapticEnabled
+                    ),
+                    onTap: { model.switchToPanel(.voice) },
+                    onTouchDown: { model.triggerTouchDownHaptic() }
+                )
                 .frame(width: colWidth, height: rowHeight)
                 .accessibilityLabel("切换语音输入")
 
@@ -239,9 +145,31 @@ struct T9KeyGridView: View, Equatable {
     private func centerColumns(colWidth: CGFloat, rowHeight: CGFloat, span2Width: CGFloat, rowSpacing: CGFloat, colSpacing: CGFloat) -> some View {
         VStack(spacing: rowSpacing) {
             HStack(spacing: colSpacing) {
-                capKey(",。?!", size: 16, kind: .normal, width: colWidth, height: rowHeight) {
-                    model.handleT9PunctuationKeyTap()
-                }
+                NativeTactileKey(
+                    presentation: NativeKeyPresentation(
+                        title: ",。?!",
+                        secondaryHint: "1",
+                        fontSize: 16,
+                        fontWeight: .medium,
+                        cornerRadius: 6,
+                        fillColor: uiPalette.key,
+                        pressedColor: uiPalette.keyPressed,
+                        edgeColor: uiPalette.edge,
+                        textColor: uiPalette.primaryText,
+                        isDark: isDark,
+                        showsPopover: false,
+                        swipeUpText: KeyboardKeyGestureMap.t9SwipeUp(digit: "1"),
+                        longPressOptions: KeyboardKeyGestureMap.t9LongPressOptions(digit: "1"),
+                        participatesInRollover: false,
+                        hapticEnabled: state.hapticEnabled
+                    ),
+                    onTap: { model.handleT9PunctuationKeyTap() },
+                    onCommitSpecial: { sym in model.handleSwipeUpOrLongPressSymbol(sym) },
+                    onTouchDown: { model.triggerTouchDownHaptic() }
+                )
+                .frame(width: colWidth, height: rowHeight)
+                .accessibilityLabel("1 标点")
+
                 letterKey("2", "ABC", colWidth, rowHeight)
                 letterKey("3", "DEF", colWidth, rowHeight)
             }
@@ -261,51 +189,57 @@ struct T9KeyGridView: View, Equatable {
                     state.selectedFilter ?? "选拼音",
                     size: 15,
                     kind: filterActive ? .accent : .normal,
-                    foreground: filterActive ? .blue : .primary,
+                    foreground: filterActive ? .systemBlue : uiPalette.primaryText,
                     width: colWidth,
                     height: rowHeight
                 ) {
                     model.toggleT9PinyinPicker()
                 }
 
-                SpacebarTrackpadKey(
+                NativeSpacebarKey(
                     title: state.isComposing ? "选定" : "空格",
-                    fixedWidth: span2Width,
-                    height: rowHeight,
-                    keyColor: palette.key,
-                    pressedColor: palette.keyPressed,
-                    edgeColor: palette.edge,
-                    titleFontSize: 15,
-                    titleColor: .primary,
+                    fontSize: 15,
+                    cornerRadius: 6,
+                    fillColor: uiPalette.key,
+                    pressedColor: uiPalette.keyPressed,
+                    edgeColor: uiPalette.edge,
+                    textColor: uiPalette.primaryText,
+                    hapticEnabled: state.hapticEnabled,
+                    onTouchDown: { model.triggerTouchDownHaptic() },
                     onTap: { model.handleT9SpaceTap() },
                     onTrackpadDrag: { dx in model.handleSpaceTrackpadDrag(deltaX: dx) },
                     onTrackpadEnd: { model.resetSpaceTrackpad() }
                 )
+                .frame(width: span2Width, height: rowHeight)
             }
         }
     }
 
     private func rightColumn(colWidth: CGFloat, rowHeight: CGFloat, span2Height: CGFloat, rowSpacing: CGFloat) -> some View {
         VStack(spacing: rowSpacing) {
-            HoldRepeatKey(
-                fill: palette.special,
-                pressedFill: palette.specialPressed,
-                edge: palette.edge,
+            NativeHoldRepeatKey(
+                systemImage: "delete.left",
+                fontSize: 19,
+                cornerRadius: 6,
+                fillColor: uiPalette.special,
+                pressedColor: uiPalette.specialPressed,
+                edgeColor: uiPalette.edge,
+                tintColor: uiPalette.primaryText,
+                hapticEnabled: state.hapticEnabled,
+                onTouchDown: { model.triggerTouchDownHaptic() },
                 onTap: { model.handleBackspaceTap() },
                 onHoldStart: { model.startContinuousBackspace() },
                 onHoldEnd: { model.stopContinuousBackspace() }
-            ) {
-                Image(systemName: "delete.left")
-                    .font(.system(size: 19, weight: .medium))
-                    .foregroundStyle(.primary)
-            }
+            )
             .frame(width: colWidth, height: rowHeight)
 
             capKey(
                 state.isComposing ? "分隔" : "^_^",
                 size: 15,
                 kind: (!state.isComposing && state.isEmoticonOpen) ? .accent : .special,
-                foreground: (!state.isComposing && state.isEmoticonOpen) ? .blue : .primary,
+                foreground: (!state.isComposing && state.isEmoticonOpen) ? .systemBlue : uiPalette.primaryText,
+                longPressOptions: state.isComposing ? [] : ["^_^", "(≧▽≦)", "😂", "❤️", "👍", "🙏", "🎉"],
+                onCommitSpecial: state.isComposing ? nil : { sym in model.handleSwipeUpOrLongPressSymbol(sym) },
                 width: colWidth,
                 height: rowHeight
             ) {
@@ -316,18 +250,24 @@ struct T9KeyGridView: View, Equatable {
                 }
             }
 
-            T9ResponsiveKey(
-                fill: state.returnIsAccent ? Color.blue : palette.special,
-                pressedFill: state.returnIsAccent ? Color.blue.opacity(0.75) : palette.specialPressed,
-                edge: palette.edge,
-                cornerRadius: 6
-            ) {
-                model.handleReturnTap()
-            } label: {
-                Text(state.returnTitle)
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(state.returnIsAccent ? Color.white : Color.primary)
-            }
+            NativeTactileKey(
+                presentation: NativeKeyPresentation(
+                    title: state.returnTitle,
+                    fontSize: 16,
+                    fontWeight: .medium,
+                    cornerRadius: 6,
+                    fillColor: state.returnIsAccent ? .systemBlue : uiPalette.special,
+                    pressedColor: state.returnIsAccent ? UIColor.systemBlue.withAlphaComponent(0.75) : uiPalette.specialPressed,
+                    edgeColor: uiPalette.edge,
+                    textColor: state.returnIsAccent ? .white : uiPalette.primaryText,
+                    isDark: isDark,
+                    showsPopover: false,
+                    participatesInRollover: false,
+                    hapticEnabled: state.hapticEnabled
+                ),
+                onTap: { model.handleReturnTap() },
+                onTouchDown: { model.triggerTouchDownHaptic() }
+            )
             .frame(width: colWidth, height: span2Height)
         }
     }
@@ -335,20 +275,30 @@ struct T9KeyGridView: View, Equatable {
     // MARK: Key Builders
 
     private func letterKey(_ digit: String, _ letters: String, _ width: CGFloat, _ height: CGFloat) -> some View {
-        T9ResponsiveKey(
-            fill: palette.key,
-            pressedFill: palette.keyPressed,
-            edge: palette.edge,
-            cornerRadius: 6
-        ) {
-            model.handleT9KeyTap(digit)
-        } label: {
-            Text(letters)
-                .font(.system(size: 17, weight: .medium))
-                .tracking(1.4)
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
+        NativeTactileKey(
+            presentation: NativeKeyPresentation(
+                title: letters,
+                secondaryHint: digit,
+                fontSize: 17,
+                fontWeight: .medium,
+                tracking: 1.4,
+                cornerRadius: 6,
+                fillColor: uiPalette.key,
+                pressedColor: uiPalette.keyPressed,
+                edgeColor: uiPalette.edge,
+                textColor: uiPalette.primaryText,
+                isDark: isDark,
+                showsPopover: true,
+                popoverTitle: letters,
+                swipeUpText: KeyboardKeyGestureMap.t9SwipeUp(digit: digit),
+                longPressOptions: KeyboardKeyGestureMap.t9LongPressOptions(digit: digit),
+                participatesInRollover: true,
+                hapticEnabled: state.hapticEnabled
+            ),
+            onTap: { model.handleT9KeyTap(digit) },
+            onCommitSpecial: { sym in model.handleSwipeUpOrLongPressSymbol(sym) },
+            onTouchDown: { model.triggerTouchDownHaptic() }
+        )
         .frame(width: width, height: height)
         .accessibilityLabel("\(digit) \(letters)")
     }
@@ -357,39 +307,48 @@ struct T9KeyGridView: View, Equatable {
         _ title: String,
         size: CGFloat,
         kind: KeyKind,
-        foreground: Color = .primary,
+        foreground: UIColor? = nil,
         tracking: CGFloat = 0,
+        longPressOptions: [String] = [],
+        onCommitSpecial: ((String) -> Void)? = nil,
         width: CGFloat,
         height: CGFloat,
         action: @escaping () -> Void
     ) -> some View {
-        let fill: Color
-        let pressed: Color
+        let fill: UIColor
+        let pressed: UIColor
         switch kind {
         case .normal:
-            fill = palette.key
-            pressed = palette.keyPressed
+            fill = uiPalette.key
+            pressed = uiPalette.keyPressed
         case .special:
-            fill = palette.special
-            pressed = palette.specialPressed
+            fill = uiPalette.special
+            pressed = uiPalette.specialPressed
         case .accent:
-            fill = Color.blue.opacity(0.20)
-            pressed = Color.blue.opacity(0.32)
+            fill = uiPalette.accentFill
+            pressed = uiPalette.accentPressed
         }
-        return T9ResponsiveKey(
-            fill: fill,
-            pressedFill: pressed,
-            edge: palette.edge,
-            cornerRadius: 6,
-            action: action
-        ) {
-            Text(title)
-                .font(.system(size: size, weight: .medium))
-                .tracking(tracking)
-                .foregroundStyle(foreground)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-        }
+        return NativeTactileKey(
+            presentation: NativeKeyPresentation(
+                title: title,
+                fontSize: size,
+                fontWeight: .medium,
+                tracking: tracking,
+                cornerRadius: 6,
+                fillColor: fill,
+                pressedColor: pressed,
+                edgeColor: uiPalette.edge,
+                textColor: foreground ?? uiPalette.primaryText,
+                isDark: isDark,
+                showsPopover: false,
+                longPressOptions: longPressOptions,
+                participatesInRollover: false,
+                hapticEnabled: state.hapticEnabled
+            ),
+            onTap: action,
+            onCommitSpecial: onCommitSpecial,
+            onTouchDown: { model.triggerTouchDownHaptic() }
+        )
         .frame(width: width, height: height)
     }
 
@@ -439,18 +398,26 @@ struct T9KeyGridView: View, Equatable {
     ) -> some View {
         let fill: Color = kind == .accent ? Color.blue.opacity(0.20) : palette.key
         let pressed: Color = kind == .accent ? Color.blue.opacity(0.32) : palette.keyPressed
-        return T9ResponsiveKey(
-            fill: fill,
-            pressedFill: pressed,
-            edge: Color.clear,
-            cornerRadius: 6,
-            action: action
-        ) {
+        return Button(action: action) {
             Text(title)
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(foreground)
                 .lineLimit(1)
+                .frame(width: width, height: height)
         }
-        .frame(width: width, height: height)
+        .buttonStyle(T9SidebarKeyStyle(fill: fill, pressedFill: pressed))
+    }
+}
+
+private struct T9SidebarKeyStyle: ButtonStyle {
+    let fill: Color
+    let pressedFill: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(configuration.isPressed ? pressedFill : fill)
+            )
     }
 }

@@ -198,14 +198,19 @@ public struct ManualKeyboardPanel: View {
                                 .frame(height: 43.5)
                                 .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(CandidateTapButtonStyle(isDark: colorScheme == .dark))
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
 
             Divider().frame(height: 22)
 
-            candidateChevronButton(isOpen: model.isEmoticonDrawerOpen) {
+            candidateChevronButton(
+                isOpen: model.isEmoticonDrawerOpen,
+                highlightedBadge: model.isEmoticonDrawerOpen
+            ) {
                 model.toggleEmoticonDrawer()
             }
         }
@@ -214,58 +219,85 @@ public struct ManualKeyboardPanel: View {
     private var t9CandidateBar: some View {
         HStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 20) {
+                HStack(spacing: 10) {
                     ForEach(Array(model.pinyinCandidates.prefix(24).enumerated()), id: \.element.id) { idx, cand in
-                        Text(cand.text)
-                            .font(.system(size: 20, weight: idx == 0 ? .medium : .regular))
-                            .foregroundStyle(idx == 0 ? Color.blue : Color.primary)
-                            .lineLimit(1)
-                            .frame(height: 43.5)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                model.selectPinyinCandidate(cand)
-                            }
+                        Button {
+                            model.selectPinyinCandidate(cand)
+                        } label: {
+                            Text(cand.text)
+                                .font(.system(size: 20, weight: idx == 0 ? .medium : .regular))
+                                .foregroundStyle(idx == 0 ? Color.blue : Color.primary)
+                                .lineLimit(1)
+                                .padding(.horizontal, 8)
+                                .frame(height: 43.5)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(CandidateTapButtonStyle(isDark: colorScheme == .dark))
                     }
                 }
-                .padding(.horizontal, 10)
+                .padding(.horizontal, 8)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
 
             Divider().frame(height: 22)
 
-            candidateChevronButton(isOpen: model.isCandidateDrawerExpanded) {
+            candidateChevronButton(
+                isOpen: model.isCandidateDrawerExpanded,
+                highlightedBadge: true
+            ) {
                 model.toggleCandidateDrawer()
             }
         }
     }
 
-    private func candidateChevronButton(isOpen: Bool, action: @escaping () -> Void) -> some View {
-        InstantChevronToggle(isOpen: isOpen, action: action)
+    private func candidateChevronButton(
+        isOpen: Bool,
+        highlightedBadge: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        NativeChevronControl(
+            isOpen: isOpen,
+            isHighlightedBadge: highlightedBadge,
+            isDark: colorScheme == .dark,
+            hapticEnabled: model.config.hapticFeedback,
+            onTouchDown: { model.triggerTouchDownHaptic() },
+            action: action
+        )
+        .frame(width: 46, height: 43.5)
     }
 
     private var qwertyCandidateBar: some View {
         HStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
+                HStack(spacing: 10) {
                     ForEach(Array(model.pinyinCandidates.prefix(22).enumerated()), id: \.element.id) { idx, cand in
-                        Text(idx == 0 ? "\(cand.text)" : "\(idx + 1).\(cand.text)")
-                            .font(.system(size: 18, weight: idx == 0 ? .semibold : .regular))
-                            .foregroundStyle(idx == 0 ? Color.blue : Color.primary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 6)
-                            .background(idx == 0 ? Color.blue.opacity(0.12) : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                model.selectPinyinCandidate(cand)
-                            }
+                        Button {
+                            model.selectPinyinCandidate(cand)
+                        } label: {
+                            Text(idx == 0 ? "\(cand.text)" : "\(idx + 1).\(cand.text)")
+                                .font(.system(size: 18, weight: idx == 0 ? .semibold : .regular))
+                                .foregroundStyle(idx == 0 ? Color.blue : Color.primary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .background(idx == 0 ? Color.blue.opacity(0.12) : Color.clear)
+                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(CandidateTapButtonStyle(isDark: colorScheme == .dark))
                     }
                 }
                 .padding(.horizontal, 6)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
 
             Divider().frame(height: 22)
 
-            candidateChevronButton(isOpen: model.isCandidateDrawerExpanded) {
+            candidateChevronButton(
+                isOpen: model.isCandidateDrawerExpanded,
+                highlightedBadge: true
+            ) {
                 model.toggleCandidateDrawer()
             }
         }
@@ -355,37 +387,43 @@ public struct ManualKeyboardPanel: View {
                         .foregroundStyle(.secondary)
 
                     if model.pinyinLayoutMode == .t9 && model.selectedT9SyllableFilter != nil {
-                        Text("全部音节")
-                            .font(.system(size: 12, weight: .semibold))
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(Color.blue.opacity(0.14))
-                            .foregroundStyle(.blue)
-                            .clipShape(Capsule())
-                            .onTapGesture {
-                                model.selectT9SyllableFilter(nil)
-                            }
+                        Button {
+                            model.selectT9SyllableFilter(nil)
+                        } label: {
+                            Text("全部音节")
+                                .font(.system(size: 12, weight: .semibold))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .background(Color.blue.opacity(0.14))
+                                .foregroundStyle(.blue)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
                     }
 
                     if model.pinyinLayoutMode == .t9 {
-                        Text("分词 '")
-                            .font(.system(size: 12, weight: .medium))
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(specialKeyBackgroundColor)
-                            .foregroundStyle(.primary)
-                            .clipShape(Capsule())
-                            .onTapGesture {
-                                model.insertT9SyllableSeparator()
-                            }
+                        Button {
+                            model.insertT9SyllableSeparator()
+                        } label: {
+                            Text("分词 '")
+                                .font(.system(size: 12, weight: .medium))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .background(specialKeyBackgroundColor)
+                                .foregroundStyle(.primary)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 10)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
 
             Divider().frame(height: 22)
 
-            candidateChevronButton(isOpen: true) {
+            candidateChevronButton(isOpen: true, highlightedBadge: true) {
                 model.toggleCandidateDrawer()
             }
         }
@@ -400,6 +438,8 @@ public struct ManualKeyboardPanel: View {
             return (start..<end).map { ($0, candidates[$0]) }
         }
         let hairline = colorScheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.10)
+        let isDark = colorScheme == .dark
+        let uiPalette = KeyPaletteUIColors(isDark: isDark, isTranslucent: isCustomOrTranslucentBackdrop)
 
         return VStack(spacing: 0) {
             Rectangle()
@@ -411,22 +451,24 @@ public struct ManualKeyboardPanel: View {
                     ForEach(Array(rows.enumerated()), id: \.offset) { _, rowItems in
                         HStack(spacing: 0) {
                             ForEach(rowItems, id: \.element.id) { item in
-                                Text(item.element.text)
-                                    .font(.system(size: 18, weight: item.offset == 0 ? .semibold : .regular))
-                                    .foregroundStyle(item.offset == 0 ? Color.blue : Color.primary)
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.62)
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 43)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        model.selectPinyinCandidate(item.element)
-                                    }
-                                    .overlay(alignment: .trailing) {
-                                        Rectangle()
-                                            .fill(hairline)
-                                            .frame(width: 0.5)
-                                    }
+                                Button {
+                                    model.selectPinyinCandidate(item.element)
+                                } label: {
+                                    Text(item.element.text)
+                                        .font(.system(size: 18, weight: item.offset == 0 ? .semibold : .regular))
+                                        .foregroundStyle(item.offset == 0 ? Color.blue : Color.primary)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.62)
+                                        .frame(maxWidth: .infinity)
+                                        .frame(height: 43)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(CandidateTapButtonStyle(isDark: isDark))
+                                .overlay(alignment: .trailing) {
+                                    Rectangle()
+                                        .fill(hairline)
+                                        .frame(width: 0.5)
+                                }
                             }
                             if rowItems.count < cols {
                                 ForEach(0..<(cols - rowItems.count), id: \.self) { _ in
@@ -448,39 +490,46 @@ public struct ManualKeyboardPanel: View {
                 .frame(height: 0.5)
 
             HStack(spacing: 8) {
-                Text("清空拼音")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 32)
-                    .background(specialKeyBackgroundColor)
-                    .foregroundStyle(.primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        model.clearComposing()
-                    }
+                Button {
+                    model.clearComposing()
+                } label: {
+                    Text("清空拼音")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 32)
+                        .background(specialKeyBackgroundColor)
+                        .foregroundStyle(.primary)
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+                .buttonStyle(.plain)
 
-                Image(systemName: "delete.left")
-                    .font(.system(size: 15, weight: .medium))
-                    .frame(width: 68, height: 32)
-                    .background(specialKeyBackgroundColor)
-                    .foregroundStyle(.primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        model.handleBackspaceTap()
-                    }
+                NativeHoldRepeatKey(
+                    systemImage: "delete.left",
+                    fontSize: 15,
+                    cornerRadius: 7,
+                    fillColor: uiPalette.special,
+                    pressedColor: uiPalette.specialPressed,
+                    edgeColor: uiPalette.edge,
+                    tintColor: uiPalette.primaryText,
+                    hapticEnabled: model.config.hapticFeedback,
+                    onTouchDown: { model.triggerTouchDownHaptic() },
+                    onTap: { model.handleBackspaceTap() },
+                    onHoldStart: { model.startContinuousBackspace() },
+                    onHoldEnd: { model.stopContinuousBackspace() }
+                )
+                .frame(width: 68, height: 32)
 
-                Text("收起")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 78, height: 32)
-                    .background(Color.blue)
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        model.isCandidateDrawerExpanded = false
-                    }
+                Button {
+                    model.isCandidateDrawerExpanded = false
+                } label: {
+                    Text("收起")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 78, height: 32)
+                        .background(Color.blue)
+                        .foregroundStyle(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+                .buttonStyle(.plain)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
@@ -514,7 +563,8 @@ public struct ManualKeyboardPanel: View {
             returnTitle: effectiveReturnTitle,
             returnIsAccent: isComposingChinesePinyin || model.returnKeyLabel != "换行",
             isHostAlive: model.isHostAlive,
-            isTranslucent: isCustomOrTranslucentBackdrop
+            isTranslucent: isCustomOrTranslucentBackdrop,
+            hapticEnabled: model.config.hapticFeedback
         )
     }
 
@@ -632,7 +682,8 @@ public struct ManualKeyboardPanel: View {
             spacebarTitle: spacebarTitle,
             returnTitle: effectiveReturnTitle,
             isReturnAccent: isComposingChinesePinyin || model.returnKeyLabel != "换行",
-            isTranslucent: isCustomOrTranslucentBackdrop
+            isTranslucent: isCustomOrTranslucentBackdrop,
+            hapticEnabled: model.config.hapticFeedback
         )
     }
 
@@ -685,6 +736,7 @@ private struct QwertyGridState: Equatable {
     var returnTitle: String
     var isReturnAccent: Bool
     var isTranslucent: Bool
+    var hapticEnabled: Bool = true
 }
 
 private struct QwertyKeyGridView: View, Equatable {
@@ -696,8 +748,12 @@ private struct QwertyKeyGridView: View, Equatable {
         lhs.model === rhs.model && lhs.state == rhs.state
     }
 
-    private var palette: KeyPalette {
-        KeyPalette(colorScheme: colorScheme, isTranslucent: state.isTranslucent)
+    private var isDark: Bool {
+        colorScheme == .dark
+    }
+
+    private var uiPalette: KeyPaletteUIColors {
+        KeyPaletteUIColors(isDark: isDark, isTranslucent: state.isTranslucent)
     }
 
     var body: some View {
@@ -706,19 +762,17 @@ private struct QwertyKeyGridView: View, Equatable {
             let colSpacing: CGFloat = 5
             let rowHeight = max(36, (geo.size.height - rowSpacing * 3) / 4)
             let standardKeyWidth = (geo.size.width - colSpacing * 9) / 10
+            let modW1 = standardKeyWidth * 1.30
+            let modW2 = standardKeyWidth * 1.15
+            let modW3 = standardKeyWidth * 1.25
+            let modW5 = standardKeyWidth * 1.85
+            let spaceW = max(60, geo.size.width - modW1 - modW2 - modW3 - modW5 - colSpacing * 4)
 
             VStack(spacing: rowSpacing) {
                 // Row 1 (10 keys)
                 HStack(spacing: colSpacing) {
                     ForEach(row1Keys, id: \.self) { label in
-                        CharacterKeyButton(
-                            label: displayLabel(label),
-                            width: standardKeyWidth,
-                            height: rowHeight,
-                            keyColor: palette.key
-                        ) {
-                            model.handleKeyTap(label)
-                        }
+                        charKey(label, width: standardKeyWidth, height: rowHeight)
                     }
                 }
 
@@ -731,14 +785,7 @@ private struct QwertyKeyGridView: View, Equatable {
                         let w = state.layoutPage == .letters
                             ? standardKeyWidth
                             : (geo.size.width - colSpacing * 9) / 10
-                        CharacterKeyButton(
-                            label: displayLabel(label),
-                            width: w,
-                            height: rowHeight,
-                            keyColor: palette.key
-                        ) {
-                            model.handleKeyTap(label)
-                        }
+                        charKey(label, width: w, height: rowHeight)
                     }
                     if state.layoutPage == .letters {
                         Spacer(minLength: 0)
@@ -754,99 +801,168 @@ private struct QwertyKeyGridView: View, Equatable {
                     let centerKeyW = centerAvail / CGFloat(centerKeys.count)
 
                     ForEach(centerKeys, id: \.self) { label in
-                        CharacterKeyButton(
-                            label: displayLabel(label),
-                            width: centerKeyW,
-                            height: rowHeight,
-                            keyColor: palette.key
-                        ) {
-                            model.handleKeyTap(label)
-                        }
+                        charKey(label, width: centerKeyW, height: rowHeight)
                     }
 
-                    HoldRepeatKey(
-                        fill: palette.special,
-                        pressedFill: palette.specialPressed,
-                        edge: palette.edge,
+                    NativeHoldRepeatKey(
+                        systemImage: "delete.left",
+                        fontSize: 17,
+                        cornerRadius: 6,
+                        fillColor: uiPalette.special,
+                        pressedColor: uiPalette.specialPressed,
+                        edgeColor: uiPalette.edge,
+                        tintColor: uiPalette.primaryText,
+                        hapticEnabled: state.hapticEnabled,
+                        onTouchDown: { model.triggerTouchDownHaptic() },
                         onTap: { model.handleBackspaceTap() },
                         onHoldStart: { model.startContinuousBackspace() },
                         onHoldEnd: { model.stopContinuousBackspace() }
-                    ) {
-                        Image(systemName: "delete.left")
-                            .font(.system(size: 17, weight: .medium))
-                            .foregroundStyle(.primary)
-                    }
+                    )
                     .frame(width: standardKeyWidth * 1.38, height: rowHeight)
                 }
 
-                // Row 4 (123/ABC/九键 + Voice/九键 + 中/EN + Spacebar Trackpad + Return)
+                // Row 4 (123/ABC/九键 + Voice + 中/EN + Spacebar Trackpad + Return)
                 HStack(spacing: colSpacing) {
-                    Button {
-                        let targetPage: ManualLayoutPage = (state.layoutPage == .letters) ? .numbers : .letters
-                        model.switchLayoutPage(targetPage)
-                    } label: {
-                        let pageBackTitle = (state.manualLanguage == .chinesePinyin && state.pinyinLayoutMode == .t9) ? "九键" : "ABC"
-                        Text(state.layoutPage == .letters ? "123" : pageBackTitle)
-                            .font(.system(size: 14, weight: .medium))
-                            .frame(width: standardKeyWidth * 1.30, height: rowHeight)
-                            .background(palette.special)
-                            .foregroundStyle(.primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
+                    let pageBackTitle = (state.manualLanguage == .chinesePinyin && state.pinyinLayoutMode == .t9) ? "九键" : "ABC"
+                    NativeTactileKey(
+                        presentation: NativeKeyPresentation(
+                            title: state.layoutPage == .letters ? "123" : pageBackTitle,
+                            fontSize: 14,
+                            fontWeight: .medium,
+                            cornerRadius: 6,
+                            fillColor: uiPalette.special,
+                            pressedColor: uiPalette.specialPressed,
+                            edgeColor: uiPalette.edge,
+                            textColor: uiPalette.primaryText,
+                            isDark: isDark,
+                            showsPopover: false,
+                            participatesInRollover: false,
+                            hapticEnabled: state.hapticEnabled
+                        ),
+                        onTap: {
+                            let targetPage: ManualLayoutPage = (state.layoutPage == .letters) ? .numbers : .letters
+                            model.switchLayoutPage(targetPage)
+                        },
+                        onTouchDown: { model.triggerTouchDownHaptic() }
+                    )
+                    .frame(width: modW1, height: rowHeight)
 
-                    Button {
-                        model.switchToPanel(.voice)
-                    } label: {
-                        Image(systemName: state.isHostAlive ? "mic.fill" : "mic")
-                            .font(.system(size: 16, weight: .medium))
-                            .frame(width: standardKeyWidth * 1.15, height: rowHeight)
-                            .background(palette.special)
-                            .foregroundStyle(state.isHostAlive ? .blue : .primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
+                    NativeTactileKey(
+                        presentation: NativeKeyPresentation(
+                            title: "",
+                            systemImage: state.isHostAlive ? "mic.fill" : "mic",
+                            fontSize: 16,
+                            fontWeight: .medium,
+                            cornerRadius: 6,
+                            fillColor: uiPalette.special,
+                            pressedColor: uiPalette.specialPressed,
+                            edgeColor: uiPalette.edge,
+                            tintColor: state.isHostAlive ? .systemBlue : uiPalette.primaryText,
+                            isDark: isDark,
+                            showsPopover: false,
+                            participatesInRollover: false,
+                            hapticEnabled: state.hapticEnabled
+                        ),
+                        onTap: { model.switchToPanel(.voice) },
+                        onTouchDown: { model.triggerTouchDownHaptic() }
+                    )
+                    .frame(width: modW2, height: rowHeight)
 
-                    Button {
-                        model.toggleManualLanguage()
-                    } label: {
-                        let langSwitchTitle = (state.manualLanguage == .chinesePinyin)
-                            ? "EN"
-                            : (state.pinyinLayoutMode == .t9 ? "九键" : "拼")
-                        Text(langSwitchTitle)
-                            .font(.system(size: 14, weight: .semibold))
-                            .frame(width: standardKeyWidth * 1.25, height: rowHeight)
-                            .background(palette.special)
-                            .foregroundStyle(.primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
+                    let langSwitchTitle = (state.manualLanguage == .chinesePinyin)
+                        ? "EN"
+                        : (state.pinyinLayoutMode == .t9 ? "九键" : "拼")
+                    NativeTactileKey(
+                        presentation: NativeKeyPresentation(
+                            title: langSwitchTitle,
+                            fontSize: 14,
+                            fontWeight: .semibold,
+                            cornerRadius: 6,
+                            fillColor: uiPalette.special,
+                            pressedColor: uiPalette.specialPressed,
+                            edgeColor: uiPalette.edge,
+                            textColor: uiPalette.primaryText,
+                            isDark: isDark,
+                            showsPopover: false,
+                            participatesInRollover: false,
+                            hapticEnabled: state.hapticEnabled
+                        ),
+                        onTap: { model.toggleManualLanguage() },
+                        onTouchDown: { model.triggerTouchDownHaptic() }
+                    )
+                    .frame(width: modW3, height: rowHeight)
 
-                    SpacebarTrackpadKey(
+                    NativeSpacebarKey(
                         title: state.spacebarTitle,
-                        height: rowHeight,
-                        keyColor: palette.key,
-                        pressedColor: palette.keyPressed,
-                        edgeColor: palette.edge,
+                        fontSize: 13,
+                        cornerRadius: 6,
+                        fillColor: uiPalette.key,
+                        pressedColor: uiPalette.keyPressed,
+                        edgeColor: uiPalette.edge,
+                        textColor: isDark ? UIColor.white.withAlphaComponent(0.70) : UIColor.darkGray,
+                        hapticEnabled: state.hapticEnabled,
+                        onTouchDown: { model.triggerTouchDownHaptic() },
                         onTap: { model.handleSpaceTap() },
                         onTrackpadDrag: { dx in model.handleSpaceTrackpadDrag(deltaX: dx) },
                         onTrackpadEnd: { model.resetSpaceTrackpad() }
                     )
+                    .frame(width: spaceW, height: rowHeight)
 
-                    Button {
-                        model.handleReturnTap()
-                    } label: {
-                        Text(state.returnTitle)
-                            .font(.system(size: 14, weight: .semibold))
-                            .frame(width: standardKeyWidth * 1.85, height: rowHeight)
-                            .background(state.isReturnAccent ? Color.blue : palette.special)
-                            .foregroundStyle(state.isReturnAccent ? Color.white : Color.primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
+                    NativeTactileKey(
+                        presentation: NativeKeyPresentation(
+                            title: state.returnTitle,
+                            fontSize: 14,
+                            fontWeight: .semibold,
+                            cornerRadius: 6,
+                            fillColor: state.isReturnAccent ? .systemBlue : uiPalette.special,
+                            pressedColor: state.isReturnAccent ? UIColor.systemBlue.withAlphaComponent(0.75) : uiPalette.specialPressed,
+                            edgeColor: uiPalette.edge,
+                            textColor: state.isReturnAccent ? .white : uiPalette.primaryText,
+                            isDark: isDark,
+                            showsPopover: false,
+                            participatesInRollover: false,
+                            hapticEnabled: state.hapticEnabled
+                        ),
+                        onTap: { model.handleReturnTap() },
+                        onTouchDown: { model.triggerTouchDownHaptic() }
+                    )
+                    .frame(width: modW5, height: rowHeight)
                 }
             }
         }
+    }
+
+    private func charKey(_ rawKey: String, width: CGFloat, height: CGFloat) -> some View {
+        let isLetters = (state.layoutPage == .letters)
+        let isChinese = (state.manualLanguage == .chinesePinyin)
+        let isShifted = (state.shiftState != .off)
+        let title = displayLabel(rawKey)
+        let swipeUp = isLetters ? KeyboardKeyGestureMap.qwertySwipeUp(key: rawKey, isChinese: isChinese) : nil
+        let longOpts = KeyboardKeyGestureMap.qwertyLongPressOptions(key: rawKey, isChinese: isChinese, isShifted: isShifted)
+
+        return NativeTactileKey(
+            presentation: NativeKeyPresentation(
+                title: title,
+                secondaryHint: swipeUp,
+                fontSize: isLetters ? 20 : 18,
+                fontWeight: .regular,
+                cornerRadius: 5,
+                fillColor: uiPalette.key,
+                pressedColor: uiPalette.keyPressed,
+                edgeColor: uiPalette.edge,
+                textColor: uiPalette.primaryText,
+                isDark: isDark,
+                showsPopover: true,
+                popoverTitle: title,
+                swipeUpText: swipeUp,
+                longPressOptions: longOpts,
+                participatesInRollover: true,
+                hapticEnabled: state.hapticEnabled
+            ),
+            onTap: { model.handleKeyTap(rawKey) },
+            onCommitSpecial: { sym in model.handleSwipeUpOrLongPressSymbol(sym) },
+            onTouchDown: { model.triggerTouchDownHaptic() }
+        )
+        .frame(width: width, height: height)
     }
 
     private var row1Keys: [String] {
@@ -900,216 +1016,81 @@ private struct QwertyKeyGridView: View, Equatable {
     private func row3LeftModifier(width: CGFloat, height: CGFloat) -> some View {
         switch state.layoutPage {
         case .letters:
-            Button {
-                model.handleShiftTap()
-            } label: {
-                Image(systemName: shiftIconName)
-                    .font(.system(size: 17, weight: .medium))
-                    .frame(width: width, height: height)
-                    .background(state.shiftState == .off ? palette.special : palette.key)
-                    .foregroundStyle(state.shiftState == .capsLock ? .blue : .primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            .buttonStyle(.plain)
+            NativeTactileKey(
+                presentation: NativeKeyPresentation(
+                    title: "",
+                    systemImage: shiftIconName,
+                    fontSize: 17,
+                    fontWeight: .medium,
+                    cornerRadius: 6,
+                    fillColor: state.shiftState == .off ? uiPalette.special : uiPalette.key,
+                    pressedColor: uiPalette.specialPressed,
+                    edgeColor: uiPalette.edge,
+                    tintColor: state.shiftState == .capsLock ? .systemBlue : uiPalette.primaryText,
+                    isDark: isDark,
+                    showsPopover: false,
+                    participatesInRollover: false,
+                    hapticEnabled: state.hapticEnabled
+                ),
+                onTap: { model.handleShiftTap() },
+                onTouchDown: { model.triggerTouchDownHaptic() }
+            )
+            .frame(width: width, height: height)
 
         case .numbers:
-            Button {
-                model.triggerHaptic()
-                model.layoutPage = .symbols
-            } label: {
-                Text("#+=")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(width: width, height: height)
-                    .background(palette.special)
-                    .foregroundStyle(.primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            .buttonStyle(.plain)
+            NativeTactileKey(
+                presentation: NativeKeyPresentation(
+                    title: "#+=",
+                    fontSize: 13,
+                    fontWeight: .medium,
+                    cornerRadius: 6,
+                    fillColor: uiPalette.special,
+                    pressedColor: uiPalette.specialPressed,
+                    edgeColor: uiPalette.edge,
+                    textColor: uiPalette.primaryText,
+                    isDark: isDark,
+                    showsPopover: false,
+                    participatesInRollover: false,
+                    hapticEnabled: state.hapticEnabled
+                ),
+                onTap: { model.switchLayoutPage(.symbols) },
+                onTouchDown: { model.triggerTouchDownHaptic() }
+            )
+            .frame(width: width, height: height)
 
         case .symbols:
-            Button {
-                model.triggerHaptic()
-                model.layoutPage = .numbers
-            } label: {
-                Text("123")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(width: width, height: height)
-                    .background(palette.special)
-                    .foregroundStyle(.primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            .buttonStyle(.plain)
+            NativeTactileKey(
+                presentation: NativeKeyPresentation(
+                    title: "123",
+                    fontSize: 13,
+                    fontWeight: .medium,
+                    cornerRadius: 6,
+                    fillColor: uiPalette.special,
+                    pressedColor: uiPalette.specialPressed,
+                    edgeColor: uiPalette.edge,
+                    textColor: uiPalette.primaryText,
+                    isDark: isDark,
+                    showsPopover: false,
+                    participatesInRollover: false,
+                    hapticEnabled: state.hapticEnabled
+                ),
+                onTap: { model.switchLayoutPage(.numbers) },
+                onTouchDown: { model.triggerTouchDownHaptic() }
+            )
+            .frame(width: width, height: height)
         }
     }
 }
 
-// MARK: - Character Key Button with Zero-Delay Touch + Keycap Popover
+private struct CandidateTapButtonStyle: ButtonStyle {
+    let isDark: Bool
 
-private struct CharacterKeyButton: View {
-    let label: String
-    let width: CGFloat
-    let height: CGFloat
-    let keyColor: Color
-    let action: () -> Void
-
-    @State private var isPressed = false
-
-    var body: some View {
-        ZStack {
-            ZStack(alignment: .bottom) {
-                Capsule()
-                    .fill(Color.black.opacity(0.22))
-                    .frame(height: 1.5)
-                    .padding(.horizontal, 3)
-                    .offset(y: 1)
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(keyColor)
-            }
-
-            Text(label)
-                .font(.system(size: 20, weight: .regular))
-                .foregroundStyle(.primary)
-        }
-        .frame(width: width, height: height)
-        .overlay(alignment: .top) {
-            if isPressed {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(keyColor)
-                        .shadow(color: .black.opacity(0.28), radius: 4, y: 2)
-                    Text(label)
-                        .font(.system(size: 28, weight: .medium))
-                        .foregroundStyle(.primary)
-                }
-                .frame(width: max(width + 10, 42), height: height + 10)
-                .offset(y: -(height + 6))
-                .allowsHitTesting(false)
-            }
-        }
-        .zIndex(isPressed ? 100 : 0)
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    if !isPressed {
-                        isPressed = true
-                    }
-                }
-                .onEnded { _ in
-                    isPressed = false
-                    action()
-                }
-        )
-    }
-}
-
-// MARK: - Spacebar with Tap + Long-Press Cursor Trackpad
-
-struct SpacebarTrackpadKey: View {
-    let title: String
-    var fixedWidth: CGFloat? = nil
-    let height: CGFloat
-    let keyColor: Color
-    var pressedColor: Color? = nil
-    var edgeColor: Color? = nil
-    var titleFontSize: CGFloat = 13
-    var titleColor: Color = .secondary
-    let onTap: () -> Void
-    let onTrackpadDrag: (CGFloat) -> Void
-    let onTrackpadEnd: () -> Void
-
-    @State private var isTrackpadActive = false
-    @State private var isPressed = false
-    @State private var lastDragX: CGFloat?
-
-    private var currentFill: Color {
-        if isTrackpadActive { return Color.blue.opacity(0.22) }
-        if isPressed, let pressedColor { return pressedColor }
-        return keyColor
-    }
-
-    var body: some View {
-        ZStack {
-            if let edgeColor {
-                Capsule()
-                    .fill(edgeColor)
-                    .frame(height: 1.5)
-                    .padding(.horizontal, 3)
-                    .frame(maxHeight: .infinity, alignment: .bottom)
-                    .offset(y: 1)
-            }
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(currentFill)
-
-            Text(isTrackpadActive ? "◀ 滑动移动光标 ▶" : title)
-                .font(.system(size: isTrackpadActive ? 13 : titleFontSize, weight: .regular))
-                .foregroundStyle(isTrackpadActive ? Color.blue : titleColor)
-        }
-        .frame(maxWidth: fixedWidth == nil ? .infinity : fixedWidth)
-        .frame(width: fixedWidth, height: height)
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { value in
-                    if !isPressed { isPressed = true }
-                    if isTrackpadActive {
-                        if let prevX = lastDragX {
-                            onTrackpadDrag(value.location.x - prevX)
-                        }
-                        lastDragX = value.location.x
-                    }
-                }
-                .onEnded { value in
-                    isPressed = false
-                    if isTrackpadActive {
-                        isTrackpadActive = false
-                        lastDragX = nil
-                        onTrackpadEnd()
-                    } else if abs(value.translation.width) < 44 && abs(value.translation.height) < 44 {
-                        onTap()
-                    }
-                }
-        )
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.32)
-                .onEnded { _ in
-                    if !isTrackpadActive {
-                        isTrackpadActive = true
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    }
-                }
-        )
-    }
-}
-
-/// Zero-delay touch-responsive chevron toggle placed next to scrollable candidate strips.
-private struct InstantChevronToggle: View {
-    let isOpen: Bool
-    let action: () -> Void
-
-    @State private var isPressed = false
-
-    var body: some View {
-        Image(systemName: isOpen ? "chevron.up" : "chevron.down")
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(isPressed ? Color.blue : Color.secondary)
-            .frame(width: 38, height: 43.5)
-            .background(isPressed ? Color.blue.opacity(0.10) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        if !isPressed {
-                            isPressed = true
-                        }
-                    }
-                    .onEnded { value in
-                        isPressed = false
-                        if abs(value.translation.width) < 44 && abs(value.translation.height) < 44 {
-                            action()
-                        }
-                    }
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                configuration.isPressed
+                    ? (isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.08))
+                    : Color.clear
             )
     }
 }
