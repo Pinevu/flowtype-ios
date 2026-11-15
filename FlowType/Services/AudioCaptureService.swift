@@ -281,15 +281,33 @@ public final class AudioCaptureService {
     }
 
     private func resolveLocaleIdentifier(_ code: String) -> String {
-        switch code.lowercased() {
+        let normalized = code.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
         case "zh", "zh-cn", "zh-hans": return "zh-CN"
         case "zh-tw", "zh-hant": return "zh-TW"
+        case "yue", "zh-hk", "yue-hans", "yue-hant": return "zh-HK"
         case "en", "en-us": return "en-US"
         case "ja": return "ja-JP"
         case "ko": return "ko-KR"
         case "es": return "es-ES"
         case "fr": return "fr-FR"
-        default: return Locale.current.identifier
+        case "", "auto":
+            if let preferred = Locale.preferredLanguages.first?.lowercased() {
+                if preferred.hasPrefix("zh-hant") || preferred.hasPrefix("zh-tw") { return "zh-TW" }
+                if preferred.hasPrefix("zh-hk") || preferred.hasPrefix("yue") { return "zh-HK" }
+                if preferred.hasPrefix("zh") { return "zh-CN" }
+                if preferred.hasPrefix("ja") { return "ja-JP" }
+                if preferred.hasPrefix("ko") { return "ko-KR" }
+                if preferred.hasPrefix("es") { return "es-ES" }
+                if preferred.hasPrefix("fr") { return "fr-FR" }
+                if preferred.hasPrefix("en") { return "en-US" }
+            }
+            if SFSpeechRecognizer.supportedLocales().contains(Locale.current) {
+                return Locale.current.identifier
+            }
+            return "zh-CN"
+        default:
+            return code
         }
     }
 }

@@ -61,7 +61,7 @@ public struct ManualKeyboardPanel: View {
                                 .foregroundStyle(.primary)
                                 .lineLimit(1)
                                 .padding(.horizontal, 15)
-                                .frame(height: 40)
+                                .frame(height: 36)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
@@ -69,7 +69,7 @@ public struct ManualKeyboardPanel: View {
                 }
             }
 
-            Divider().frame(height: 22)
+            Divider().frame(height: 20)
 
             candidateChevronButton(isOpen: model.isEmoticonDrawerOpen) {
                 model.toggleEmoticonDrawer()
@@ -88,7 +88,7 @@ public struct ManualKeyboardPanel: View {
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
                         .foregroundStyle(Color.blue)
                         .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
+                        .padding(.vertical, 4)
                         .background(Color.blue.opacity(0.12))
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
@@ -101,7 +101,7 @@ public struct ManualKeyboardPanel: View {
             }
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 20) {
+                LazyHStack(spacing: 20) {
                     ForEach(Array(model.pinyinCandidates.prefix(24).enumerated()), id: \.element.id) { idx, cand in
                         Button {
                             model.selectPinyinCandidate(cand)
@@ -110,7 +110,7 @@ public struct ManualKeyboardPanel: View {
                                 .font(.system(size: 20, weight: idx == 0 ? .medium : .regular))
                                 .foregroundStyle(.primary)
                                 .lineLimit(1)
-                                .frame(height: 40)
+                                .frame(height: 36)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
@@ -119,7 +119,7 @@ public struct ManualKeyboardPanel: View {
                 .padding(.horizontal, 8)
             }
 
-            Divider().frame(height: 22)
+            Divider().frame(height: 20)
 
             candidateChevronButton(isOpen: model.isCandidateDrawerExpanded) {
                 model.triggerHaptic()
@@ -134,7 +134,7 @@ public struct ManualKeyboardPanel: View {
             Image(systemName: isOpen ? "chevron.up" : "chevron.down")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 40, height: 40)
+                .frame(width: 36, height: 36)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -157,7 +157,7 @@ public struct ManualKeyboardPanel: View {
             .buttonStyle(.plain)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
+                LazyHStack(spacing: 6) {
                     ForEach(Array(model.pinyinCandidates.prefix(18).enumerated()), id: \.element.id) { idx, cand in
                         Button {
                             model.selectPinyinCandidate(cand)
@@ -501,275 +501,23 @@ public struct ManualKeyboardPanel: View {
         }
     }
 
+    private var qwertyGridState: QwertyGridState {
+        QwertyGridState(
+            manualLanguage: model.manualLanguage,
+            layoutPage: model.layoutPage,
+            pinyinLayoutMode: model.pinyinLayoutMode,
+            shiftState: model.shiftState,
+            isHostAlive: model.isHostAlive,
+            spacebarTitle: spacebarTitle,
+            returnTitle: effectiveReturnTitle,
+            isReturnAccent: isComposingChinesePinyin || model.returnKeyLabel != "换行",
+            isTranslucent: isCustomOrTranslucentBackdrop
+        )
+    }
+
     private var qwertyKeyGrid: some View {
-        GeometryReader { geo in
-            let rowSpacing: CGFloat = 8
-            let colSpacing: CGFloat = 5
-            let rowHeight = max(36, (geo.size.height - rowSpacing * 3) / 4)
-            let standardKeyWidth = (geo.size.width - colSpacing * 9) / 10
-
-            VStack(spacing: rowSpacing) {
-                // Row 1 (10 keys)
-                HStack(spacing: colSpacing) {
-                    ForEach(row1Keys, id: \.self) { label in
-                        CharacterKeyButton(
-                            label: displayLabel(label),
-                            width: standardKeyWidth,
-                            height: rowHeight,
-                            keyColor: keyBackgroundColor
-                        ) {
-                            model.handleKeyTap(label)
-                        }
-                    }
-                }
-
-                // Row 2 (9 keys in letters, 10 keys in numbers/symbols)
-                HStack(spacing: colSpacing) {
-                    if model.layoutPage == .letters {
-                        Spacer(minLength: 0)
-                    }
-                    ForEach(row2Keys, id: \.self) { label in
-                        let w = model.layoutPage == .letters
-                            ? standardKeyWidth
-                            : (geo.size.width - colSpacing * 9) / 10
-                        CharacterKeyButton(
-                            label: displayLabel(label),
-                            width: w,
-                            height: rowHeight,
-                            keyColor: keyBackgroundColor
-                        ) {
-                            model.handleKeyTap(label)
-                        }
-                    }
-                    if model.layoutPage == .letters {
-                        Spacer(minLength: 0)
-                    }
-                }
-
-                // Row 3 (Modifier + 7/5 keys + Backspace)
-                HStack(spacing: colSpacing) {
-                    row3LeftModifier(width: standardKeyWidth * 1.38, height: rowHeight)
-
-                    let centerKeys = row3Keys
-                    let centerAvail = geo.size.width - (standardKeyWidth * 1.38) * 2 - colSpacing * CGFloat(centerKeys.count + 1)
-                    let centerKeyW = centerAvail / CGFloat(centerKeys.count)
-
-                    ForEach(centerKeys, id: \.self) { label in
-                        CharacterKeyButton(
-                            label: displayLabel(label),
-                            width: centerKeyW,
-                            height: rowHeight,
-                            keyColor: keyBackgroundColor
-                        ) {
-                            model.handleKeyTap(label)
-                        }
-                    }
-
-                    backspaceKey(width: standardKeyWidth * 1.38, height: rowHeight)
-                }
-
-                // Row 4 (123/ABC/九键 + Voice/九键 + 中/EN + Spacebar Trackpad + Return)
-                HStack(spacing: colSpacing) {
-                    // 123 / ABC / 九键 toggle
-                    Button {
-                        let targetPage: ManualLayoutPage = (model.layoutPage == .letters) ? .numbers : .letters
-                        model.switchLayoutPage(targetPage)
-                    } label: {
-                        let pageBackTitle = (model.manualLanguage == .chinesePinyin && model.pinyinLayoutMode == .t9) ? "九键" : "ABC"
-                        Text(model.layoutPage == .letters ? "123" : pageBackTitle)
-                            .font(.system(size: 14, weight: .medium))
-                            .frame(width: standardKeyWidth * 1.45, height: rowHeight)
-                            .background(specialKeyBackgroundColor)
-                            .foregroundStyle(.primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-
-                    // Quick Nine-Key / Voice toggle
-                    if model.manualLanguage == .chinesePinyin && model.layoutPage == .letters {
-                        Button {
-                            model.togglePinyinLayoutMode()
-                        } label: {
-                            Text("九键")
-                                .font(.system(size: 13, weight: .semibold))
-                                .frame(width: standardKeyWidth * 1.15, height: rowHeight)
-                                .background(specialKeyBackgroundColor)
-                                .foregroundStyle(.primary)
-                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        Button {
-                            model.switchToPanel(.voice)
-                        } label: {
-                            Image(systemName: model.isHostAlive ? "mic.fill" : "mic")
-                                .font(.system(size: 16, weight: .medium))
-                                .frame(width: standardKeyWidth * 1.15, height: rowHeight)
-                                .background(specialKeyBackgroundColor)
-                                .foregroundStyle(.blue)
-                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    // Chinese / English toggle
-                    Button {
-                        model.toggleManualLanguage()
-                    } label: {
-                        let langSwitchTitle = (model.manualLanguage == .chinesePinyin)
-                            ? "EN"
-                            : (model.pinyinLayoutMode == .t9 ? "九键" : "拼")
-                        Text(langSwitchTitle)
-                            .font(.system(size: 14, weight: .semibold))
-                            .frame(width: standardKeyWidth * 1.25, height: rowHeight)
-                            .background(specialKeyBackgroundColor)
-                            .foregroundStyle(.primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-
-                    // Spacebar with Cursor Trackpad
-                    SpacebarTrackpadKey(
-                        title: spacebarTitle,
-                        height: rowHeight,
-                        keyColor: keyBackgroundColor,
-                        onTap: { model.handleSpaceTap() },
-                        onTrackpadDrag: { dx in model.handleSpaceTrackpadDrag(deltaX: dx) },
-                        onTrackpadEnd: { model.resetSpaceTrackpad() }
-                    )
-
-                    // Return / Confirm Key
-                    Button {
-                        model.handleReturnTap()
-                    } label: {
-                        Text(effectiveReturnTitle)
-                            .font(.system(size: 14, weight: .semibold))
-                            .frame(width: standardKeyWidth * 1.85, height: rowHeight)
-                            .background(effectiveReturnColor)
-                            .foregroundStyle(effectiveReturnForeground)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-
-    // MARK: - Key Definitions
-
-    private var row1Keys: [String] {
-        switch model.layoutPage {
-        case .letters: return ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"]
-        case .numbers: return ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
-        case .symbols: return ["[", "]", "{", "}", "#", "%", "^", "*", "+", "="]
-        }
-    }
-
-    private var row2Keys: [String] {
-        switch model.layoutPage {
-        case .letters:
-            return ["a", "s", "d", "f", "g", "h", "j", "k", "l"]
-        case .numbers:
-            return model.manualLanguage == .chinesePinyin
-                ? ["-", "/", "：", "；", "（", "）", "¥", "&", "@", "”"]
-                : ["-", "/", ":", ";", "(", ")", "$", "&", "@", "\""]
-        case .symbols:
-            return model.manualLanguage == .chinesePinyin
-                ? ["_", "\\", "|", "~", "《", "》", "€", "£", "、", "·"]
-                : ["_", "\\", "|", "~", "<", ">", "€", "£", "¥", "•"]
-        }
-    }
-
-    private var row3Keys: [String] {
-        switch model.layoutPage {
-        case .letters:
-            return ["z", "x", "c", "v", "b", "n", "m"]
-        case .numbers, .symbols:
-            return model.manualLanguage == .chinesePinyin
-                ? ["。", "，", "？", "！", "’"]
-                : [".", ",", "?", "!", "'"]
-        }
-    }
-
-    private func displayLabel(_ key: String) -> String {
-        guard model.layoutPage == .letters else { return key }
-        if model.manualLanguage == .chinesePinyin {
-            return model.shiftState == .off ? key.lowercased() : key.uppercased()
-        }
-        return model.shiftState == .off ? key.lowercased() : key.uppercased()
-    }
-
-    @ViewBuilder
-    private func row3LeftModifier(width: CGFloat, height: CGFloat) -> some View {
-        switch model.layoutPage {
-        case .letters:
-            Button {
-                model.handleShiftTap()
-            } label: {
-                Image(systemName: shiftIconName)
-                    .font(.system(size: 17, weight: .medium))
-                    .frame(width: width, height: height)
-                    .background(model.shiftState == .off ? specialKeyBackgroundColor : keyBackgroundColor)
-                    .foregroundStyle(model.shiftState == .capsLock ? .blue : .primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            .buttonStyle(.plain)
-
-        case .numbers:
-            Button {
-                model.triggerHaptic()
-                model.layoutPage = .symbols
-            } label: {
-                Text("#+=")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(width: width, height: height)
-                    .background(specialKeyBackgroundColor)
-                    .foregroundStyle(.primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            .buttonStyle(.plain)
-
-        case .symbols:
-            Button {
-                model.triggerHaptic()
-                model.layoutPage = .numbers
-            } label: {
-                Text("123")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(width: width, height: height)
-                    .background(specialKeyBackgroundColor)
-                    .foregroundStyle(.primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private func backspaceKey(width: CGFloat, height: CGFloat) -> some View {
-        Image(systemName: "delete.left")
-            .font(.system(size: 17, weight: .medium))
-            .frame(width: width, height: height)
-            .background(specialKeyBackgroundColor)
-            .foregroundStyle(.primary)
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .onTapGesture {
-                model.handleBackspaceTap()
-            }
-            .onLongPressGesture(minimumDuration: 0.35, perform: {}, onPressingChanged: { pressing in
-                if pressing {
-                    model.startContinuousBackspace()
-                } else {
-                    model.stopContinuousBackspace()
-                }
-            })
-    }
-
-    private var shiftIconName: String {
-        switch model.shiftState {
-        case .off: return "shift"
-        case .shifted: return "shift.fill"
-        case .capsLock: return "capslock.fill"
-        }
+        QwertyKeyGridView(model: model, state: qwertyGridState)
+            .equatable()
     }
 
     private var spacebarTitle: String {
@@ -791,20 +539,6 @@ public struct ManualKeyboardPanel: View {
         return model.returnKeyLabel
     }
 
-    private var effectiveReturnColor: Color {
-        if isComposingChinesePinyin || model.returnKeyLabel != "换行" {
-            return .blue
-        }
-        return specialKeyBackgroundColor
-    }
-
-    private var effectiveReturnForeground: Color {
-        if isComposingChinesePinyin || model.returnKeyLabel != "换行" {
-            return .white
-        }
-        return .primary
-    }
-
     private var isCustomOrTranslucentBackdrop: Bool {
         model.config.backgroundStyle != .system || model.config.backgroundOpacity < 0.98
     }
@@ -816,6 +550,290 @@ public struct ManualKeyboardPanel: View {
     private var keyBackgroundColor: Color { palette.key }
 
     private var specialKeyBackgroundColor: Color { palette.special }
+}
+
+// MARK: - Isolated QWERTY / Numbers / Symbols Grid
+
+private struct QwertyGridState: Equatable {
+    var manualLanguage: ManualLanguage
+    var layoutPage: ManualLayoutPage
+    var pinyinLayoutMode: PinyinLayoutMode
+    var shiftState: ShiftState
+    var isHostAlive: Bool
+    var spacebarTitle: String
+    var returnTitle: String
+    var isReturnAccent: Bool
+    var isTranslucent: Bool
+}
+
+private struct QwertyKeyGridView: View, Equatable {
+    let model: KeyboardStateModel
+    let state: QwertyGridState
+    @Environment(\.colorScheme) private var colorScheme
+
+    static func == (lhs: QwertyKeyGridView, rhs: QwertyKeyGridView) -> Bool {
+        lhs.model === rhs.model && lhs.state == rhs.state
+    }
+
+    private var palette: KeyPalette {
+        KeyPalette(colorScheme: colorScheme, isTranslucent: state.isTranslucent)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let rowSpacing: CGFloat = 8
+            let colSpacing: CGFloat = 5
+            let rowHeight = max(36, (geo.size.height - rowSpacing * 3) / 4)
+            let standardKeyWidth = (geo.size.width - colSpacing * 9) / 10
+
+            VStack(spacing: rowSpacing) {
+                // Row 1 (10 keys)
+                HStack(spacing: colSpacing) {
+                    ForEach(row1Keys, id: \.self) { label in
+                        CharacterKeyButton(
+                            label: displayLabel(label),
+                            width: standardKeyWidth,
+                            height: rowHeight,
+                            keyColor: palette.key
+                        ) {
+                            model.handleKeyTap(label)
+                        }
+                    }
+                }
+
+                // Row 2 (9 keys in letters, 10 keys in numbers/symbols)
+                HStack(spacing: colSpacing) {
+                    if state.layoutPage == .letters {
+                        Spacer(minLength: 0)
+                    }
+                    ForEach(row2Keys, id: \.self) { label in
+                        let w = state.layoutPage == .letters
+                            ? standardKeyWidth
+                            : (geo.size.width - colSpacing * 9) / 10
+                        CharacterKeyButton(
+                            label: displayLabel(label),
+                            width: w,
+                            height: rowHeight,
+                            keyColor: palette.key
+                        ) {
+                            model.handleKeyTap(label)
+                        }
+                    }
+                    if state.layoutPage == .letters {
+                        Spacer(minLength: 0)
+                    }
+                }
+
+                // Row 3 (Modifier + 7/5 keys + Backspace)
+                HStack(spacing: colSpacing) {
+                    row3LeftModifier(width: standardKeyWidth * 1.38, height: rowHeight)
+
+                    let centerKeys = row3Keys
+                    let centerAvail = geo.size.width - (standardKeyWidth * 1.38) * 2 - colSpacing * CGFloat(centerKeys.count + 1)
+                    let centerKeyW = centerAvail / CGFloat(centerKeys.count)
+
+                    ForEach(centerKeys, id: \.self) { label in
+                        CharacterKeyButton(
+                            label: displayLabel(label),
+                            width: centerKeyW,
+                            height: rowHeight,
+                            keyColor: palette.key
+                        ) {
+                            model.handleKeyTap(label)
+                        }
+                    }
+
+                    HoldRepeatKey(
+                        fill: palette.special,
+                        pressedFill: palette.specialPressed,
+                        edge: palette.edge,
+                        onTap: { model.handleBackspaceTap() },
+                        onHoldStart: { model.startContinuousBackspace() },
+                        onHoldEnd: { model.stopContinuousBackspace() }
+                    ) {
+                        Image(systemName: "delete.left")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundStyle(.primary)
+                    }
+                    .frame(width: standardKeyWidth * 1.38, height: rowHeight)
+                }
+
+                // Row 4 (123/ABC/九键 + Voice/九键 + 中/EN + Spacebar Trackpad + Return)
+                HStack(spacing: colSpacing) {
+                    Button {
+                        let targetPage: ManualLayoutPage = (state.layoutPage == .letters) ? .numbers : .letters
+                        model.switchLayoutPage(targetPage)
+                    } label: {
+                        let pageBackTitle = (state.manualLanguage == .chinesePinyin && state.pinyinLayoutMode == .t9) ? "九键" : "ABC"
+                        Text(state.layoutPage == .letters ? "123" : pageBackTitle)
+                            .font(.system(size: 14, weight: .medium))
+                            .frame(width: standardKeyWidth * 1.45, height: rowHeight)
+                            .background(palette.special)
+                            .foregroundStyle(.primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+
+                    if state.manualLanguage == .chinesePinyin && state.layoutPage == .letters {
+                        Button {
+                            model.togglePinyinLayoutMode()
+                        } label: {
+                            Text("九键")
+                                .font(.system(size: 13, weight: .semibold))
+                                .frame(width: standardKeyWidth * 1.15, height: rowHeight)
+                                .background(palette.special)
+                                .foregroundStyle(.primary)
+                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Button {
+                            model.switchToPanel(.voice)
+                        } label: {
+                            Image(systemName: state.isHostAlive ? "mic.fill" : "mic")
+                                .font(.system(size: 16, weight: .medium))
+                                .frame(width: standardKeyWidth * 1.15, height: rowHeight)
+                                .background(palette.special)
+                                .foregroundStyle(.blue)
+                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Button {
+                        model.toggleManualLanguage()
+                    } label: {
+                        let langSwitchTitle = (state.manualLanguage == .chinesePinyin)
+                            ? "EN"
+                            : (state.pinyinLayoutMode == .t9 ? "九键" : "拼")
+                        Text(langSwitchTitle)
+                            .font(.system(size: 14, weight: .semibold))
+                            .frame(width: standardKeyWidth * 1.25, height: rowHeight)
+                            .background(palette.special)
+                            .foregroundStyle(.primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+
+                    SpacebarTrackpadKey(
+                        title: state.spacebarTitle,
+                        height: rowHeight,
+                        keyColor: palette.key,
+                        pressedColor: palette.keyPressed,
+                        edgeColor: palette.edge,
+                        onTap: { model.handleSpaceTap() },
+                        onTrackpadDrag: { dx in model.handleSpaceTrackpadDrag(deltaX: dx) },
+                        onTrackpadEnd: { model.resetSpaceTrackpad() }
+                    )
+
+                    Button {
+                        model.handleReturnTap()
+                    } label: {
+                        Text(state.returnTitle)
+                            .font(.system(size: 14, weight: .semibold))
+                            .frame(width: standardKeyWidth * 1.85, height: rowHeight)
+                            .background(state.isReturnAccent ? Color.blue : palette.special)
+                            .foregroundStyle(state.isReturnAccent ? Color.white : Color.primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var row1Keys: [String] {
+        switch state.layoutPage {
+        case .letters: return ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"]
+        case .numbers: return ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
+        case .symbols: return ["[", "]", "{", "}", "#", "%", "^", "*", "+", "="]
+        }
+    }
+
+    private var row2Keys: [String] {
+        switch state.layoutPage {
+        case .letters:
+            return ["a", "s", "d", "f", "g", "h", "j", "k", "l"]
+        case .numbers:
+            return state.manualLanguage == .chinesePinyin
+                ? ["-", "/", "：", "；", "（", "）", "¥", "&", "@", "”"]
+                : ["-", "/", ":", ";", "(", ")", "$", "&", "@", "\""]
+        case .symbols:
+            return state.manualLanguage == .chinesePinyin
+                ? ["_", "\\", "|", "~", "《", "》", "€", "£", "、", "·"]
+                : ["_", "\\", "|", "~", "<", ">", "€", "£", "¥", "•"]
+        }
+    }
+
+    private var row3Keys: [String] {
+        switch state.layoutPage {
+        case .letters:
+            return ["z", "x", "c", "v", "b", "n", "m"]
+        case .numbers, .symbols:
+            return state.manualLanguage == .chinesePinyin
+                ? ["。", "，", "？", "！", "’"]
+                : [".", ",", "?", "!", "'"]
+        }
+    }
+
+    private func displayLabel(_ key: String) -> String {
+        guard state.layoutPage == .letters else { return key }
+        return state.shiftState == .off ? key.lowercased() : key.uppercased()
+    }
+
+    private var shiftIconName: String {
+        switch state.shiftState {
+        case .off: return "shift"
+        case .shifted: return "shift.fill"
+        case .capsLock: return "capslock.fill"
+        }
+    }
+
+    @ViewBuilder
+    private func row3LeftModifier(width: CGFloat, height: CGFloat) -> some View {
+        switch state.layoutPage {
+        case .letters:
+            Button {
+                model.handleShiftTap()
+            } label: {
+                Image(systemName: shiftIconName)
+                    .font(.system(size: 17, weight: .medium))
+                    .frame(width: width, height: height)
+                    .background(state.shiftState == .off ? palette.special : palette.key)
+                    .foregroundStyle(state.shiftState == .capsLock ? .blue : .primary)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+        case .numbers:
+            Button {
+                model.triggerHaptic()
+                model.layoutPage = .symbols
+            } label: {
+                Text("#+=")
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: width, height: height)
+                    .background(palette.special)
+                    .foregroundStyle(.primary)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+        case .symbols:
+            Button {
+                model.triggerHaptic()
+                model.layoutPage = .numbers
+            } label: {
+                Text("123")
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: width, height: height)
+                    .background(palette.special)
+                    .foregroundStyle(.primary)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
+    }
 }
 
 // MARK: - Character Key Button with Zero-Delay Touch + Keycap Popover

@@ -95,7 +95,7 @@ private enum KeychainSyncBridge {
     }
 }
 
-public final class SharedStore {
+public final class SharedStore: @unchecked Sendable {
     public static let shared = SharedStore(containerURL: nil)
 
     public let baseDirectory: URL
@@ -111,7 +111,6 @@ public final class SharedStore {
     private let encoder: JSONEncoder = {
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .iso8601
-        enc.outputFormatting = [.prettyPrinted]
         return enc
     }()
 

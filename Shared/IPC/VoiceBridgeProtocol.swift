@@ -1,6 +1,6 @@
 import Foundation
 
-public enum VoiceCommandAction: String, Codable {
+public enum VoiceCommandAction: String, Codable, Sendable {
     case ping
     case startRecording
     case stopRecording
@@ -8,7 +8,7 @@ public enum VoiceCommandAction: String, Codable {
     case processTextEdit
 }
 
-public struct VoiceCommandPayload: Codable, Equatable {
+public struct VoiceCommandPayload: Codable, Equatable, Sendable {
     public var requestId: UUID
     public var action: VoiceCommandAction
     public var mode: VoiceActionMode
@@ -36,7 +36,7 @@ public struct VoiceCommandPayload: Codable, Equatable {
     }
 }
 
-public enum HostVoiceState: String, Codable {
+public enum HostVoiceState: String, Codable, Sendable {
     case idle
     case standbyPiP
     case recording
@@ -46,7 +46,7 @@ public enum HostVoiceState: String, Codable {
     case error
 }
 
-public struct HostRuntimeStatus: Codable, Equatable {
+public struct HostRuntimeStatus: Codable, Equatable, Sendable {
     public var state: HostVoiceState
     public var activeRequestId: UUID?
     public var mode: VoiceActionMode
@@ -93,7 +93,7 @@ public struct HostRuntimeStatus: Codable, Equatable {
     }
 }
 
-public struct ConsumedResultAck: Codable, Equatable {
+public struct ConsumedResultAck: Codable, Equatable, Sendable {
     public var requestId: UUID
     public var consumedAt: Date
 }

@@ -1,11 +1,7 @@
-name: Build & Package Gboard Lintype Mod
+# Deprecated: Gboard mod project has been deprecated in favor of standalone FlowType (Lintype语音输入).
+name: "[Deprecated] Build & Package Gboard Lintype Mod"
 
 on:
-  push:
-    paths:
-      - 'GboardMod/**'
-      - 'scripts/patch_gboard_ipa.py'
-      - '.github/workflows/build-gboard-mod.yml'
   workflow_dispatch:
 
 permissions:

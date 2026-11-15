@@ -2,12 +2,12 @@ import Foundation
 import SwiftUI
 import UIKit
 
-public enum KeyboardPanel: Equatable {
+public enum KeyboardPanel: Equatable, Sendable {
     case voice
     case manual
 }
 
-public enum ManualLanguage: Equatable {
+public enum ManualLanguage: Equatable, Sendable {
     case chinesePinyin
     case english
 
@@ -19,13 +19,13 @@ public enum ManualLanguage: Equatable {
     }
 }
 
-public enum ManualLayoutPage: Equatable {
+public enum ManualLayoutPage: Equatable, Sendable {
     case letters
     case numbers
     case symbols
 }
 
-public enum ShiftState: Equatable {
+public enum ShiftState: Equatable, Sendable {
     case off
     case shifted
     case capsLock
@@ -78,12 +78,14 @@ public final class KeyboardStateModel: ObservableObject {
 
     // MARK: - Dependencies & Callbacks
     private let store = SharedStore.shared
-    private let lexicon = LexiconDatabase.shared
+    private var lexicon: LexiconDatabase { LexiconDatabase.shared }
     private let textChecker = UITextChecker()
     private let notifyBridge = DarwinNotificationBridge()
 
     private var lexiconEntries: [UILexiconEntry] = []
     private var loadedBackgroundRevision: Int = -1
+    private var lastObservedHostHeartbeatAt: Date = .distantPast
+    private var currentPollingInterval: TimeInterval = 0
     private var lastConsumedRequestId: UUID?
     private var lastDictatedTimestamp: Date?
     private var lastDictatedText: String = ""
@@ -94,6 +96,8 @@ public final class KeyboardStateModel: ObservableObject {
     private let statusQueue = DispatchQueue(label: "com.flowtype.keyboard.status", qos: .utility)
     private var isStatusPollInFlight = false
     private let t9QueryToken = AtomicCounter()
+    private let englishQueryToken = AtomicCounter()
+    private let backgroundLoadToken = AtomicCounter()
 
     private var statusPollTimer: Timer?
     private var backspaceTimer: Timer?
@@ -132,8 +136,12 @@ public final class KeyboardStateModel: ObservableObject {
         if let ack = store.loadConsumedAck() {
             self.lastConsumedRequestId = ack.requestId
         }
+        self.lastObservedHostHeartbeatAt = self.hostStatus.heartbeatAt
 
-        reloadCustomBackgroundImageIfNeeded(force: true)
+        queryQueue.async {
+            _ = LexiconDatabase.shared
+        }
+        reloadCustomBackgroundImageAsync(force: true)
         setupDarwinObservers()
         startHeartbeatPolling()
     }
@@ -146,7 +154,6 @@ public final class KeyboardStateModel: ObservableObject {
     // MARK: - Lifecycle & Sync
 
     private var contextRefreshWorkItem: DispatchWorkItem?
-    private var heartbeatTickCount: Int = 0
 
     public func refreshContextFromProxy() {
         guard let proxy = proxyProvider?() else { return }
@@ -156,11 +163,12 @@ public final class KeyboardStateModel: ObservableObject {
         }
         let newReturnLabel = mapReturnKeyTitle(proxy.returnKeyType)
         if returnKeyLabel != newReturnLabel { returnKeyLabel = newReturnLabel }
-        if manualLanguage == .english {
-            updateAutoShiftIfNeeded()
-            if layoutPage == .letters {
-                refreshEnglishSuggestions()
-            }
+        if manualLanguage == .english && layoutPage == .letters {
+            let before = proxy.documentContextBeforeInput
+            updateAutoShiftIfNeeded(before: before)
+            refreshEnglishSuggestions(prefetchedBefore: before)
+        } else if !englishSuggestions.isEmpty && manualLanguage != .english {
+            englishSuggestions = []
         }
     }
 
@@ -176,26 +184,64 @@ public final class KeyboardStateModel: ObservableObject {
     }
 
     public func reloadSharedSettings() {
-        config = store.loadConfig()
-        personalWords = store.loadDictionary()
-        if !config.targetLanguages.contains(selectedTargetLanguage), let first = config.targetLanguages.first {
+        applyLoadedSettings(store.loadConfig(), words: store.loadDictionary())
+        reloadCustomBackgroundImageAsync()
+    }
+
+    public func reloadSharedSettingsAsync() {
+        let store = self.store
+        statusQueue.async { [weak self] in
+            let cfg = store.loadConfig()
+            let words = store.loadDictionary()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.applyLoadedSettings(cfg, words: words)
+                self.reloadCustomBackgroundImageAsync()
+            }
+        }
+    }
+
+    private func applyLoadedSettings(_ cfg: AIConfiguration, words: [PersonalWord]) {
+        if config != cfg {
+            config = cfg
+        }
+        if personalWords != words {
+            personalWords = words
+        }
+        if !cfg.targetLanguages.contains(selectedTargetLanguage), let first = cfg.targetLanguages.first {
             selectedTargetLanguage = first
         }
-        reloadCustomBackgroundImageIfNeeded()
     }
 
     public func reloadCustomBackgroundImageIfNeeded(force: Bool = false) {
+        reloadCustomBackgroundImageAsync(force: force)
+    }
+
+    public func reloadCustomBackgroundImageAsync(force: Bool = false) {
         if config.backgroundStyle == .customImage {
-            if force || loadedBackgroundRevision != config.customBackgroundRevision || customBackgroundImage == nil {
-                if let data = store.loadCustomBackgroundImageData(), let decoded = UIImage(data: data) {
-                    // Decode once up-front so SwiftUI never decodes JPEG data while typing.
-                    customBackgroundImage = decoded.preparingForDisplay() ?? decoded
+            let revision = config.customBackgroundRevision
+            guard force || loadedBackgroundRevision != revision || customBackgroundImage == nil else { return }
+            let token = backgroundLoadToken.increment()
+            let counter = backgroundLoadToken
+            let store = self.store
+            statusQueue.async { [weak self] in
+                let prepared: UIImage?
+                if let data = store.loadCustomBackgroundImageData(),
+                   let decoded = UIImage(data: data) {
+                    // Decode JPEG off main thread so keyboard display stays at full frame rate.
+                    prepared = decoded.preparingForDisplay() ?? decoded
                 } else {
-                    customBackgroundImage = nil
+                    prepared = nil
                 }
-                loadedBackgroundRevision = config.customBackgroundRevision
+                guard counter.value == token else { return }
+                Task { @MainActor [weak self] in
+                    guard let self, counter.value == token else { return }
+                    self.customBackgroundImage = prepared
+                    self.loadedBackgroundRevision = revision
+                }
             }
         } else if customBackgroundImage != nil {
+            _ = backgroundLoadToken.increment()
             customBackgroundImage = nil
             loadedBackgroundRevision = -1
         }
@@ -208,51 +254,98 @@ public final class KeyboardStateModel: ObservableObject {
     private func setupDarwinObservers() {
         notifyBridge.addObserver(name: AppConfig.Notify.statusUpdated) { [weak self] in
             Task { @MainActor [weak self] in
-                self?.syncHostStatusFromStore()
+                self?.syncHostStatusAsync()
             }
         }
         notifyBridge.addObserver(name: AppConfig.Notify.configChanged) { [weak self] in
             Task { @MainActor [weak self] in
-                self?.reloadSharedSettings()
+                self?.reloadSharedSettingsAsync()
             }
         }
     }
 
+    private var desiredPollingInterval: TimeInterval {
+        let activeVoice = (activePanel == .voice
+                           || hostStatus.state == .recording
+                           || hostStatus.state == .transcribing
+                           || hostStatus.state == .polishing)
+        return activeVoice ? 0.25 : 2.0
+    }
+
     private func startHeartbeatPolling() {
+        scheduleHeartbeatTimer(interval: desiredPollingInterval)
+    }
+
+    private func updatePollingCadenceIfNeeded() {
+        let target = desiredPollingInterval
+        if abs(target - currentPollingInterval) > 0.05 || statusPollTimer == nil {
+            scheduleHeartbeatTimer(interval: target)
+        }
+    }
+
+    private func scheduleHeartbeatTimer(interval: TimeInterval) {
         statusPollTimer?.invalidate()
-        heartbeatTickCount = 0
-        statusPollTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+        currentPollingInterval = interval
+        statusPollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, !self.isStatusPollInFlight else { return }
-                self.heartbeatTickCount += 1
-                let activeVoice = (self.activePanel == .voice
-                                   || self.hostStatus.state == .recording
-                                   || self.hostStatus.state == .transcribing
-                                   || self.hostStatus.state == .polishing)
-                if !activeVoice && (self.heartbeatTickCount % 8 != 0) {
-                    return
-                }
-                self.isStatusPollInFlight = true
-                let store = self.store
-                self.statusQueue.async { [weak self] in
-                    let loaded = store.loadStatus()
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        self.isStatusPollInFlight = false
-                        if loaded != self.hostStatus {
-                            self.hostStatus = loaded
-                            self.handleHostStatusUpdate(loaded)
-                        }
-                    }
-                }
+                self?.syncHostStatusAsync()
+            }
+        }
+    }
+
+    public func syncHostStatusAsync() {
+        guard !isStatusPollInFlight else { return }
+        isStatusPollInFlight = true
+        let store = self.store
+        statusQueue.async { [weak self] in
+            let loaded = store.loadStatus()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isStatusPollInFlight = false
+                self.applyLoadedHostStatus(loaded)
             }
         }
     }
 
     public func syncHostStatusFromStore() {
         let loaded = store.loadStatus()
-        hostStatus = loaded
-        handleHostStatusUpdate(loaded)
+        applyLoadedHostStatus(loaded)
+    }
+
+    private func applyLoadedHostStatus(_ loaded: HostRuntimeStatus) {
+        let prevAlive = isHostAlive
+        lastObservedHostHeartbeatAt = max(lastObservedHostHeartbeatAt, loaded.heartbeatAt)
+        let nextAlive = computeHostAlive(status: loaded, latestHeartbeat: loaded.heartbeatAt)
+
+        // Skip redundant @Published hostStatus writes when only heartbeat timestamp ticked in standby/idle,
+        // preventing full SwiftUI keyboard invalidation while typing manually.
+        let visualUnchanged: Bool
+        if loaded.state == .recording || hostStatus.state == .recording {
+            visualUnchanged = (
+                loaded.state == hostStatus.state &&
+                loaded.activeRequestId == hostStatus.activeRequestId &&
+                loaded.partialText == hostStatus.partialText &&
+                abs(loaded.audioLevel - hostStatus.audioLevel) < 0.03 &&
+                Int(loaded.elapsedSeconds * 10) == Int(hostStatus.elapsedSeconds * 10)
+            )
+        } else {
+            visualUnchanged = (
+                loaded.state == hostStatus.state &&
+                loaded.activeRequestId == hostStatus.activeRequestId &&
+                loaded.mode == hostStatus.mode &&
+                loaded.finalResult == hostStatus.finalResult &&
+                loaded.errorMessage == hostStatus.errorMessage &&
+                loaded.isPiPActive == hostStatus.isPiPActive &&
+                loaded.isAudioKeepAliveActive == hostStatus.isAudioKeepAliveActive &&
+                prevAlive == nextAlive
+            )
+        }
+
+        if !visualUnchanged {
+            hostStatus = loaded
+            handleHostStatusUpdate(loaded)
+            updatePollingCadenceIfNeeded()
+        }
     }
 
     private func handleHostStatusUpdate(_ status: HostRuntimeStatus) {
@@ -261,7 +354,10 @@ public final class KeyboardStateModel: ObservableObject {
            reqId != lastConsumedRequestId,
            !status.finalResult.isEmpty {
             lastConsumedRequestId = reqId
-            store.markResultConsumed(requestId: reqId)
+            let store = self.store
+            statusQueue.async {
+                store.markResultConsumed(requestId: reqId)
+            }
             commitVoiceResult(status.finalResult)
         } else if status.state == .error, let msg = status.errorMessage {
             statusBannerMessage = msg
@@ -271,7 +367,12 @@ public final class KeyboardStateModel: ObservableObject {
     // MARK: - Voice Control & IPC
 
     public var isHostAlive: Bool {
-        hostStatus.isHostAlive
+        computeHostAlive(status: hostStatus, latestHeartbeat: max(hostStatus.heartbeatAt, lastObservedHostHeartbeatAt))
+    }
+
+    private func computeHostAlive(status: HostRuntimeStatus, latestHeartbeat: Date) -> Bool {
+        (status.isPiPActive || status.isAudioKeepAliveActive)
+            && abs(Date().timeIntervalSince(latestHeartbeat)) < 4.5
     }
 
     public func toggleVoiceRecording() {
@@ -293,7 +394,7 @@ public final class KeyboardStateModel: ObservableObject {
 
         // Check if host is alive via PiP or background audio keep-alive
         syncHostStatusFromStore()
-        if !hostStatus.isHostAlive {
+        if !isHostAlive {
             // Wake Host App via Deep Link so it activates microphone & PiP
             let query = [URLQueryItem(name: "mode", value: voiceMode.rawValue)]
             if let url = AppConfig.deepLinkURL(action: "record", queryItems: query) {
@@ -387,6 +488,7 @@ public final class KeyboardStateModel: ObservableObject {
         isCandidateDrawerExpanded = false
         isT9PinyinPickerExpanded = false
         isEmoticonDrawerOpen = false
+        updatePollingCadenceIfNeeded()
         refreshContextFromProxy()
     }
 
@@ -474,7 +576,7 @@ public final class KeyboardStateModel: ObservableObject {
         }
 
         proxyProvider?()?.insertText(output)
-        refreshContextFromProxy()
+        scheduleContextRefresh()
     }
 
     public func handleShiftTap() {
@@ -523,7 +625,7 @@ public final class KeyboardStateModel: ObservableObject {
             learnCurrentEnglishWordIfNeeded()
         }
         proxy.insertText(" ")
-        refreshContextFromProxy()
+        scheduleContextRefresh()
     }
 
     public func handleReturnTap() {
@@ -540,7 +642,7 @@ public final class KeyboardStateModel: ObservableObject {
             learnCurrentEnglishWordIfNeeded()
         }
         proxyProvider?()?.insertText("\n")
-        refreshContextFromProxy()
+        scheduleContextRefresh()
     }
 
     public func handleBackspaceTap() {
@@ -560,7 +662,7 @@ public final class KeyboardStateModel: ObservableObject {
         }
 
         proxyProvider?()?.deleteBackward()
-        refreshContextFromProxy()
+        scheduleContextRefresh()
     }
 
     public func startContinuousBackspace() {
@@ -638,18 +740,31 @@ public final class KeyboardStateModel: ObservableObject {
 
     public func refreshIdleCandidates() {
         guard let last = lastCommittedWord, !last.isEmpty else {
-            dynamicIdleCandidates = t9StarterCandidates
+            if dynamicIdleCandidates != t9StarterCandidates {
+                dynamicIdleCandidates = t9StarterCandidates
+            }
             return
         }
-        let assocs = lexicon.fetchUserAssociations(prevWord: last, limit: 8)
-        if !assocs.isEmpty {
-            var merged = assocs
-            for s in t9StarterCandidates where !merged.contains(s) && merged.count < 8 {
-                merged.append(s)
+        let starter = t9StarterCandidates
+        let lexiconDB = LexiconDatabase.shared
+        queryQueue.async { [weak self] in
+            let assocs = lexiconDB.fetchUserAssociations(prevWord: last, limit: 8)
+            let next: [String]
+            if !assocs.isEmpty {
+                var merged = assocs
+                for s in starter where !merged.contains(s) && merged.count < 8 {
+                    merged.append(s)
+                }
+                next = merged
+            } else {
+                next = starter
             }
-            dynamicIdleCandidates = merged
-        } else {
-            dynamicIdleCandidates = t9StarterCandidates
+            Task { @MainActor [weak self] in
+                guard let self, self.lastCommittedWord == last else { return }
+                if self.dynamicIdleCandidates != next {
+                    self.dynamicIdleCandidates = next
+                }
+            }
         }
     }
 
@@ -661,13 +776,19 @@ public final class KeyboardStateModel: ObservableObject {
         if pinyinLayoutMode == .t9 && !t9ComposingDigits.isEmpty {
             let pureDigits = t9ComposingDigits.replacingOccurrences(of: "'", with: "")
             let consumedDigits = String(pureDigits.prefix(candidate.consumedChars))
+            let prevWord = lastCommittedWord
+            let wordText = candidate.text
+            let candPinyin = candidate.displayPinyin
+            let lexiconDB = LexiconDatabase.shared
 
-            lexicon.recordT9Selection(
-                digits: consumedDigits,
-                word: candidate.text,
-                pinyin: candidate.displayPinyin,
-                previousWord: lastCommittedWord
-            )
+            queryQueue.async {
+                lexiconDB.recordT9Selection(
+                    digits: consumedDigits,
+                    word: wordText,
+                    pinyin: candPinyin,
+                    previousWord: prevWord
+                )
+            }
             lastCommittedWord = candidate.text
             maybeAutoLearnCorrection(term: candidate.text, pinyinHint: candidate.displayPinyin)
 
@@ -685,13 +806,17 @@ public final class KeyboardStateModel: ObservableObject {
                     updateT9Candidates()
                 }
             }
-            refreshContextFromProxy()
+            scheduleContextRefresh()
             return
         }
 
         let clean = composingPinyin.lowercased().filter { $0 >= "a" && $0 <= "z" }
         let usedPinyin = String(clean.prefix(candidate.consumedChars))
-        lexicon.recordChineseSelection(pinyin: usedPinyin, word: candidate.text)
+        let wordText = candidate.text
+        let lexiconDB = LexiconDatabase.shared
+        queryQueue.async {
+            lexiconDB.recordChineseSelection(pinyin: usedPinyin, word: wordText)
+        }
         lexicon.recordT9Selection(
             digits: LexiconDatabase.pinyinToT9Digits(usedPinyin),
             word: candidate.text,
@@ -950,13 +1075,14 @@ public final class KeyboardStateModel: ObservableObject {
     }
 
     public func commitT9AsRawDigits() {
-        let raw = t9ComposingDigits
-        guard !raw.isEmpty else { return }
-        proxyProvider?()?.insertText(raw)
+        let letters = displayPinyin.replacingOccurrences(of: "'", with: "")
+        let text = letters.isEmpty ? t9ComposingDigits : letters
+        guard !text.isEmpty else { return }
+        proxyProvider?()?.insertText(text)
         lastCommittedWord = nil
         clearT9Composing()
         refreshIdleCandidates()
-        refreshContextFromProxy()
+        scheduleContextRefresh()
     }
 
     public func clearT9Composing() {
@@ -982,7 +1108,7 @@ public final class KeyboardStateModel: ObservableObject {
         proxyProvider?()?.insertText(" ")
         lastCommittedWord = nil
         refreshIdleCandidates()
-        refreshContextFromProxy()
+        scheduleContextRefresh()
     }
 
     private static func resolveT9DisplayPinyin(
@@ -1101,13 +1227,13 @@ public final class KeyboardStateModel: ObservableObject {
             lastCommittedWord = nil
             clearT9Composing()
             refreshIdleCandidates()
-            refreshContextFromProxy()
+            scheduleContextRefresh()
             return
         }
         proxyProvider?()?.insertText("\n")
         lastCommittedWord = nil
         refreshIdleCandidates()
-        refreshContextFromProxy()
+        scheduleContextRefresh()
     }
 
     public func handleT9BackspaceTap() {
@@ -1133,51 +1259,73 @@ public final class KeyboardStateModel: ObservableObject {
             return
         }
         proxyProvider?()?.deleteBackward()
-        refreshContextFromProxy()
+        scheduleContextRefresh()
     }
 
     // MARK: - English Completions
 
-    public func refreshEnglishSuggestions() {
-        guard let proxy = proxyProvider?(),
-              let before = proxy.documentContextBeforeInput else {
-            englishSuggestions = []
+    public func refreshEnglishSuggestions(prefetchedBefore: String? = nil) {
+        let beforeText: String?
+        if let prefetchedBefore {
+            beforeText = prefetchedBefore
+        } else {
+            beforeText = proxyProvider?()?.documentContextBeforeInput
+        }
+        guard let before = beforeText else {
+            if !englishSuggestions.isEmpty { englishSuggestions = [] }
             return
         }
         let currentWord = extractTrailingASCIIWord(from: before)
         guard !currentWord.isEmpty else {
-            englishSuggestions = []
+            if !englishSuggestions.isEmpty { englishSuggestions = [] }
             return
         }
 
-        var merged: [String] = []
-        var seen = Set<String>()
-        func add(_ w: String) {
-            if seen.insert(w.lowercased()).inserted {
-                merged.append(w)
-            }
-        }
-
-        // 1. UILexicon shortcuts
+        var localHits: [String] = []
+        var seenLocal = Set<String>()
         for entry in lexiconEntries {
-            if entry.userInput.lowercased().hasPrefix(currentWord.lowercased()) {
-                add(entry.documentText)
+            if entry.userInput.lowercased().hasPrefix(currentWord.lowercased()),
+               seenLocal.insert(entry.documentText.lowercased()).inserted {
+                localHits.append(entry.documentText)
             }
         }
 
-        // 2. Bundled frequency lexicon + Personal Dictionary
-        for w in lexicon.queryEnglishCompletions(prefix: currentWord, personalWords: personalWords, limit: 6) {
-            add(w)
-        }
+        let wordsSnapshot = personalWords
+        let token = englishQueryToken.increment()
+        let counter = englishQueryToken
+        let lexiconDB = LexiconDatabase.shared
 
-        // 3. System UITextChecker completions
-        let nsRange = NSRange(location: 0, length: currentWord.utf16.count)
-        let checkerHits = textChecker.completions(forPartialWordRange: nsRange, in: currentWord, language: "en_US") ?? []
-        for w in checkerHits.prefix(4) {
-            add(w)
-        }
+        queryQueue.async { [weak self] in
+            let dbHits = lexiconDB.queryEnglishCompletions(prefix: currentWord, personalWords: wordsSnapshot, limit: 6)
+            guard counter.value == token else { return }
 
-        englishSuggestions = Array(merged.prefix(5))
+            Task { @MainActor [weak self] in
+                guard let self, counter.value == token, self.manualLanguage == .english else { return }
+                var merged: [String] = []
+                var seen = Set<String>()
+                func add(_ w: String) {
+                    if seen.insert(w.lowercased()).inserted {
+                        merged.append(w)
+                    }
+                }
+                for w in localHits { add(w) }
+                for w in dbHits { add(w) }
+
+                // Only invoke UIKit UITextChecker on main thread when lexicon hits are sparse.
+                if merged.count < 3 && currentWord.count >= 2 {
+                    let nsRange = NSRange(location: 0, length: currentWord.utf16.count)
+                    let checkerHits = self.textChecker.completions(forPartialWordRange: nsRange, in: currentWord, language: "en_US") ?? []
+                    for w in checkerHits.prefix(4) {
+                        add(w)
+                    }
+                }
+
+                let limited = Array(merged.prefix(5))
+                if self.englishSuggestions != limited {
+                    self.englishSuggestions = limited
+                }
+            }
+        }
     }
 
     public func applyEnglishSuggestion(_ word: String) {
@@ -1191,17 +1339,23 @@ public final class KeyboardStateModel: ObservableObject {
             ? word.prefix(1).uppercased() + word.dropFirst()
             : word
         proxy.insertText(finalWord + " ")
-        lexicon.recordEnglishSelection(word: finalWord)
+        let lexiconDB = LexiconDatabase.shared
+        queryQueue.async {
+            lexiconDB.recordEnglishSelection(word: finalWord)
+        }
         maybeAutoLearnCorrection(term: finalWord, pinyinHint: "")
         shiftState = .off
-        refreshContextFromProxy()
+        scheduleContextRefresh()
     }
 
     private func learnCurrentEnglishWordIfNeeded() {
         guard let before = proxyProvider?()?.documentContextBeforeInput else { return }
         let word = extractTrailingASCIIWord(from: before)
         if word.count >= 2 {
-            lexicon.recordEnglishSelection(word: word)
+            let lexiconDB = LexiconDatabase.shared
+            queryQueue.async {
+                lexiconDB.recordEnglishSelection(word: word)
+            }
             maybeAutoLearnCorrection(term: word, pinyinHint: "")
         }
     }
@@ -1213,27 +1367,37 @@ public final class KeyboardStateModel: ObservableObject {
               !lastDictatedText.contains(term) else {
             return
         }
-        // Only auto-learn meaningful terms (Chinese >=2 chars or English >=3 chars)
-        if let learned = store.addOrLearnWord(term: term, pinyinHint: pinyinHint, category: .phrase, autoLearned: true) {
-            personalWords = store.loadDictionary()
-            _ = learned
+        let store = self.store
+        statusQueue.async { [weak self] in
+            // Persist learned terms in background to avoid main-thread file/Keychain writes during typing.
+            if store.addOrLearnWord(term: term, pinyinHint: pinyinHint, category: .phrase, autoLearned: true) != nil {
+                let updated = store.loadDictionary()
+                Task { @MainActor [weak self] in
+                    self?.personalWords = updated
+                }
+            }
         }
     }
 
     // MARK: - Helpers
 
     private func updateAutoShiftIfNeeded() {
+        updateAutoShiftIfNeeded(before: proxyProvider?()?.documentContextBeforeInput)
+    }
+
+    private func updateAutoShiftIfNeeded(before fetchedBefore: String?) {
         guard manualLanguage == .english, layoutPage == .letters, shiftState != .capsLock else { return }
-        guard let before = proxyProvider?()?.documentContextBeforeInput else {
-            shiftState = .shifted
+        guard let before = fetchedBefore else {
+            if shiftState != .shifted { shiftState = .shifted }
             return
         }
         let trimmed = before.trimmingCharacters(in: .whitespaces)
-        if before.isEmpty || before.hasSuffix("\n") ||
-            (before.hasSuffix(" ") && (trimmed.hasSuffix(".") || trimmed.hasSuffix("!") || trimmed.hasSuffix("?"))) {
-            shiftState = .shifted
-        } else {
-            shiftState = .off
+        let target: ShiftState = (before.isEmpty || before.hasSuffix("\n") ||
+            (before.hasSuffix(" ") && (trimmed.hasSuffix(".") || trimmed.hasSuffix("!") || trimmed.hasSuffix("?"))))
+            ? .shifted
+            : .off
+        if shiftState != target {
+            shiftState = target
         }
     }
 

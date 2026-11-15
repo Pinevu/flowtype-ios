@@ -145,6 +145,7 @@ struct SettingsView: View {
             Picker("识别语言提示", selection: $draft.asrLanguage) {
                 Text("自动检测 (Auto)").tag("auto")
                 Text("中文 (zh)").tag("zh")
+                Text("粤语 (yue)").tag("yue")
                 Text("English (en)").tag("en")
                 Text("日本語 (ja)").tag("ja")
                 Text("한국어 (ko)").tag("ko")

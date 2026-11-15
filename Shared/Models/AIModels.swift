@@ -1,6 +1,6 @@
 import Foundation
 
-public enum ASRProviderKind: String, Codable, CaseIterable, Identifiable {
+public enum ASRProviderKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case openAIWhisperCompatible = "openai_whisper"
     case appleOnDeviceSpeech = "apple_speech"
     case geminiAudioDirect = "gemini_audio"
@@ -16,7 +16,7 @@ public enum ASRProviderKind: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-public enum LLMProviderKind: String, Codable, CaseIterable, Identifiable {
+public enum LLMProviderKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case openAICompatible = "openai_chat"
     case geminiNative = "gemini_native"
     case anthropicClaude = "anthropic_claude"
@@ -34,7 +34,7 @@ public enum LLMProviderKind: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-public enum VoiceActionMode: String, Codable, CaseIterable, Identifiable {
+public enum VoiceActionMode: String, Codable, CaseIterable, Identifiable, Sendable {
     case dictate
     case edit
     case translate
@@ -61,7 +61,7 @@ public enum VoiceActionMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-public enum KeyboardDefaultTab: String, Codable, CaseIterable, Identifiable {
+public enum KeyboardDefaultTab: String, Codable, CaseIterable, Identifiable, Sendable {
     case voice
     case pinyin
     case english
@@ -77,7 +77,7 @@ public enum KeyboardDefaultTab: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-public enum PinyinLayoutMode: String, Codable, CaseIterable, Identifiable {
+public enum PinyinLayoutMode: String, Codable, CaseIterable, Identifiable, Sendable {
     case t9 = "t9"         // 九宫格
     case qwerty = "qwerty" // 26键全拼
 
@@ -91,7 +91,7 @@ public enum PinyinLayoutMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-public enum KeyboardBackgroundStyle: String, Codable, CaseIterable, Identifiable {
+public enum KeyboardBackgroundStyle: String, Codable, CaseIterable, Identifiable, Sendable {
     case system = "system"             // 跟随系统自适应
     case pureDark = "pure_dark"         // 极夜黑
     case cleanLight = "clean_light"     // 纯净白
@@ -119,7 +119,7 @@ public enum KeyboardBackgroundStyle: String, Codable, CaseIterable, Identifiable
     }
 }
 
-public enum AppearancePreference: String, Codable, CaseIterable, Identifiable {
+public enum AppearancePreference: String, Codable, CaseIterable, Identifiable, Sendable {
     case system
     case light
     case dark
@@ -135,7 +135,7 @@ public enum AppearancePreference: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-public struct AIConfiguration: Codable, Equatable {
+public struct AIConfiguration: Codable, Equatable, Sendable {
     // MARK: - ASR Settings
     public var asrProvider: ASRProviderKind
     public var asrBaseURL: String
@@ -390,7 +390,7 @@ public struct AIConfiguration: Codable, Equatable {
     }
 }
 
-public struct ASRPreset: Identifiable {
+public struct ASRPreset: Identifiable, Sendable {
     public let id: String
     public let name: String
     public let provider: ASRProviderKind
@@ -406,7 +406,7 @@ public struct ASRPreset: Identifiable {
     ]
 }
 
-public struct LLMPreset: Identifiable {
+public struct LLMPreset: Identifiable, Sendable {
     public let id: String
     public let name: String
     public let provider: LLMProviderKind

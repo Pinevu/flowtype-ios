@@ -55,8 +55,8 @@ public final class KeyboardViewController: UIInputViewController {
         super.viewWillAppear(animated)
         stateModel.hasFullAccess = self.hasFullAccess
         stateModel.needsInputModeSwitchKey = self.needsInputModeSwitchKey
-        stateModel.reloadSharedSettings()
-        stateModel.syncHostStatusFromStore()
+        stateModel.reloadSharedSettingsAsync()
+        stateModel.syncHostStatusAsync()
         stateModel.refreshContextFromProxy()
         updateHeightIfNeeded()
     }
@@ -68,12 +68,12 @@ public final class KeyboardViewController: UIInputViewController {
 
     public override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
-        stateModel.refreshContextFromProxy()
+        stateModel.scheduleContextRefresh()
     }
 
     public override func selectionDidChange(_ textInput: UITextInput?) {
         super.selectionDidChange(textInput)
-        stateModel.refreshContextFromProxy()
+        stateModel.scheduleContextRefresh()
     }
 
     private func updateHeightIfNeeded() {

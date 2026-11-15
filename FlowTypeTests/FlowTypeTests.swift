@@ -199,6 +199,29 @@ final class FlowTypeTests: XCTestCase {
         let (_, cands96) = db.queryT9Candidates(digits: "96")
         XCTAssertEqual(cands96.first?.text, "我")
         XCTAssertEqual(cands96.first?.displayPinyin, "wo")
+        XCTAssertTrue(cands96.allSatisfy { $0.displayPinyin.rangeOfCharacter(from: .decimalDigits) == nil })
+
+        // Verify Sendable & compact JSON round-trip across Task.detached
+        let status = HostRuntimeStatus(state: .standbyPiP, mode: .dictate, isPiPActive: true, heartbeatAt: Date())
+        let cfg = AIConfiguration(asrLanguage: "yue", backgroundOpacity: 0.85)
+        let exp = expectation(description: "sendable-detached")
+        Task.detached {
+            let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("flowtype-test-\(UUID().uuidString)", isDirectory: true)
+            let store = SharedStore(containerURL: tmpDir)
+            store.saveConfig(cfg)
+            store.saveStatus(status)
+            let loadedCfg = store.loadConfig()
+            let loadedStatus = store.loadStatus()
+            try? FileManager.default.removeItem(at: tmpDir)
+            DispatchQueue.main.async {
+                XCTAssertEqual(loadedCfg.asrLanguage, "yue")
+                XCTAssertEqual(loadedCfg.backgroundOpacity, 0.85, accuracy: 0.001)
+                XCTAssertEqual(loadedStatus.state, .standbyPiP)
+                XCTAssertTrue(loadedStatus.isPiPActive)
+                exp.fulfill()
+            }
+        }
+        wait(for: [exp], timeout: 3.0)
         let (_, cands96636) = db.queryT9Candidates(digits: "96636")
         XCTAssertEqual(cands96636.first?.text, "我们")
 
