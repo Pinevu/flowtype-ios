@@ -548,25 +548,6 @@ public final class HostVoiceCoordinator: ObservableObject {
             status.errorMessage = error.localizedDescription
             publishStatus()
         }
-
-        let storeRef = self.store
-        Task.detached(priority: .utility) {
-            LexiconDatabase.shared.syncOnlineLexiconIfNeeded(store: storeRef)
-        }
-        if loadedConfig.onlineLexiconAutoSync,
-           !loadedConfig.onlineLexiconURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let needsAutoRefresh: Bool
-            if let lastSync = loadedConfig.onlineLexiconLastSyncAt {
-                needsAutoRefresh = Date().timeIntervalSince(lastSync) > 900
-            } else {
-                needsAutoRefresh = true
-            }
-            if needsAutoRefresh {
-                Task { [weak self] in
-                    await self?.syncOnlineLexicon()
-                }
-            }
-        }
     }
 
     private func publishStatus() {

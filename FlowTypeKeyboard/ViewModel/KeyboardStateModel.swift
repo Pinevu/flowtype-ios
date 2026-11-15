@@ -933,6 +933,7 @@ public final class KeyboardStateModel: ObservableObject {
         let lexiconDB = lexicon
         let storeRef = self.store
         let weightSnapshot = boostWeight
+        let isPureChineseWord = Self.isPureChineseCharacters(word)
         queryQueue.async { [weak self] in
             lexiconDB.recordT9Selection(
                 digits: cleanDigits,
@@ -943,7 +944,7 @@ public final class KeyboardStateModel: ObservableObject {
             )
             // Promote repeated multi-char picks or user corrections across sessions into SharedStore PersonalWord
             let isCorrection = weightSnapshot >= 3 && word.count >= 2
-            let persistedFreq = word.count >= 2 && Self.isPureChineseCharacters(word)
+            let persistedFreq = word.count >= 2 && isPureChineseWord
                 ? lexiconDB.fetchUserPhraseFrequency(pinyin: cleanPy, word: word)
                 : 0
             if (isCorrection || persistedFreq >= 3) && word.count >= 2 && word.count <= 8 {
@@ -957,7 +958,7 @@ public final class KeyboardStateModel: ObservableObject {
         lastCommittedSelection = token
 
         // Sequential compound phrase auto-learning: combines consecutive Chinese picks into higher-ranked user phrases
-        if Self.isPureChineseCharacters(word), word.count <= 4 {
+        if isPureChineseWord, word.count <= 4 {
             if let lastToken = pendingPhraseTokens.last, now.timeIntervalSince(lastToken.timestamp) > 8.0 {
                 pendingPhraseTokens.removeAll()
             }
@@ -1017,7 +1018,7 @@ public final class KeyboardStateModel: ObservableObject {
         }
     }
 
-    private static func isPureChineseCharacters(_ text: String) -> Bool {
+    nonisolated private static func isPureChineseCharacters(_ text: String) -> Bool {
         !text.isEmpty && text.unicodeScalars.allSatisfy { scalar in
             (scalar.value >= 0x4E00 && scalar.value <= 0x9FFF) ||
             (scalar.value >= 0x3400 && scalar.value <= 0x4DBF)
