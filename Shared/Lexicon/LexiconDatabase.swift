@@ -151,6 +151,7 @@ public final class LexiconDatabase: @unchecked Sendable {
         CREATE INDEX IF NOT EXISTS idx_online_pinyin ON online_words(pinyin, weight DESC);
         CREATE INDEX IF NOT EXISTS idx_online_init ON online_words(initials, weight DESC);
         CREATE INDEX IF NOT EXISTS idx_online_word ON online_words(word);
+        CREATE INDEX IF NOT EXISTS idx_online_word_nocase ON online_words(word COLLATE NOCASE, weight DESC);
 
         CREATE TABLE IF NOT EXISTS user_meta (
             key TEXT PRIMARY KEY,
@@ -319,7 +320,7 @@ public final class LexiconDatabase: @unchecked Sendable {
         let now = Int64(Date().timeIntervalSince1970)
         let weight = Int64(max(1, min(10, boostWeight)))
         let derivedDigits = !cleanPy.isEmpty ? Self.pinyinToT9Digits(cleanPy) : cleanDigits
-        let effectiveDigits = derivedDigits.count >= cleanDigits.count ? derivedDigits : cleanDigits
+        let effectiveDigits = (cleanDigits.isEmpty || derivedDigits.hasPrefix(cleanDigits)) ? derivedDigits : cleanDigits
         let (initials, t9Initials) = word.count >= 2
             ? Self.deriveInitials(fromCleanPinyin: cleanPy)
             : (String(cleanPy.prefix(1)), String(effectiveDigits.prefix(1)))
@@ -1841,7 +1842,7 @@ public final class LexiconDatabase: @unchecked Sendable {
 
             // 2. Online & User learned English words
             if let udb = userDB {
-                let onlineEnSQL = "SELECT word FROM online_words WHERE word >= ? AND word < ? COLLATE NOCASE ORDER BY weight DESC LIMIT ?;"
+                let onlineEnSQL = "SELECT word FROM online_words WHERE word COLLATE NOCASE >= ? AND word COLLATE NOCASE < ? ORDER BY weight DESC LIMIT ?;"
                 var oStmt: OpaquePointer?
                 if sqlite3_prepare_v2(udb, onlineEnSQL, -1, &oStmt, nil) == SQLITE_OK {
                     defer { sqlite3_finalize(oStmt) }
