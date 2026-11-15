@@ -363,7 +363,7 @@ final class NativeKeyTouchView: UIView {
         secondaryHintLabel.textAlignment = .right
         addSubview(secondaryHintLabel)
 
-        iconImageView.contentMode = .scaleAspectFit
+        iconImageView.contentMode = .center
         addSubview(iconImageView)
     }
 
@@ -450,7 +450,7 @@ final class NativeKeyTouchView: UIView {
         }
 
         if let sysName = p.systemImage, !sysName.isEmpty {
-            let symCfg = UIImage.SymbolConfiguration(pointSize: p.fontSize, weight: p.fontWeight)
+            let symCfg = UIImage.SymbolConfiguration(font: .systemFont(ofSize: p.fontSize, weight: p.fontWeight))
             iconImageView.image = UIImage(systemName: sysName, withConfiguration: symCfg)
             iconImageView.tintColor = p.tintColor
         } else {
