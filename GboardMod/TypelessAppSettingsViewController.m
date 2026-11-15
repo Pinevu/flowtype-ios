@@ -5,6 +5,10 @@
 #import <AVKit/AVKit.h>
 #import <Speech/Speech.h>
 
+static NSArray<NSString *> *AsrLanguageCodes(void) {
+    return @[@"zh-CN", @"auto", @"en-US", @"zh-HK", @"ja-JP"];
+}
+
 @interface TypelessAppSettingsViewController () <UITextFieldDelegate, UITextViewDelegate>
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIStackView *contentStack;
@@ -20,7 +24,9 @@
 
 // Separated ASR (Voice) card
 @property (nonatomic, strong) UISegmentedControl *asrEngineSegment;
+@property (nonatomic, strong) UISegmentedControl *asrLanguageSegment;
 @property (nonatomic, strong) UIStackView *asrCloudContainer;
+@property (nonatomic, strong) UITextView *personalWordsTextView;
 @property (nonatomic, strong) UITextField *asrUrlField;
 @property (nonatomic, strong) UITextField *asrKeyField;
 @property (nonatomic, strong) UITextField *asrModelField;
@@ -528,6 +534,15 @@
     [self.asrEngineSegment addTarget:self action:@selector(asrEngineChanged:) forControlEvents:UIControlEventValueChanged];
     [card addArrangedSubview:self.asrEngineSegment];
 
+    UILabel *langLbl = [[UILabel alloc] init];
+    langLbl.text = @"语音识别语言 (支持本地与云端)";
+    langLbl.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
+    if (@available(iOS 13.0, *)) langLbl.textColor = [UIColor secondaryLabelColor];
+    [card addArrangedSubview:langLbl];
+
+    self.asrLanguageSegment = [[UISegmentedControl alloc] initWithItems:@[@"中文", @"自动", @"英文", @"粤语", @"日语"]];
+    [card addArrangedSubview:self.asrLanguageSegment];
+
     self.asrCloudContainer = [[UIStackView alloc] init];
     self.asrCloudContainer.axis = UILayoutConstraintAxisVertical;
     self.asrCloudContainer.spacing = 10.0;
@@ -622,6 +637,29 @@
     }
     [self.promptTextView.heightAnchor constraintEqualToConstant:112.0].active = YES;
     [card addArrangedSubview:self.promptTextView];
+
+    [self addSectionHeader:@"个人词典 / 热词纠偏" subtitle:@"人名、品牌、专业术语（逗号或换行分隔）"];
+    UIStackView *dictCard = [self makeCardStack];
+
+    self.personalWordsTextView = [[UITextView alloc] init];
+    self.personalWordsTextView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.personalWordsTextView.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightRegular];
+    self.personalWordsTextView.layer.cornerRadius = 10.0;
+    self.personalWordsTextView.textContainerInset = UIEdgeInsetsMake(10, 10, 10, 10);
+    if (@available(iOS 13.0, *)) {
+        self.personalWordsTextView.backgroundColor = [UIColor tertiarySystemFillColor];
+    } else {
+        self.personalWordsTextView.backgroundColor = [UIColor colorWithWhite:0.95 alpha:1.0];
+    }
+    [self.personalWordsTextView.heightAnchor constraintEqualToConstant:80.0].active = YES;
+    [dictCard addArrangedSubview:self.personalWordsTextView];
+
+    UILabel *dictHint = [[UILabel alloc] init];
+    dictHint.text = @"示例：Lintype, FlowType, 李星河, Soundcore（会自动注入 Whisper 热词与 AI 润色提示词）";
+    dictHint.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    dictHint.numberOfLines = 0;
+    if (@available(iOS 13.0, *)) dictHint.textColor = [UIColor secondaryLabelColor];
+    [dictCard addArrangedSubview:dictHint];
 }
 
 - (void)buildFooterActions {
@@ -653,6 +691,9 @@
     self.pipSwitch.on = cfg.pipKeepAliveEnabled;
 
     self.asrEngineSegment.selectedSegmentIndex = cfg.useAppleASR ? 0 : 1;
+    NSArray<NSString *> *langCodes = AsrLanguageCodes();
+    NSInteger langIdx = [langCodes indexOfObject:cfg.asrLanguage ?: @"zh-CN"];
+    self.asrLanguageSegment.selectedSegmentIndex = (langIdx == NSNotFound) ? 0 : langIdx;
     self.asrUrlField.text = cfg.asrBaseURL;
     self.asrKeyField.text = cfg.asrApiKey;
     self.asrModelField.text = cfg.asrModel;
@@ -662,6 +703,7 @@
     self.llmKeyField.text = cfg.llmApiKey;
     self.llmModelField.text = cfg.llmModel;
     self.smartCleanupSwitch.on = cfg.smartDictationCleanup;
+    self.personalWordsTextView.text = cfg.personalWords ?: @"";
 
     self.draftPrompts = [NSMutableArray arrayWithObjects:
                          [cfg promptForMode:TypelessVoiceModeDictate],
@@ -684,6 +726,9 @@
         : TypelessLaunchInterfaceKeyboard;
     cfg.pipKeepAliveEnabled = self.pipSwitch.on;
     cfg.useAppleASR = (self.asrEngineSegment.selectedSegmentIndex == 0);
+    NSArray<NSString *> *langCodes = AsrLanguageCodes();
+    NSInteger selLangIdx = self.asrLanguageSegment.selectedSegmentIndex;
+    cfg.asrLanguage = (selLangIdx >= 0 && selLangIdx < (NSInteger)langCodes.count) ? langCodes[selLangIdx] : @"zh-CN";
     cfg.asrBaseURL = self.asrUrlField.text ?: @"";
     cfg.asrApiKey = self.asrKeyField.text ?: @"";
     cfg.asrModel = self.asrModelField.text ?: @"";
@@ -691,6 +736,7 @@
     cfg.llmBaseURL = self.llmUrlField.text ?: @"";
     cfg.llmApiKey = self.llmKeyField.text ?: @"";
     cfg.llmModel = self.llmModelField.text ?: @"";
+    cfg.personalWords = self.personalWordsTextView.text ?: @"";
     cfg.smartDictationCleanup = self.smartCleanupSwitch.on;
 
     cfg.customPromptDictate = self.draftPrompts[0];
@@ -959,12 +1005,20 @@
 - (void)testAsrTapped {
     [self dismissKeyboard];
     if (self.asrEngineSegment.selectedSegmentIndex == 0) {
+        NSArray<NSString *> *langCodes = AsrLanguageCodes();
+        NSInteger selLangIdx = self.asrLanguageSegment.selectedSegmentIndex;
+        NSString *code = (selLangIdx >= 0 && selLangIdx < (NSInteger)langCodes.count) ? langCodes[selLangIdx] : @"zh-CN";
+        NSLocale *loc = [code isEqualToString:@"auto"]
+            ? [NSLocale localeWithLocaleIdentifier:([NSLocale preferredLanguages].firstObject ?: @"zh-CN")]
+            : [NSLocale localeWithLocaleIdentifier:code];
         Class sfCls = NSClassFromString(@"SFSpeechRecognizer");
-        SFSpeechRecognizer *rec = sfCls ? [[sfCls alloc] initWithLocale:[NSLocale localeWithLocaleIdentifier:@"zh_CN"]] : nil;
+        SFSpeechRecognizer *rec = sfCls ? [[sfCls alloc] initWithLocale:loc] : nil;
         self.asrTestResultLabel.hidden = NO;
         BOOL ok = (rec && rec.isAvailable);
         self.asrTestResultLabel.textColor = ok ? [UIColor colorWithRed:0.06 green:0.55 blue:0.40 alpha:1.0] : [UIColor systemRedColor];
-        self.asrTestResultLabel.text = ok ? @"Apple 本地语音识别器就绪可用！" : @"Apple 本地识别器当前不可用，可先点击“授权麦克风/识别”或切换 Whisper 云端。";
+        self.asrTestResultLabel.text = ok
+            ? [NSString stringWithFormat:@"Apple 本地语音识别器 (%@) 就绪可用！", loc.localeIdentifier]
+            : @"Apple 本地识别器当前不可用，可先点击“授权麦克风/识别”或切换 Whisper 云端。";
         return;
     }
 

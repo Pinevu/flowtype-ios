@@ -549,6 +549,10 @@ static const void *kKeyPosIdAssocKey = &kKeyPosIdAssocKey;
 static const void *kKeyActionAssocKey = &kKeyActionAssocKey;
 static const void *kKeyBasePadAssocKey = &kKeyBasePadAssocKey;
 static const void *kKeySpaceExtraPadAssocKey = &kKeySpaceExtraPadAssocKey;
+static const void *kKeyLastShadowSizeAssocKey = &kKeyLastShadowSizeAssocKey;
+static const void *kKeyThemeSigAssocKey = &kKeyThemeSigAssocKey;
+static const void *kKeyHighlightStateAssocKey = &kKeyHighlightStateAssocKey;
+static const void *kBadgeStateSigAssocKey = &kBadgeStateSigAssocKey;
 
 static NSInteger const kCustomKeyContentTag = 99510;
 static NSInteger const kInlineLangBtnTag = 99511;
@@ -606,9 +610,14 @@ static void ApplyForegroundColorRecursively(UIView *view, UIColor *fg, NSInteger
         ((void(*)(id, SEL, id))objc_msgSend)(view, @selector(setForegroundColor:), fg);
     }
     if ([view isKindOfClass:[UILabel class]]) {
-        ((UILabel *)view).textColor = fg;
+        UILabel *lbl = (UILabel *)view;
+        if (![lbl.textColor isEqual:fg]) {
+            lbl.textColor = fg;
+        }
     } else if ([view isKindOfClass:[UIImageView class]]) {
-        view.tintColor = fg;
+        if (![view.tintColor isEqual:fg]) {
+            view.tintColor = fg;
+        }
     }
     for (UIView *sub in view.subviews) {
         ApplyForegroundColorRecursively(sub, fg, depth + 1);
@@ -784,8 +793,25 @@ static void ExecuteCustomKeyAction(LintypeKeyAction action) {
 
 static void RenderCustomKeyBadgeInContainer(UIView *container, LintypeKeyAction action, BOOL dark, BOOL highlighted) {
     if (!container || CGRectGetWidth(container.bounds) < 12 || CGRectGetHeight(container.bounds) < 12) return;
+    CGFloat w = CGRectGetWidth(container.bounds);
+    CGFloat h = CGRectGetHeight(container.bounds);
+    NSString *badgeSig = [NSString stringWithFormat:@"%ld|%d|%.0f|%.0f", (long)action, (int)dark, w, h];
+
     UIView *badge = [container viewWithTag:kCustomKeyContentTag];
-    if (!badge) {
+    if (badge) {
+        NSString *prevSig = objc_getAssociatedObject(badge, kBadgeStateSigAssocKey);
+        if ([prevSig isEqualToString:badgeSig] && badge.subviews.count > 0) {
+            badge.hidden = NO;
+            if (!CGRectEqualToRect(badge.frame, container.bounds)) {
+                badge.frame = container.bounds;
+            }
+            (void)highlighted;
+            return;
+        }
+        for (UIView *sub in [badge.subviews copy]) {
+            [sub removeFromSuperview];
+        }
+    } else {
         badge = [[UIView alloc] initWithFrame:container.bounds];
         badge.tag = kCustomKeyContentTag;
         badge.userInteractionEnabled = NO;
@@ -794,14 +820,9 @@ static void RenderCustomKeyBadgeInContainer(UIView *container, LintypeKeyAction 
     }
     badge.frame = container.bounds;
     badge.hidden = NO;
-
-    for (UIView *sub in [badge.subviews copy]) {
-        [sub removeFromSuperview];
-    }
+    objc_setAssociatedObject(badge, kBadgeStateSigAssocKey, badgeSig, OBJC_ASSOCIATION_COPY_NONATOMIC);
 
     UIColor *fg = IOSKeyFgColor(LintypeKeyRoleFunction, dark);
-    CGFloat w = CGRectGetWidth(badge.bounds);
-    CGFloat h = CGRectGetHeight(badge.bounds);
 
     if (action == LintypeKeyActionVoice) {
         if (@available(iOS 13.0, *)) {
@@ -882,10 +903,14 @@ static void StyleIOSFloatingKeyView(UIView *keyView) {
     }
 
     if ([keyView respondsToSelector:@selector(setPaddingLeft:)]) {
-        ((void(*)(id, SEL, double))objc_msgSend)(keyView, @selector(setPaddingLeft:), targetPad.left);
-        ((void(*)(id, SEL, double))objc_msgSend)(keyView, @selector(setPaddingTop:), targetPad.top);
-        ((void(*)(id, SEL, double))objc_msgSend)(keyView, @selector(setPaddingRight:), targetPad.right);
-        ((void(*)(id, SEL, double))objc_msgSend)(keyView, @selector(setPaddingBottom:), targetPad.bottom);
+        double curL = [keyView respondsToSelector:@selector(paddingLeft)] ? ((double(*)(id, SEL))objc_msgSend)(keyView, @selector(paddingLeft)) : -1.0;
+        double curT = [keyView respondsToSelector:@selector(paddingTop)] ? ((double(*)(id, SEL))objc_msgSend)(keyView, @selector(paddingTop)) : -1.0;
+        double curR = [keyView respondsToSelector:@selector(paddingRight)] ? ((double(*)(id, SEL))objc_msgSend)(keyView, @selector(paddingRight)) : -1.0;
+        double curB = [keyView respondsToSelector:@selector(paddingBottom)] ? ((double(*)(id, SEL))objc_msgSend)(keyView, @selector(paddingBottom)) : -1.0;
+        if (fabs(curL - targetPad.left) > 0.05) ((void(*)(id, SEL, double))objc_msgSend)(keyView, @selector(setPaddingLeft:), targetPad.left);
+        if (fabs(curT - targetPad.top) > 0.05) ((void(*)(id, SEL, double))objc_msgSend)(keyView, @selector(setPaddingTop:), targetPad.top);
+        if (fabs(curR - targetPad.right) > 0.05) ((void(*)(id, SEL, double))objc_msgSend)(keyView, @selector(setPaddingRight:), targetPad.right);
+        if (fabs(curB - targetPad.bottom) > 0.05) ((void(*)(id, SEL, double))objc_msgSend)(keyView, @selector(setPaddingBottom:), targetPad.bottom);
     }
 
     if (![keyView respondsToSelector:@selector(hostView)]) return;
@@ -899,13 +924,39 @@ static void StyleIOSFloatingKeyView(UIView *keyView) {
         ? ((BOOL(*)(id, SEL))objc_msgSend)(keyView, @selector(isHighlighted))
         : NO;
 
+    NSString *childText = [firstChild isKindOfClass:[UILabel class]] ? (((UILabel *)firstChild).text ?: @"") : @"";
+    CGSize childSize = firstChild.bounds.size;
+    NSString *themeSig = [NSString stringWithFormat:@"%@|%ld|%ld|%d|%.0f|%.0f|%@",
+                          keyId ?: @"", (long)action, (long)role, (int)dark,
+                          childSize.width, childSize.height, childText];
+    NSString *prevThemeSig = objc_getAssociatedObject(keyView, kKeyThemeSigAssocKey);
+    NSNumber *prevHlNum = objc_getAssociatedObject(keyView, kKeyHighlightStateAssocKey);
+    BOOL themeUnchanged = [prevThemeSig isEqualToString:themeSig];
+    if (themeUnchanged && prevHlNum != nil && [prevHlNum boolValue] == highlighted) {
+        // Fast path: key geometry, theme, text, and highlight are identical.
+        if (action == LintypeKeyActionNone || [firstChild viewWithTag:kCustomKeyContentTag] != nil) {
+            return;
+        }
+    }
+
     UIColor *bg = IOSKeyBgColor(role, dark, highlighted);
+    if (themeUnchanged) {
+        // Highlight-only toggle: swap fill color without touching shadows or subviews.
+        firstChild.backgroundColor = bg;
+        if ([firstChild respondsToSelector:@selector(backgroundLayer)]) {
+            CALayer *bgLayer = ((id(*)(id, SEL))objc_msgSend)(firstChild, @selector(backgroundLayer));
+            if (bgLayer) bgLayer.backgroundColor = bg.CGColor;
+        }
+        objc_setAssociatedObject(keyView, kKeyHighlightStateAssocKey, @(highlighted), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+
     UIColor *normalBg = IOSKeyBgColor(role, dark, NO);
     UIColor *hlBg = IOSKeyBgColor(role, dark, YES);
     UIColor *fg = IOSKeyFgColor(role, dark);
 
     firstChild.backgroundColor = bg;
-    firstChild.clipsToBounds = NO;
+    if (firstChild.clipsToBounds) firstChild.clipsToBounds = NO;
     firstChild.layer.cornerRadius = 5.5;
     firstChild.layer.borderWidth = 0.0;
     firstChild.layer.shadowColor = [UIColor blackColor].CGColor;
@@ -913,7 +964,12 @@ static void StyleIOSFloatingKeyView(UIView *keyView) {
     firstChild.layer.shadowOffset = CGSizeMake(0.0, 1.0);
     firstChild.layer.shadowRadius = 0.0;
     if (!CGRectIsEmpty(firstChild.bounds)) {
-        firstChild.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:firstChild.bounds cornerRadius:5.5].CGPath;
+        NSValue *prevShadowVal = objc_getAssociatedObject(firstChild, kKeyLastShadowSizeAssocKey);
+        CGSize prevShadowSize = prevShadowVal ? [prevShadowVal CGSizeValue] : CGSizeZero;
+        if (!CGSizeEqualToSize(prevShadowSize, firstChild.bounds.size) || firstChild.layer.shadowPath == NULL) {
+            firstChild.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:firstChild.bounds cornerRadius:5.5].CGPath;
+            objc_setAssociatedObject(firstChild, kKeyLastShadowSizeAssocKey, [NSValue valueWithCGSize:firstChild.bounds.size], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
     }
 
     if ([firstChild respondsToSelector:@selector(backgroundLayer)]) {
@@ -945,7 +1001,7 @@ static void StyleIOSFloatingKeyView(UIView *keyView) {
         RenderCustomKeyBadgeInContainer(firstChild, action, dark, highlighted);
     } else {
         UIView *oldBadge = [firstChild viewWithTag:kCustomKeyContentTag];
-        if (oldBadge) oldBadge.hidden = YES;
+        if (oldBadge && !oldBadge.hidden) oldBadge.hidden = YES;
         RestoreOriginalKeyContentsRecursively(hostView, 0);
         ApplyForegroundColorRecursively(hostView, fg, 0);
 
@@ -960,19 +1016,20 @@ static void StyleIOSFloatingKeyView(UIView *keyView) {
                     [keyId hasPrefix:@"key_pos_9keys_3_"]) {
                     if ([keyId isEqualToString:@"key_pos_9keys_1_1"]) {
                         if ([low containsString:@"词"] || [txt isEqualToString:@"'"]) {
-                            lbl.text = @"分词";
+                            if (![lbl.text isEqualToString:@"分词"]) lbl.text = @"分词";
                             lbl.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightRegular];
                         }
                     } else if ([low isEqualToString:@"abc"] || [low isEqualToString:@"def"] ||
                                [low isEqualToString:@"ghi"] || [low isEqualToString:@"jkl"] ||
                                [low isEqualToString:@"mno"] || [low isEqualToString:@"pqrs"] ||
                                [low isEqualToString:@"tuv"] || [low isEqualToString:@"wxyz"]) {
-                        lbl.text = [txt uppercaseString];
+                        NSString *up = [txt uppercaseString];
+                        if (![lbl.text isEqualToString:up]) lbl.text = up;
                         lbl.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightRegular];
                     }
                 } else if ([keyId isEqualToString:@"key_pos_9keys_4_2"]) {
                     if ([low containsString:@"gboard"] || [low containsString:@"space"] || [txt containsString:@"空格"]) {
-                        lbl.text = @"空格";
+                        if (![lbl.text isEqualToString:@"空格"]) lbl.text = @"空格";
                         lbl.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightRegular];
                     }
                 } else if ([keyId isEqualToString:@"key_pos_9keys_left_1"] ||
@@ -982,6 +1039,13 @@ static void StyleIOSFloatingKeyView(UIView *keyView) {
             }
         }
     }
+
+    NSString *finalText = [firstChild isKindOfClass:[UILabel class]] ? (((UILabel *)firstChild).text ?: @"") : @"";
+    NSString *finalSig = [NSString stringWithFormat:@"%@|%ld|%ld|%d|%.0f|%.0f|%@",
+                          keyId ?: @"", (long)action, (long)role, (int)dark,
+                          childSize.width, childSize.height, finalText];
+    objc_setAssociatedObject(keyView, kKeyThemeSigAssocKey, finalSig, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(keyView, kKeyHighlightStateAssocKey, @(highlighted), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 static void StyleInlineButton(UIView *btn, LintypeKeyAction action, BOOL dark, BOOL highlighted) {
@@ -994,7 +1058,12 @@ static void StyleInlineButton(UIView *btn, LintypeKeyAction action, BOOL dark, B
     btn.layer.shadowOffset = CGSizeMake(0.0, 1.0);
     btn.layer.shadowRadius = 0.0;
     if (!CGRectIsEmpty(btn.bounds)) {
-        btn.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:btn.bounds cornerRadius:5.5].CGPath;
+        NSValue *prevVal = objc_getAssociatedObject(btn, kKeyLastShadowSizeAssocKey);
+        CGSize prevSize = prevVal ? [prevVal CGSizeValue] : CGSizeZero;
+        if (!CGSizeEqualToSize(prevSize, btn.bounds.size) || btn.layer.shadowPath == NULL) {
+            btn.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:btn.bounds cornerRadius:5.5].CGPath;
+            objc_setAssociatedObject(btn, kKeyLastShadowSizeAssocKey, [NSValue valueWithCGSize:btn.bounds.size], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
     }
     RenderCustomKeyBadgeInContainer(btn, action, dark, highlighted);
 }
@@ -1353,6 +1422,7 @@ static void my_softKey_updateView(UIView *self, SEL _cmd) {
         orig_softKey_updateView(self, _cmd);
     }
     @try {
+        objc_setAssociatedObject(self, kKeyThemeSigAssocKey, nil, OBJC_ASSOCIATION_ASSIGN);
         StyleIOSFloatingKeyView(self);
     } @catch (NSException *e) {}
 }
@@ -1524,7 +1594,7 @@ static void my_inputVc_viewWillAppear(UIInputViewController *self, SEL _cmd, BOO
     @try {
         sAppliedLaunchInterfaceThisAppear = NO;
         [[TypelessConfig sharedConfig] load];
-        [[TypelessHostBridge sharedBridge] syncConfigFromHostIfNeeded];
+        [[TypelessHostBridge sharedBridge] syncConfigFromHostAsyncWithCompletion:nil];
         EnsureDefaultZhHans9KeyPreferencesIfNeeded();
         [TypelessVoiceManager sharedManager].activeInputViewController = self;
     } @catch (NSException *e) {}
@@ -1547,25 +1617,20 @@ static void my_inputVc_viewDidAppear(UIInputViewController *self, SEL _cmd, BOOL
         // Apply configured launch interface immediately on fresh keyboard presentation
         ApplyLaunchInterfacePreferenceIfNeeded(self);
 
-        // Also sync from host loopback and re-apply styling/launch mode if config changed remotely
+        // Also sync from host loopback asynchronously and only re-apply styling/launch mode if config changed
         __weak UIInputViewController *weakSelf = self;
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            TypelessLaunchInterface before = [TypelessConfig sharedConfig].launchInterface;
-            BOOL updated = [[TypelessHostBridge sharedBridge] syncConfigFromHostIfNeeded];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                UIInputViewController *strongVC = weakSelf;
-                if (!strongVC) return;
-                StyleCandidateAndHeaderChrome(strongVC.view, 0);
-                RefreshAllKeyboardViewsInTree(strongVC.view, 0);
-                if (updated) {
-                    TypelessLaunchInterface after = [TypelessConfig sharedConfig].launchInterface;
-                    if (before != after && after == TypelessLaunchInterfaceVoice &&
-                        ![TypelessVoiceManager sharedManager].isOverlayVisible) {
-                        [[TypelessVoiceManager sharedManager] presentVoiceOverlayInViewController:strongVC autoStart:NO];
-                    }
-                }
-            });
-        });
+        TypelessLaunchInterface before = [TypelessConfig sharedConfig].launchInterface;
+        [[TypelessHostBridge sharedBridge] syncConfigFromHostAsyncWithCompletion:^(BOOL updated) {
+            UIInputViewController *strongVC = weakSelf;
+            if (!strongVC || !updated) return;
+            StyleCandidateAndHeaderChrome(strongVC.view, 0);
+            RefreshAllKeyboardViewsInTree(strongVC.view, 0);
+            TypelessLaunchInterface after = [TypelessConfig sharedConfig].launchInterface;
+            if (before != after && after == TypelessLaunchInterfaceVoice &&
+                ![TypelessVoiceManager sharedManager].isOverlayVisible) {
+                [[TypelessVoiceManager sharedManager] presentVoiceOverlayInViewController:strongVC autoStart:NO];
+            }
+        }];
     } @catch (NSException *e) {}
 }
 

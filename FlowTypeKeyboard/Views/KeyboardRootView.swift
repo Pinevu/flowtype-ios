@@ -15,7 +15,7 @@ public struct KeyboardRootView: View {
     public var body: some View {
         VStack(spacing: 0) {
             topToolbar
-                .frame(height: 36)
+                .frame(height: 34)
                 .padding(.horizontal, 8)
 
             Divider()

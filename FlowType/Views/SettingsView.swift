@@ -387,14 +387,14 @@ struct SettingsView: View {
                 Slider(value: $draft.backgroundOpacity, in: 0.0...1.0, step: 0.01)
             }
 
-            // Proportional Keyboard Preview Card (matches exact 390:302 keyboard ratio)
+            // Proportional Keyboard Preview Card (matches exact 390:293 keyboard ratio)
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("输入法等比例实时预览")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text("390:302 等比")
+                    Text("390:293 等比")
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.tertiary)
                 }
@@ -411,7 +411,7 @@ struct SettingsView: View {
 
     private var proportionalKeyboardPreview: some View {
         let previewWidth: CGFloat = 276
-        let previewHeight: CGFloat = previewWidth * (302.0 / 390.0)
+        let previewHeight: CGFloat = previewWidth * (293.0 / 390.0)
         let uniformScale: CGFloat = previewWidth / 390.0
 
         return HStack {
@@ -420,14 +420,14 @@ struct SettingsView: View {
                 BackgroundCheckerboardView()
 
                 ZStack {
-                    previewBackground(width: 390, height: 302)
+                    previewBackground(width: 390, height: 293)
 
                     KeyboardNineKeyMockOverlay(
                         isDark: previewPrefersDarkTextScheme,
                         isTranslucent: draft.backgroundStyle != .system || draft.backgroundOpacity < 0.98
                     )
                 }
-                .frame(width: 390, height: 302)
+                .frame(width: 390, height: 293)
                 .scaleEffect(uniformScale)
                 .frame(width: previewWidth, height: previewHeight)
             }
@@ -580,7 +580,7 @@ private struct BackgroundCheckerboardView: View {
     }
 }
 
-/// Renders an exact-scale 390x302 mock of the 5x4 Nine-Key layout for true-to-life settings preview & alignment guide.
+/// Renders an exact-scale 390x293 mock of the 5x4 Nine-Key layout for true-to-life settings preview & alignment guide.
 private struct KeyboardNineKeyMockOverlay: View {
     let isDark: Bool
     let isTranslucent: Bool
@@ -635,12 +635,12 @@ private struct KeyboardNineKeyMockOverlay: View {
                     .font(.system(size: 13))
                     .foregroundStyle(labelColor.opacity(0.7))
             }
-            .frame(height: 38)
+            .frame(height: 34)
             .padding(.horizontal, 8)
 
             Divider().opacity(0.22)
 
-            // Mock Candidate Bar (40pt)
+            // Mock Candidate Bar (36pt)
             HStack(spacing: 14) {
                 ForEach(["的", "一", "我", "你", "在", "是", "了", "不"], id: \.self) { ch in
                     Text(ch)
@@ -652,7 +652,7 @@ private struct KeyboardNineKeyMockOverlay: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(labelColor.opacity(0.6))
             }
-            .frame(height: 40)
+            .frame(height: 36)
             .padding(.horizontal, 12)
 
             Divider().opacity(0.22)
@@ -757,7 +757,7 @@ private struct CustomBackgroundEditorSheet: View {
         NavigationStack {
             GeometryReader { geo in
                 let boxW = min(358, max(240, geo.size.width - 32))
-                let boxH = boxW * (302.0 / 390.0)
+                let boxH = boxW * (293.0 / 390.0)
                 let liveScale = min(5.0, max(1.0, Double(committedScale * gestureMagnification)))
                 let candidateNormX = committedOffsetX + Double(gestureDrag.width / max(1, boxW))
                 let candidateNormY = committedOffsetY + Double(gestureDrag.height / max(1, boxH))
@@ -791,7 +791,7 @@ private struct CustomBackgroundEditorSheet: View {
 
                         if showKeyOverlay {
                             KeyboardNineKeyMockOverlay(isDark: false, isTranslucent: true, wireframeOnly: true)
-                                .frame(width: 390, height: 302)
+                                .frame(width: 390, height: 293)
                                 .scaleEffect(boxW / 390.0)
                                 .frame(width: boxW, height: boxH)
                                 .allowsHitTesting(false)

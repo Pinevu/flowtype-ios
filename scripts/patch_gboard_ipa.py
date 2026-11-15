@@ -159,15 +159,20 @@ def patch_gboard(base_ipa, dylib_path, zh_zip_path, output_ipa):
                         json.dump(b_list, f, ensure_ascii=False)
                     print("Updated metadata.json with zh_hans_v2 entry!")
 
-    # 5. Update Info.plist permissions
+    # 5. Update Info.plist permissions & ATS (both app & appex so self-hosted HTTP endpoints work)
     for plist_path in [app_dir / "Info.plist", appex_dir / "Info.plist"]:
         with open(plist_path, "rb") as f:
             pl = plistlib.load(f)
         pl["NSMicrophoneUsageDescription"] = "Lintype 语音输入需要访问您的麦克风以进行实时语音输入。"
         pl["NSSpeechRecognitionUsageDescription"] = "Lintype 语音输入需要使用系统的语音识别功能以将语音转换为文字。"
+        ats = pl.get("NSAppTransportSecurity")
+        if not isinstance(ats, dict):
+            ats = {}
+        ats["NSAllowsArbitraryLoads"] = True
+        pl["NSAppTransportSecurity"] = ats
         with open(plist_path, "wb") as f:
             plistlib.dump(pl, f)
-        print(f"Updated permissions in {plist_path}")
+        print(f"Updated permissions & ATS in {plist_path}")
 
     # 6. Remove stale _CodeSignature folders
     for p in work_dir.rglob("_CodeSignature"):

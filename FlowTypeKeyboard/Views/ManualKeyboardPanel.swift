@@ -8,7 +8,7 @@ public struct ManualKeyboardPanel: View {
     public var body: some View {
         VStack(spacing: 0) {
             candidateOrAccessoryBar
-                .frame(height: 40)
+                .frame(height: 36)
                 .padding(.horizontal, 6)
 
             Divider().opacity(0.25)
@@ -23,8 +23,8 @@ public struct ManualKeyboardPanel: View {
                 keyGrid
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(.horizontal, 4)
-                    .padding(.top, 6)
-                    .padding(.bottom, 6)
+                    .padding(.top, 4)
+                    .padding(.bottom, 4)
             }
         }
     }
@@ -831,9 +831,15 @@ private struct CharacterKeyButton: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(keyColor)
-                .shadow(color: .black.opacity(0.22), radius: 0.5, x: 0, y: 1)
+            ZStack(alignment: .bottom) {
+                Capsule()
+                    .fill(Color.black.opacity(0.22))
+                    .frame(height: 1.5)
+                    .padding(.horizontal, 3)
+                    .offset(y: 1)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(keyColor)
+            }
 
             Text(label)
                 .font(.system(size: 20, weight: .regular))

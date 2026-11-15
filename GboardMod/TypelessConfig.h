@@ -35,6 +35,7 @@ typedef NS_ENUM(NSInteger, TypelessLaunchInterface) {
 @property (nonatomic, assign) TypelessLaunchInterface launchInterface;
 
 // Separated Voice Model (ASR) configuration
+@property (nonatomic, copy) NSString *asrLanguage;
 @property (nonatomic, copy) NSString *asrBaseURL;
 @property (nonatomic, copy) NSString *asrApiKey;
 @property (nonatomic, copy) NSString *asrModel;
@@ -44,6 +45,7 @@ typedef NS_ENUM(NSInteger, TypelessLaunchInterface) {
 @property (nonatomic, copy) NSString *llmBaseURL;
 @property (nonatomic, copy) NSString *llmApiKey;
 @property (nonatomic, copy) NSString *llmModel;
+@property (nonatomic, copy) NSString *personalWords;
 @property (nonatomic, assign) BOOL smartDictationCleanup;
 
 // Backward compatibility aliases mapped to LLM (with ASR fallback on read)
@@ -66,6 +68,9 @@ typedef NS_ENUM(NSInteger, TypelessLaunchInterface) {
 
 - (NSString *)promptForMode:(TypelessVoiceMode)mode;
 - (NSString *)effectivePromptForMode:(TypelessVoiceMode)mode;
+- (NSString *)whisperHotwordPrompt;
+- (NSLocale *)resolvedAppleSpeechLocale;
+- (nullable NSString *)effectiveWhisperLanguageCode;
 - (BOOL)hasValidAsrConfig;
 - (BOOL)hasValidLlmConfig;
 - (BOOL)hasValidApiKey;

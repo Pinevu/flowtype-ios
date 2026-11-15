@@ -25,8 +25,11 @@ typedef void (^TypelessBridgeRecordingCompletion)(NSString * _Nullable wavPath, 
 // Extension API (Gboard.appex)
 - (BOOL)isHostBridgeAlive;
 - (BOOL)syncConfigFromHostIfNeeded;
+- (void)syncConfigFromHostAsyncWithCompletion:(void (^ _Nullable)(BOOL updated))completion;
 - (BOOL)startRemoteRecordingWithLevelHandler:(nullable TypelessBridgeLevelBlock)levelBlock
                                 errorMessage:(NSString * _Nullable * _Nullable)outError;
+- (void)startRemoteRecordingWithLevelHandler:(nullable TypelessBridgeLevelBlock)levelBlock
+                                  completion:(void (^)(BOOL started, BOOL hostAlive, NSString * _Nullable errorMessage))completion;
 - (void)stopRemoteRecordingWithCompletion:(TypelessBridgeRecordingCompletion)completion;
 - (void)cancelRemoteRecording;
 - (void)openHostKeepAliveFromViewController:(nullable UIInputViewController *)inputVC;

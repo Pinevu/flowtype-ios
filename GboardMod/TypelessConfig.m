@@ -95,6 +95,7 @@ static NSString *const kDefaultPromptHelpWrite =
     _pipKeepAliveEnabled = NO;
     _launchInterface = TypelessLaunchInterfaceKeyboard;
 
+    _asrLanguage = @"zh-CN";
     _asrBaseURL = kDefaultAsrBaseURL;
     _asrApiKey = @"";
     _asrModel = kDefaultAsrModel;
@@ -103,6 +104,7 @@ static NSString *const kDefaultPromptHelpWrite =
     _llmBaseURL = kDefaultLlmBaseURL;
     _llmApiKey = @"";
     _llmModel = kDefaultLlmModel;
+    _personalWords = @"";
     _smartDictationCleanup = YES;
 
     _customPromptDictate = kDefaultPromptDictate;
@@ -197,10 +199,15 @@ static NSString *const kDefaultPromptHelpWrite =
     self.didProbeAppGroups = YES;
 
     NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *homePath = NSHomeDirectory();
     for (NSString *gid in [self candidateAppGroupIdentifiers]) {
         @try {
             NSURL *url = [fm containerURLForSecurityApplicationGroupIdentifier:gid];
             if (url.path.length > 0) {
+                // Reject LintypeGboard's safe_containerURL local sandbox fallback (/Application Support/AppGroup_*)
+                if ([url.path containsString:@"/AppGroup_"] || (homePath.length > 0 && [url.path hasPrefix:homePath])) {
+                    continue;
+                }
                 BOOL isDir = NO;
                 if ([fm fileExistsAtPath:url.path isDirectory:&isDir] && isDir) {
                     self.cachedDetectedGroupID = gid;
@@ -267,6 +274,7 @@ static NSString *const kDefaultPromptHelpWrite =
         @"polishStyle": @(self.polishStyle),
         @"pipKeepAliveEnabled": @(self.pipKeepAliveEnabled),
         @"launchInterface": @(self.launchInterface),
+        @"asrLanguage": self.asrLanguage.length > 0 ? self.asrLanguage : @"zh-CN",
         @"asrBaseURL": [self normalizedURL:self.asrBaseURL fallback:kDefaultAsrBaseURL],
         @"asrApiKey": self.asrApiKey ?: @"",
         @"asrModel": self.asrModel.length > 0 ? self.asrModel : kDefaultAsrModel,
@@ -274,6 +282,7 @@ static NSString *const kDefaultPromptHelpWrite =
         @"llmBaseURL": [self normalizedURL:self.llmBaseURL fallback:kDefaultLlmBaseURL],
         @"llmApiKey": self.llmApiKey ?: @"",
         @"llmModel": self.llmModel.length > 0 ? self.llmModel : kDefaultLlmModel,
+        @"personalWords": self.personalWords ?: @"",
         @"smartDictationCleanup": @(self.smartDictationCleanup),
         @"customPromptDictate": self.customPromptDictate ?: kDefaultPromptDictate,
         @"customPromptEdit": self.customPromptEdit ?: kDefaultPromptEdit,
@@ -325,6 +334,12 @@ static NSString *const kDefaultPromptHelpWrite =
     if (llmKey != nil) self.llmApiKey = [llmKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if ([dict[@"llmModel"] isKindOfClass:[NSString class]] && [dict[@"llmModel"] length] > 0) {
         self.llmModel = dict[@"llmModel"];
+    }
+    if ([dict[@"asrLanguage"] isKindOfClass:[NSString class]] && [dict[@"asrLanguage"] length] > 0) {
+        self.asrLanguage = dict[@"asrLanguage"];
+    }
+    if ([dict[@"personalWords"] isKindOfClass:[NSString class]]) {
+        self.personalWords = dict[@"personalWords"];
     }
     if (dict[@"smartDictationCleanup"]) self.smartDictationCleanup = [dict[@"smartDictationCleanup"] boolValue];
 
@@ -533,20 +548,75 @@ static NSString *const kDefaultPromptHelpWrite =
     return kDefaultPromptDictate;
 }
 
+- (NSArray<NSString *> *)parsedPersonalWordList {
+    if (self.personalWords.length == 0) return @[];
+    NSCharacterSet *sep = [NSCharacterSet characterSetWithCharactersInString:@",，;；\n\r、"];
+    NSArray<NSString *> *parts = [self.personalWords componentsSeparatedByCharactersInSet:sep];
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (NSString *raw in parts) {
+        NSString *t = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (t.length == 0 || [seen containsObject:t]) continue;
+        [seen addObject:t];
+        [out addObject:t];
+        if (out.count >= 60) break;
+    }
+    return out;
+}
+
+- (NSString *)whisperHotwordPrompt {
+    NSArray<NSString *> *words = [self parsedPersonalWordList];
+    if (words.count == 0) return @"";
+    NSUInteger count = MIN((NSUInteger)40, words.count);
+    return [[words subarrayWithRange:NSMakeRange(0, count)] componentsJoinedByString:@", "];
+}
+
+- (nullable NSString *)effectiveWhisperLanguageCode {
+    NSString *lang = [self.asrLanguage stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (lang.length == 0 || [lang caseInsensitiveCompare:@"auto"] == NSOrderedSame) {
+        return nil;
+    }
+    if ([lang hasPrefix:@"zh"]) return @"zh";
+    if ([lang hasPrefix:@"en"]) return @"en";
+    if ([lang hasPrefix:@"ja"]) return @"ja";
+    if ([lang hasPrefix:@"ko"]) return @"ko";
+    return lang;
+}
+
+- (NSLocale *)resolvedAppleSpeechLocale {
+    NSString *lang = [self.asrLanguage stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (lang.length > 0 && [lang caseInsensitiveCompare:@"auto"] != NSOrderedSame) {
+        return [NSLocale localeWithLocaleIdentifier:lang];
+    }
+    NSString *preferred = [NSLocale preferredLanguages].firstObject;
+    if (preferred.length > 0) {
+        return [NSLocale localeWithLocaleIdentifier:preferred];
+    }
+    return [NSLocale localeWithLocaleIdentifier:@"zh-CN"];
+}
+
 - (NSString *)effectivePromptForMode:(TypelessVoiceMode)mode {
     NSString *base = [self promptForMode:mode];
     if (mode == TypelessVoiceModeDictate || mode == TypelessVoiceModeEdit || mode == TypelessVoiceModeHelpWrite) {
         switch (self.polishStyle) {
             case TypelessPolishStyleConcise:
-                return [base stringByAppendingString:@"\n补充风格要求：请尽量精简压缩冗长表达，直奔主题，去除一切多余寒暄和重复修饰，使文本简短干练。"];
+                base = [base stringByAppendingString:@"\n补充风格要求：请尽量精简压缩冗长表达，直奔主题，去除一切多余寒暄和重复修饰，使文本简短干练。"];
+                break;
             case TypelessPolishStyleFormal:
-                return [base stringByAppendingString:@"\n补充风格要求：请使用得体、礼貌、专业、偏正式的书面语措辞与完整标点，适合工作汇报、邮件或商务沟通。"];
+                base = [base stringByAppendingString:@"\n补充风格要求：请使用得体、礼貌、专业、偏正式的书面语措辞与完整标点，适合工作汇报、邮件或商务沟通。"];
+                break;
             case TypelessPolishStyleLight:
-                return [base stringByAppendingString:@"\n补充风格要求：请最大程度保留说话人的原始用词与句式，仅修正明显的错别字、语气词卡顿与标点符号。"];
+                base = [base stringByAppendingString:@"\n补充风格要求：请最大程度保留说话人的原始用词与句式，仅修正明显的错别字、语气词卡顿与标点符号。"];
+                break;
             case TypelessPolishStyleSmart:
             default:
                 break;
         }
+    }
+    NSArray<NSString *> *words = [self parsedPersonalWordList];
+    if (words.count > 0) {
+        base = [NSString stringWithFormat:@"%@\n\n【个人词典/热词（若发音或语义相近，请优先采用以下专有写法）】\n%@",
+                base, [words componentsJoinedByString:@"、"]];
     }
     return base;
 }

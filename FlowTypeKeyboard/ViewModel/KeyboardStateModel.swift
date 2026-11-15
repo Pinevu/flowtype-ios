@@ -145,16 +145,34 @@ public final class KeyboardStateModel: ObservableObject {
 
     // MARK: - Lifecycle & Sync
 
+    private var contextRefreshWorkItem: DispatchWorkItem?
+    private var heartbeatTickCount: Int = 0
+
     public func refreshContextFromProxy() {
         guard let proxy = proxyProvider?() else { return }
-        let newSelected = proxy.selectedText ?? ""
-        if selectedTextPreview != newSelected { selectedTextPreview = newSelected }
+        if activePanel == .voice {
+            let newSelected = proxy.selectedText ?? ""
+            if selectedTextPreview != newSelected { selectedTextPreview = newSelected }
+        }
         let newReturnLabel = mapReturnKeyTitle(proxy.returnKeyType)
         if returnKeyLabel != newReturnLabel { returnKeyLabel = newReturnLabel }
-        updateAutoShiftIfNeeded()
-        if manualLanguage == .english && layoutPage == .letters {
-            refreshEnglishSuggestions()
+        if manualLanguage == .english {
+            updateAutoShiftIfNeeded()
+            if layoutPage == .letters {
+                refreshEnglishSuggestions()
+            }
         }
+    }
+
+    public func scheduleContextRefresh() {
+        contextRefreshWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.refreshContextFromProxy()
+            }
+        }
+        contextRefreshWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: item)
     }
 
     public func reloadSharedSettings() {
@@ -202,9 +220,18 @@ public final class KeyboardStateModel: ObservableObject {
 
     private func startHeartbeatPolling() {
         statusPollTimer?.invalidate()
+        heartbeatTickCount = 0
         statusPollTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.isStatusPollInFlight else { return }
+                self.heartbeatTickCount += 1
+                let activeVoice = (self.activePanel == .voice
+                                   || self.hostStatus.state == .recording
+                                   || self.hostStatus.state == .transcribing
+                                   || self.hostStatus.state == .polishing)
+                if !activeVoice && (self.heartbeatTickCount % 8 != 0) {
+                    return
+                }
                 self.isStatusPollInFlight = true
                 let store = self.store
                 self.statusQueue.async { [weak self] in
@@ -697,12 +724,23 @@ public final class KeyboardStateModel: ObservableObject {
     }
 
     public func commitComposingAsRawLetters() {
+        if !t9ComposingDigits.isEmpty {
+            let raw = displayPinyin.isEmpty
+                ? t9ComposingDigits
+                : displayPinyin.replacingOccurrences(of: "'", with: "")
+            guard !raw.isEmpty else { return }
+            proxyProvider?()?.insertText(raw)
+            maybeAutoLearnCorrection(term: raw, pinyinHint: "")
+            clearComposing()
+            scheduleContextRefresh()
+            return
+        }
         let raw = composingPinyin.replacingOccurrences(of: "'", with: "")
         guard !raw.isEmpty else { return }
         proxyProvider?()?.insertText(raw)
         maybeAutoLearnCorrection(term: raw, pinyinHint: "")
         clearComposing()
-        refreshContextFromProxy()
+        scheduleContextRefresh()
     }
 
     public func clearComposing() {
@@ -779,7 +817,7 @@ public final class KeyboardStateModel: ObservableObject {
         lastPunctuationValue = nextMark
         lastPunctuationTapTime = now
         proxyProvider?()?.insertText(nextMark)
-        refreshContextFromProxy()
+        scheduleContextRefresh()
     }
 
     public func toggleT9PinyinPicker() {
@@ -821,7 +859,7 @@ public final class KeyboardStateModel: ObservableObject {
         }
         lastCommittedWord = word
         refreshIdleCandidates()
-        refreshContextFromProxy()
+        scheduleContextRefresh()
     }
 
     public func updateT9Candidates() {
@@ -847,7 +885,12 @@ public final class KeyboardStateModel: ObservableObject {
                       self.selectedT9SyllableFilter == filter else { return }
                 if self.t9SyllableOptions != sylls { self.t9SyllableOptions = sylls }
                 if self.pinyinCandidates != cands { self.pinyinCandidates = cands }
-                let display = filter ?? digits
+                let display = Self.resolveT9DisplayPinyin(
+                    digits: digits,
+                    filter: filter,
+                    syllables: sylls,
+                    candidates: cands
+                )
                 if self.displayPinyin != display { self.displayPinyin = display }
             }
         }
@@ -940,6 +983,113 @@ public final class KeyboardStateModel: ObservableObject {
         lastCommittedWord = nil
         refreshIdleCandidates()
         refreshContextFromProxy()
+    }
+
+    private static func resolveT9DisplayPinyin(
+        digits: String,
+        filter: String?,
+        syllables: [String],
+        candidates: [PinyinCandidate]
+    ) -> String {
+        let pureDigits = digits.filter { $0 >= "2" && $0 <= "9" }
+        guard !pureDigits.isEmpty else { return "" }
+
+        func fallbackLetter(for d: Character) -> String {
+            switch d {
+            case "2": return "a"
+            case "3": return "d"
+            case "4": return "g"
+            case "5": return "j"
+            case "6": return "m"
+            case "7": return "p"
+            case "8": return "t"
+            case "9": return "w"
+            case "'": return "'"
+            default: return ""
+            }
+        }
+
+        func formatSuffixDigits(_ rem: String, preferSyllables: [String]) -> String {
+            guard !rem.isEmpty else { return "" }
+            if let syl = preferSyllables.first(where: { !$0.isEmpty && $0.count <= rem.count }) {
+                let consumed = LexiconDatabase.pinyinToT9Digits(syl)
+                if !consumed.isEmpty && rem.hasPrefix(consumed) {
+                    let tail = String(rem.dropFirst(consumed.count))
+                    if tail.isEmpty { return syl }
+                    return syl + "'" + formatSuffixDigits(tail, preferSyllables: [])
+                }
+            }
+            let guessedSylls = LexiconDatabase.syllablesForT9Digits(rem)
+            if let syl = guessedSylls.first(where: { !$0.isEmpty }) {
+                let consumed = LexiconDatabase.pinyinToT9Digits(syl)
+                if !consumed.isEmpty && rem.hasPrefix(consumed) {
+                    let tail = String(rem.dropFirst(consumed.count))
+                    if tail.isEmpty { return syl }
+                    return syl + "'" + formatSuffixDigits(tail, preferSyllables: [])
+                }
+            }
+            return rem.map { fallbackLetter(for: $0) }.joined()
+        }
+
+        let normalizedFilter = filter?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if let f = normalizedFilter, !f.isEmpty {
+            let filterDigits = LexiconDatabase.pinyinToT9Digits(f)
+            let cleanAfterFilter = pureDigits.hasPrefix(filterDigits)
+                ? String(pureDigits.dropFirst(filterDigits.count))
+                : pureDigits
+
+            if let firstCand = candidates.first(where: { $0.isFullMatch }) ?? candidates.first {
+                let py = firstCand.displayPinyin
+                    .replacingOccurrences(of: " ", with: "'")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !py.isEmpty && py.rangeOfCharacter(from: .decimalDigits) == nil {
+                    let matchedCount = py.lowercased().filter { $0 >= "a" && $0 <= "z" }.count
+                    let prefixJoined = py.lowercased().hasPrefix(f) ? py : (f + "'" + py)
+                    let totalMatched = prefixJoined.lowercased().filter { $0 >= "a" && $0 <= "z" }.count
+                    if totalMatched >= pureDigits.count {
+                        return prefixJoined
+                    }
+                    let remCount = max(0, pureDigits.count - max(matchedCount, totalMatched))
+                    let rem = String(pureDigits.suffix(remCount))
+                    let suffix = formatSuffixDigits(rem, preferSyllables: syllables)
+                    return suffix.isEmpty ? prefixJoined : (prefixJoined + "'" + suffix)
+                }
+            }
+
+            if !cleanAfterFilter.isEmpty {
+                let suffix = formatSuffixDigits(cleanAfterFilter, preferSyllables: syllables)
+                return suffix.isEmpty ? f : (f + "'" + suffix)
+            }
+            return f
+        }
+
+        if let bestFull = candidates.first(where: { $0.isFullMatch && !$0.displayPinyin.isEmpty && $0.displayPinyin.rangeOfCharacter(from: .decimalDigits) == nil }) {
+            let py = bestFull.displayPinyin
+                .replacingOccurrences(of: " ", with: "'")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let matchedCount = py.lowercased().filter { $0 >= "a" && $0 <= "z" }.count
+            if matchedCount >= pureDigits.count {
+                return py
+            }
+            let rem = String(pureDigits.dropFirst(matchedCount))
+            let suffix = formatSuffixDigits(rem, preferSyllables: [])
+            return suffix.isEmpty ? py : (py + "'" + suffix)
+        }
+
+        if let firstCand = candidates.first(where: { !$0.displayPinyin.isEmpty && $0.displayPinyin.rangeOfCharacter(from: .decimalDigits) == nil }) {
+            let py = firstCand.displayPinyin
+                .replacingOccurrences(of: " ", with: "'")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let matchedCount = py.lowercased().filter { $0 >= "a" && $0 <= "z" }.count
+            if matchedCount >= pureDigits.count {
+                return py
+            }
+            let rem = String(pureDigits.dropFirst(matchedCount))
+            let suffix = formatSuffixDigits(rem, preferSyllables: [])
+            return suffix.isEmpty ? py : (py + "'" + suffix)
+        }
+
+        return formatSuffixDigits(pureDigits, preferSyllables: syllables)
     }
 
     public func handleT9ReturnTap() {

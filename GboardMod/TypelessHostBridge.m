@@ -21,6 +21,8 @@ static CFStringRef const kDarwinCancelRec  = CFSTR("com.lintype.gboard.bridge.ca
 static CFStringRef const kDarwinRecReady   = CFSTR("com.lintype.gboard.bridge.recReady");
 
 @interface TypelessHostBridge () <AVAudioRecorderDelegate>
+@property (nonatomic, assign) CFAbsoluteTime lastConfigSyncAt;
+@property (nonatomic, assign) BOOL configSyncInFlight;
 @property (nonatomic, assign, readwrite) BOOL isKeepAliveActive;
 @property (nonatomic, assign, readwrite) BOOL isPipActive;
 @property (nonatomic, assign, readwrite) BOOL isLoopbackServerActive;
@@ -1087,7 +1089,118 @@ static NSData * _Nullable LoopbackHTTPRequest(NSString *method,
 - (BOOL)syncConfigFromHostIfNeeded {
     NSDictionary *remoteCfg = [self fetchLoopbackJSONPath:@"/config" method:@"GET" timeout:0.25];
     if (!remoteCfg) return NO;
+    self.lastConfigSyncAt = CFAbsoluteTimeGetCurrent();
     return [[TypelessConfig sharedConfig] applyConfigDictionary:remoteCfg persist:YES];
+}
+
+- (void)syncConfigFromHostAsyncWithCompletion:(void (^ _Nullable)(BOOL updated))completion {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (self.configSyncInFlight || (now - self.lastConfigSyncAt) < 1.2) {
+        if (completion) {
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(NO); });
+        }
+        return;
+    }
+    self.configSyncInFlight = YES;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSDictionary *remoteCfg = [self fetchLoopbackJSONPath:@"/config" method:@"GET" timeout:0.22];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.configSyncInFlight = NO;
+            self.lastConfigSyncAt = CFAbsoluteTimeGetCurrent();
+            BOOL updated = NO;
+            if ([remoteCfg isKindOfClass:[NSDictionary class]] && remoteCfg.count > 0) {
+                self.lastAliveCheckTime = self.lastConfigSyncAt;
+                self.lastAliveCheckResult = YES;
+                updated = [[TypelessConfig sharedConfig] applyConfigDictionary:remoteCfg persist:YES];
+            }
+            if (completion) completion(updated);
+        });
+    });
+}
+
+- (void)startExtHTTPPollTimer {
+    __weak typeof(self) weakSelf = self;
+    self.extPollTimer = [NSTimer scheduledTimerWithTimeInterval:0.12 repeats:YES block:^(NSTimer * _Nonnull timer) {
+        __strong typeof(weakSelf) s = weakSelf;
+        if (!s) return;
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            NSDictionary *st = [s fetchLoopbackJSONPath:@"/status" method:@"GET" timeout:0.25];
+            if (!st) return;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (s.extLevelBlock) {
+                    s.extLevelBlock([st[@"level"] doubleValue], [st[@"elapsed"] doubleValue]);
+                }
+            });
+        });
+    }];
+}
+
+- (void)startRemoteRecordingWithLevelHandler:(TypelessBridgeLevelBlock)levelBlock
+                                  completion:(void (^)(BOOL started, BOOL hostAlive, NSString * _Nullable errorMessage))completion {
+    [self configureHostObservers];
+    [self.extPollTimer invalidate];
+    [self.extStopTimeoutTimer invalidate];
+    self.extStopTimeoutTimer = nil;
+    self.extStopCompletion = nil;
+    self.extLevelBlock = levelBlock;
+    self.extUsingHTTPBridge = NO;
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSDictionary *startResp = [self fetchLoopbackJSONPath:@"/start" method:@"POST" timeout:0.65];
+        BOOL appGroupAlive = NO;
+        NSDictionary *hb = nil;
+        if (!startResp) {
+            appGroupAlive = [self isAppGroupBridgeAlive];
+            if (appGroupAlive) {
+                hb = [self readJSONFromPath:[self heartbeatFilePath]];
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if (startResp) {
+                self.lastAliveCheckTime = now;
+                self.lastAliveCheckResult = YES;
+                if ([startResp[@"ok"] boolValue]) {
+                    self.extUsingHTTPBridge = YES;
+                    [self startExtHTTPPollTimer];
+                    if (completion) completion(YES, YES, nil);
+                } else {
+                    NSString *err = startResp[@"error"];
+                    NSString *msg = err.length > 0 ? err : @"主应用启动后台录音失败";
+                    if (completion) completion(NO, YES, msg);
+                }
+                return;
+            }
+
+            if (appGroupAlive) {
+                self.lastAliveCheckTime = now;
+                self.lastAliveCheckResult = YES;
+                if (![hb[@"mic"] boolValue]) {
+                    if (completion) completion(NO, YES, @"主应用尚未授予麦克风权限，请打开 Gboard 主应用并点击开启保活。");
+                    return;
+                }
+                [[NSFileManager defaultManager] removeItemAtPath:[self sharedAudioFilePath] error:nil];
+                [self writeJSON:@{@"state": @"starting"} toPath:[self statusFilePath]];
+                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), kDarwinStartRec, NULL, NULL, true);
+
+                __weak typeof(self) weakSelf = self;
+                self.extPollTimer = [NSTimer scheduledTimerWithTimeInterval:0.12 repeats:YES block:^(NSTimer * _Nonnull timer) {
+                    __strong typeof(weakSelf) s = weakSelf;
+                    if (!s) return;
+                    NSDictionary *st = [s readJSONFromPath:[s statusFilePath]];
+                    if ([st[@"state"] isEqualToString:@"recording"] && s.extLevelBlock) {
+                        s.extLevelBlock([st[@"level"] doubleValue], [st[@"elapsed"] doubleValue]);
+                    }
+                }];
+                if (completion) completion(YES, YES, nil);
+                return;
+            }
+
+            self.lastAliveCheckTime = now;
+            self.lastAliveCheckResult = NO;
+            if (completion) completion(NO, NO, @"主应用后台语音保活未运行");
+        });
+    });
 }
 
 - (BOOL)startRemoteRecordingWithLevelHandler:(TypelessBridgeLevelBlock)levelBlock

@@ -195,6 +195,13 @@ final class FlowTypeTests: XCTestCase {
         let (_, fast64) = db.queryT9Candidates(digits: "64", includeSentenceDecoding: false)
         XCTAssertEqual(fast64.first?.text, "你")
 
+        // Repeated sequential T9 queries reuse cached SQLite statements accurately without stale bindings (e.g. "96" -> "wo")
+        let (_, cands96) = db.queryT9Candidates(digits: "96")
+        XCTAssertEqual(cands96.first?.text, "我")
+        XCTAssertEqual(cands96.first?.displayPinyin, "wo")
+        let (_, cands96636) = db.queryT9Candidates(digits: "96636")
+        XCTAssertEqual(cands96636.first?.text, "我们")
+
         // 7. Cancelled long input returns promptly without crashing
         let (_, cancelled) = db.queryT9Candidates(digits: "9694264244326", isCancelled: { true })
         XCTAssertLessThanOrEqual(cancelled.count, 40)

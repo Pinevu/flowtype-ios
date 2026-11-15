@@ -219,11 +219,8 @@
 - (void)startRecording {
     [self.haptic impactOccurred];
     TypelessHostBridge *bridge = [TypelessHostBridge sharedBridge];
-    BOOL bridgeAlive = [bridge isHostBridgeAlive];
-    if (bridgeAlive) {
-        [bridge syncConfigFromHostIfNeeded];
-    }
     [[TypelessConfig sharedConfig] load];
+    [bridge syncConfigFromHostAsyncWithCompletion:nil];
 
     [self stopAudioCaptureOnly];
     self.sessionToken += 1;
@@ -241,10 +238,40 @@
         return;
     }
 
-    if (bridgeAlive) {
-        [self beginAudioCaptureForToken:token];
+    self.state = TypelessSessionStateRecording;
+    self.recordingStartDate = [NSDate date];
+    [self.overlayView refreshStateUI];
+
+    BOOL isExtension = [[[NSBundle mainBundle] bundlePath] hasSuffix:@".appex"];
+    if (!isExtension) {
+        [self startLocalCaptureWithMicCheckForToken:token bridgeError:nil];
         return;
     }
+
+    __weak typeof(self) weakSelf = self;
+    [bridge startRemoteRecordingWithLevelHandler:^(CGFloat level, NSTimeInterval elapsed) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf || token != strongSelf.sessionToken || strongSelf.state != TypelessSessionStateRecording) return;
+        [strongSelf.overlayView updateAudioLevel:level elapsedSeconds:elapsed];
+    } completion:^(BOOL started, BOOL hostAlive, NSString * _Nullable errorMessage) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (token != strongSelf.sessionToken || strongSelf.state != TypelessSessionStateRecording) {
+            if (started) {
+                [bridge cancelRemoteRecording];
+            }
+            return;
+        }
+        if (started) {
+            strongSelf.usingHostBridge = YES;
+            return;
+        }
+        [strongSelf startLocalCaptureWithMicCheckForToken:token bridgeError:(hostAlive ? errorMessage : nil)];
+    }];
+}
+
+- (void)startLocalCaptureWithMicCheckForToken:(NSUInteger)token bridgeError:(nullable NSString *)bridgeError {
+    if (token != self.sessionToken || self.state != TypelessSessionStateRecording) return;
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -252,13 +279,16 @@
     AVAudioSessionRecordPermission perm = [session recordPermission];
     if (perm == AVAudioSessionRecordPermissionDenied) {
         self.state = TypelessSessionStateError;
-        [self.overlayView showErrorStatus:@"麦克风权限被拒绝，请在「系统设置 → Gboard」开启麦克风权限"];
+        NSString *msg = bridgeError.length > 0
+            ? bridgeError
+            : @"麦克风权限被拒绝，请在「系统设置 → Gboard」开启麦克风权限，或开启主应用后台保活";
+        [self.overlayView showErrorStatus:msg];
         return;
     }
     if (perm == AVAudioSessionRecordPermissionUndetermined) {
         [session requestRecordPermission:^(BOOL granted) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (token != self.sessionToken) return;
+                if (token != self.sessionToken || self.state != TypelessSessionStateRecording) return;
                 if (granted) {
                     [self beginAudioCaptureForToken:token];
                 } else {
@@ -280,21 +310,6 @@
     self.state = TypelessSessionStateRecording;
     self.recordingStartDate = [NSDate date];
     [self.overlayView refreshStateUI];
-
-    TypelessHostBridge *bridge = [TypelessHostBridge sharedBridge];
-    if ([bridge isHostBridgeAlive]) {
-        NSString *bridgeErr = nil;
-        __weak typeof(self) weakSelf = self;
-        BOOL started = [bridge startRemoteRecordingWithLevelHandler:^(CGFloat level, NSTimeInterval elapsed) {
-            __strong typeof(weakSelf) strongSelf = weakSelf;
-            if (!strongSelf || token != strongSelf.sessionToken || strongSelf.state != TypelessSessionStateRecording) return;
-            [strongSelf.overlayView updateAudioLevel:level elapsedSeconds:elapsed];
-        } errorMessage:&bridgeErr];
-        if (started) {
-            self.usingHostBridge = YES;
-            return;
-        }
-    }
 
     TypelessConfig *cfg = [TypelessConfig sharedConfig];
     if ([cfg shouldUseWhisperAPI]) {
@@ -422,8 +437,12 @@
         }
 
         Class sfClass = NSClassFromString(@"SFSpeechRecognizer");
-        if (!self.speechRecognizer) {
-            self.speechRecognizer = [[sfClass alloc] initWithLocale:[NSLocale localeWithLocaleIdentifier:@"zh-CN"]];
+        NSLocale *targetLocale = [[TypelessConfig sharedConfig] resolvedAppleSpeechLocale];
+        if (!self.speechRecognizer || ![self.speechRecognizer.locale.localeIdentifier isEqualToString:targetLocale.localeIdentifier]) {
+            self.speechRecognizer = [[sfClass alloc] initWithLocale:targetLocale];
+            if (!self.speechRecognizer || !self.speechRecognizer.isAvailable) {
+                self.speechRecognizer = [[sfClass alloc] initWithLocale:[NSLocale localeWithLocaleIdentifier:@"zh-CN"]];
+            }
             if (!self.speechRecognizer) {
                 self.speechRecognizer = [[sfClass alloc] initWithLocale:[NSLocale currentLocale]];
             }
@@ -569,9 +588,6 @@
 
     NSUInteger token = self.sessionToken;
     TypelessHostBridge *bridge = [TypelessHostBridge sharedBridge];
-    if ([bridge isHostBridgeAlive]) {
-        [bridge syncConfigFromHostIfNeeded];
-    }
     TypelessConfig *cfg = [TypelessConfig sharedConfig];
     [cfg load];
 
@@ -622,7 +638,11 @@
                     [strongSelf.overlayView showErrorStatus:@"未授权 Apple 语音识别，请在主 App 开启权限或配置语音模型"];
                     return;
                 }
-                SFSpeechRecognizer *rec = [[sfClass alloc] initWithLocale:[NSLocale localeWithLocaleIdentifier:@"zh-CN"]];
+                NSLocale *speechLocale = [[TypelessConfig sharedConfig] resolvedAppleSpeechLocale];
+                SFSpeechRecognizer *rec = [[sfClass alloc] initWithLocale:speechLocale];
+                if (!rec || !rec.isAvailable) {
+                    rec = [[sfClass alloc] initWithLocale:[NSLocale localeWithLocaleIdentifier:@"zh-CN"]];
+                }
                 if (!rec) rec = [[sfClass alloc] initWithLocale:[NSLocale currentLocale]];
                 if (!rec || !rec.isAvailable) {
                     [[NSFileManager defaultManager] removeItemAtURL:wavURL error:nil];
@@ -871,6 +891,20 @@
 
 #pragma mark - Network Requests (Separate ASR & LLM)
 
++ (NSURLSession *)sharedAPISession {
+    static NSURLSession *session = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        cfg.timeoutIntervalForRequest = 30.0;
+        cfg.timeoutIntervalForResource = 60.0;
+        cfg.HTTPMaximumConnectionsPerHost = 6;
+        cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+        session = [NSURLSession sessionWithConfiguration:cfg];
+    });
+    return session;
+}
+
 - (void)requestWhisperTranscriptionWithFileURL:(NSURL *)fileURL
                                         config:(TypelessConfig *)config
                              completionHandler:(void (^)(NSString * _Nullable text, NSError * _Nullable error))completionHandler {
@@ -911,12 +945,20 @@
 
     NSMutableData *body = [NSMutableData data];
     [body appendData:[[NSString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n%@\r\n", boundary, config.asrModel.length > 0 ? config.asrModel : @"whisper-1"] dataUsingEncoding:NSUTF8StringEncoding]];
+    NSString *whisperLang = [config effectiveWhisperLanguageCode];
+    if (whisperLang.length > 0) {
+        [body appendData:[[NSString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\n%@\r\n", boundary, whisperLang] dataUsingEncoding:NSUTF8StringEncoding]];
+    }
+    NSString *hotwords = [config whisperHotwordPrompt];
+    if (hotwords.length > 0) {
+        [body appendData:[[NSString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\n%@\r\n", boundary, hotwords] dataUsingEncoding:NSUTF8StringEncoding]];
+    }
     [body appendData:[[NSString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"file\"; filename=\"%@\"\r\nContent-Type: %@\r\n\r\n", boundary, uploadFilename, uploadMime] dataUsingEncoding:NSUTF8StringEncoding]];
     [body appendData:audioData];
     [body appendData:[[NSString stringWithFormat:@"\r\n--%@--\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
     req.HTTPBody = body;
 
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+    NSURLSessionDataTask *task = [[[self class] sharedAPISession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
         if (error) {
             if (completionHandler) completionHandler(nil, error);
             return;
@@ -990,7 +1032,7 @@
     };
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
 
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+    NSURLSessionDataTask *task = [[[self class] sharedAPISession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
         if (error) {
             if (completionHandler) completionHandler(nil, error);
             return;

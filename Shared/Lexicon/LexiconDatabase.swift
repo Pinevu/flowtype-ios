@@ -42,6 +42,7 @@ public final class LexiconDatabase: @unchecked Sendable {
     private var bundleDB: OpaquePointer?
     private var userDB: OpaquePointer?
     private let queue = DispatchQueue(label: "com.flowtype.lexicon.sqlite", qos: .userInteractive)
+    private var bundleStmtCache: [String: OpaquePointer] = [:]
 
     // MARK: - In-Memory T9 Cache (0ms instant hits for repetitive typing and backspaces)
     private var t9Cache: [String: (syllableOptions: [String], candidates: [PinyinCandidate])] = [:]
@@ -61,6 +62,7 @@ public final class LexiconDatabase: @unchecked Sendable {
         if let url = resolvedBundleURL, FileManager.default.fileExists(atPath: url.path) {
             var db: OpaquePointer?
             if sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK {
+                sqlite3_exec(db, "PRAGMA temp_store=MEMORY; PRAGMA mmap_size=33554432; PRAGMA cache_size=-8000;", nil, nil, nil)
                 self.bundleDB = db
             }
         }
@@ -79,6 +81,10 @@ public final class LexiconDatabase: @unchecked Sendable {
     }
 
     deinit {
+        for stmt in bundleStmtCache.values {
+            sqlite3_finalize(stmt)
+        }
+        bundleStmtCache.removeAll()
         if let db = bundleDB { sqlite3_close(db) }
         if let udb = userDB { sqlite3_close(udb) }
     }
@@ -1423,21 +1429,39 @@ public final class LexiconDatabase: @unchecked Sendable {
 
     // MARK: - Raw SQLite Queries
 
-    private func fetchBundleChars(pinyin: String, limit: Int) -> [(String, Int)] {
+    private func withCachedBundleStmt<T>(_ sql: String, body: (OpaquePointer) -> [T]) -> [T] {
         guard let db = bundleDB else { return [] }
-        let sql = "SELECT hanzi, freq FROM chars WHERE pinyin = ? ORDER BY freq DESC LIMIT ?;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, pinyin, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 2, Int32(limit))
-        var rows: [(String, Int)] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            if let cStr = sqlite3_column_text(stmt, 0) {
-                rows.append((String(cString: cStr), Int(sqlite3_column_int64(stmt, 1))))
+        let stmt: OpaquePointer
+        if let cached = bundleStmtCache[sql] {
+            stmt = cached
+        } else {
+            var newStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &newStmt, nil) == SQLITE_OK, let prepared = newStmt else {
+                return []
             }
+            bundleStmtCache[sql] = prepared
+            stmt = prepared
         }
-        return rows
+        defer {
+            sqlite3_reset(stmt)
+            sqlite3_clear_bindings(stmt)
+        }
+        return body(stmt)
+    }
+
+    private func fetchBundleChars(pinyin: String, limit: Int) -> [(String, Int)] {
+        let sql = "SELECT hanzi, freq FROM chars WHERE pinyin = ? ORDER BY freq DESC LIMIT ?;"
+        return withCachedBundleStmt(sql) { stmt in
+            sqlite3_bind_text(stmt, 1, pinyin, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 2, Int32(limit))
+            var rows: [(String, Int)] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let cStr = sqlite3_column_text(stmt, 0) {
+                    rows.append((String(cString: cStr), Int(sqlite3_column_int64(stmt, 1))))
+                }
+            }
+            return rows
+        }
     }
 
     private func fetchBundlePhrases(pinyin: String, limit: Int) -> [(String, Int)] {
@@ -1445,69 +1469,59 @@ public final class LexiconDatabase: @unchecked Sendable {
     }
 
     private func fetchBundlePhrasesWithSyllables(pinyin: String, limit: Int) -> [(word: String, freq: Int, syllables: String)] {
-        guard let db = bundleDB else { return [] }
         let sql = "SELECT word, freq, syllables FROM phrases WHERE pinyin = ? ORDER BY freq DESC LIMIT ?;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, pinyin, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 2, Int32(limit))
-        var rows: [(String, Int, String)] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            if let cStr = sqlite3_column_text(stmt, 0) {
-                let word = String(cString: cStr)
-                let freq = Int(sqlite3_column_int64(stmt, 1))
-                var syls = ""
-                if let sPtr = sqlite3_column_text(stmt, 2) {
-                    syls = String(cString: sPtr)
+        return withCachedBundleStmt(sql) { stmt in
+            sqlite3_bind_text(stmt, 1, pinyin, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 2, Int32(limit))
+            var rows: [(String, Int, String)] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let cStr = sqlite3_column_text(stmt, 0) {
+                    let word = String(cString: cStr)
+                    let freq = Int(sqlite3_column_int64(stmt, 1))
+                    let syls = sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? ""
+                    rows.append((word, freq, syls))
                 }
-                rows.append((word, freq, syls))
             }
+            return rows
         }
-        return rows
     }
 
     private func fetchBundlePhrasesByPrefix(prefix: String, limit: Int) -> [(String, Int)] {
-        guard let db = bundleDB else { return [] }
         let sql = "SELECT word, freq FROM phrases WHERE pinyin >= ? AND pinyin < ? ORDER BY freq DESC LIMIT ?;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, prefix, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 2, nextPrefixBound(prefix), -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 3, Int32(limit))
-        var rows: [(String, Int)] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            if let cStr = sqlite3_column_text(stmt, 0) {
-                rows.append((String(cString: cStr), Int(sqlite3_column_int64(stmt, 1))))
+        return withCachedBundleStmt(sql) { stmt in
+            sqlite3_bind_text(stmt, 1, prefix, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, nextPrefixBound(prefix), -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 3, Int32(limit))
+            var rows: [(String, Int)] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let cStr = sqlite3_column_text(stmt, 0) {
+                    rows.append((String(cString: cStr), Int(sqlite3_column_int64(stmt, 1))))
+                }
             }
+            return rows
         }
-        return rows
     }
 
     private func fetchPhrasesByInitials(initials: String, pinyinPrefix: String?, limit: Int) -> [(String, Int)] {
-        guard let db = bundleDB else { return [] }
         let sql = "SELECT word, freq, pinyin FROM phrases WHERE initials = ? ORDER BY freq DESC LIMIT 40;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, initials, -1, SQLITE_TRANSIENT)
-
-        var rows: [(String, Int)] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            if let wPtr = sqlite3_column_text(stmt, 0),
-               let pyPtr = sqlite3_column_text(stmt, 2) {
-                let word = String(cString: wPtr)
-                let freq = Int(sqlite3_column_int64(stmt, 1))
-                let py = String(cString: pyPtr)
-                if let pinyinPrefix, !py.hasPrefix(pinyinPrefix) {
-                    continue
+        return withCachedBundleStmt(sql) { stmt in
+            sqlite3_bind_text(stmt, 1, initials, -1, SQLITE_TRANSIENT)
+            var rows: [(String, Int)] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let wPtr = sqlite3_column_text(stmt, 0),
+                   let pyPtr = sqlite3_column_text(stmt, 2) {
+                    let word = String(cString: wPtr)
+                    let freq = Int(sqlite3_column_int64(stmt, 1))
+                    let py = String(cString: pyPtr)
+                    if let pinyinPrefix, !py.hasPrefix(pinyinPrefix) {
+                        continue
+                    }
+                    rows.append((word, freq))
+                    if rows.count >= limit { break }
                 }
-                rows.append((word, freq))
-                if rows.count >= limit { break }
             }
+            return rows
         }
-        return rows
     }
 
     private func fetchUserPhrases(pinyin: String, limit: Int) -> [(String, Int)] {
@@ -1528,72 +1542,49 @@ public final class LexiconDatabase: @unchecked Sendable {
     }
 
     private func fetchBundlePhrasesByT9(t9: String, limit: Int) -> [(word: String, freq: Int, pinyin: String)] {
-        guard let db = bundleDB else { return [] }
         let sql = "SELECT word, freq, pinyin FROM phrases WHERE t9 = ? ORDER BY freq DESC LIMIT ?;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, t9, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 2, Int32(limit))
-        var rows: [(word: String, freq: Int, pinyin: String)] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            if let wStr = sqlite3_column_text(stmt, 0), let pyStr = sqlite3_column_text(stmt, 2) {
-                rows.append((String(cString: wStr), Int(sqlite3_column_int64(stmt, 1)), String(cString: pyStr)))
-            }
-        }
-        return rows
+        return fetchBundleWordRows(sql: sql, key: t9, limit: limit)
     }
 
     private func fetchBundleCharsByT9(t9: String, limit: Int) -> [(hanzi: String, freq: Int, pinyin: String)] {
-        guard let db = bundleDB else { return [] }
         let sql = "SELECT hanzi, freq, pinyin FROM chars WHERE t9 = ? ORDER BY freq DESC LIMIT ?;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, t9, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 2, Int32(limit))
-        var rows: [(hanzi: String, freq: Int, pinyin: String)] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            if let hStr = sqlite3_column_text(stmt, 0), let pyStr = sqlite3_column_text(stmt, 2) {
-                rows.append((String(cString: hStr), Int(sqlite3_column_int64(stmt, 1)), String(cString: pyStr)))
-            }
-        }
-        return rows
+        return fetchBundleWordRows(sql: sql, key: t9, limit: limit)
+            .map { (hanzi: $0.word, freq: $0.freq, pinyin: $0.pinyin) }
     }
 
     private func fetchBundlePhrasesByT9Initials(t9: String, limit: Int) -> [(word: String, freq: Int, pinyin: String)] {
-        guard let db = bundleDB else { return [] }
         let sql = "SELECT word, freq, pinyin FROM phrases WHERE t9_initials = ? ORDER BY freq DESC LIMIT ?;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, t9, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 2, Int32(limit))
-        var rows: [(word: String, freq: Int, pinyin: String)] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            if let wStr = sqlite3_column_text(stmt, 0), let pyStr = sqlite3_column_text(stmt, 2) {
-                rows.append((String(cString: wStr), Int(sqlite3_column_int64(stmt, 1)), String(cString: pyStr)))
+        return fetchBundleWordRows(sql: sql, key: t9, limit: limit)
+    }
+
+    private func fetchBundleWordRows(sql: String, key: String, limit: Int) -> [(word: String, freq: Int, pinyin: String)] {
+        withCachedBundleStmt(sql) { stmt in
+            sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 2, Int32(limit))
+            var rows: [(word: String, freq: Int, pinyin: String)] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let wStr = sqlite3_column_text(stmt, 0), let pyStr = sqlite3_column_text(stmt, 2) {
+                    rows.append((String(cString: wStr), Int(sqlite3_column_int64(stmt, 1)), String(cString: pyStr)))
+                }
             }
+            return rows
         }
-        return rows
     }
 
     private func fetchBundlePhrasesByT9Prefix(prefix: String, limit: Int) -> [(word: String, freq: Int, pinyin: String)] {
-        guard let db = bundleDB else { return [] }
         let sql = "SELECT word, freq, pinyin FROM phrases WHERE t9 >= ? AND t9 < ? ORDER BY freq DESC LIMIT ?;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, prefix, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 2, nextPrefixBound(prefix), -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 3, Int32(limit))
-        var rows: [(word: String, freq: Int, pinyin: String)] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            if let wStr = sqlite3_column_text(stmt, 0), let pyStr = sqlite3_column_text(stmt, 2) {
-                rows.append((String(cString: wStr), Int(sqlite3_column_int64(stmt, 1)), String(cString: pyStr)))
+        return withCachedBundleStmt(sql) { stmt in
+            sqlite3_bind_text(stmt, 1, prefix, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, nextPrefixBound(prefix), -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 3, Int32(limit))
+            var rows: [(word: String, freq: Int, pinyin: String)] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let wStr = sqlite3_column_text(stmt, 0), let pyStr = sqlite3_column_text(stmt, 2) {
+                    rows.append((String(cString: wStr), Int(sqlite3_column_int64(stmt, 1)), String(cString: pyStr)))
+                }
             }
+            return rows
         }
-        return rows
     }
 
     private func expandedJoinedVariants(syllables: [SyllableSpan], maxCount: Int) -> [String] {

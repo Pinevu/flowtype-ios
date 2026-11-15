@@ -316,19 +316,11 @@ struct T9KeyGridView: View, Equatable {
         ) {
             model.handleT9KeyTap(digit)
         } label: {
-            ZStack(alignment: .topTrailing) {
-                Text(letters)
-                    .font(.system(size: 17, weight: .medium))
-                    .tracking(1.4)
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                Text(digit)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary.opacity(0.60))
-                    .padding(.top, 4)
-                    .padding(.trailing, 6)
-            }
+            Text(letters)
+                .font(.system(size: 17, weight: .medium))
+                .tracking(1.4)
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(width: width, height: height)
         .accessibilityLabel("\(digit) \(letters)")

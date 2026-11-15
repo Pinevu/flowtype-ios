@@ -85,7 +85,7 @@ public final class KeyboardViewController: UIInputViewController {
 
     private func preferredKeyboardHeight() -> CGFloat {
         let isLandscape = traitCollection.verticalSizeClass == .compact
-        return isLandscape ? 236 : 302
+        return isLandscape ? 236 : 293
     }
 
     private func openHostApp(url: URL) {
