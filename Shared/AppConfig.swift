@@ -109,6 +109,7 @@ public enum AppConfig {
         public static var commandPosted: String { "\(channelPrefix).notify.command" }
         public static var statusUpdated: String { "\(channelPrefix).notify.status" }
         public static var configChanged: String { "\(channelPrefix).notify.config" }
+        public static var onlineLexiconChanged: String { "\(channelPrefix).notify.online_lexicon" }
     }
 
     // MARK: - Provisioning Inspection Helpers

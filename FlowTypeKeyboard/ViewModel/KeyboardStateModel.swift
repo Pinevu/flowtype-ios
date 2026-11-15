@@ -103,12 +103,12 @@ public final class KeyboardStateModel: ObservableObject {
     private var pendingPhraseTokens: [CommittedChineseToken] = []
     private var lastCommittedSelection: CommittedChineseToken?
     private var lastDeletedMistakeWord: CommittedChineseToken?
-    private var sequentialPhraseCounts: [String: Int] = [:]
 
     private let hapticGenerator = UIImpactFeedbackGenerator(style: .light)
     private let statusQueue = DispatchQueue(label: "com.flowtype.keyboard.status", qos: .utility)
     private var isStatusPollInFlight = false
     private let t9QueryToken = AtomicCounter()
+    private let pinyinQueryToken = AtomicCounter()
     private let englishQueryToken = AtomicCounter()
     private let backgroundLoadToken = AtomicCounter()
 
@@ -154,8 +154,9 @@ public final class KeyboardStateModel: ObservableObject {
         if cfg.hapticFeedback {
             hapticGenerator.prepare()
         }
-        queryQueue.async {
-            _ = LexiconDatabase.shared
+        queryQueue.async { [store] in
+            let db = LexiconDatabase.shared
+            db.syncOnlineLexiconIfNeeded(store: store)
         }
         reloadCustomBackgroundImageAsync(force: true)
         setupDarwinObservers()
@@ -214,6 +215,9 @@ public final class KeyboardStateModel: ObservableObject {
                 self.applyLoadedSettings(cfg, words: words)
                 self.reloadCustomBackgroundImageAsync()
             }
+        }
+        queryQueue.async { [store] in
+            LexiconDatabase.shared.syncOnlineLexiconIfNeeded(store: store)
         }
     }
 
@@ -290,6 +294,11 @@ public final class KeyboardStateModel: ObservableObject {
             }
         }
         notifyBridge.addObserver(name: AppConfig.Notify.configChanged) { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.reloadSharedSettingsAsync()
+            }
+        }
+        notifyBridge.addObserver(name: AppConfig.Notify.onlineLexiconChanged) { [weak self] in
             Task { @MainActor [weak self] in
                 self?.reloadSharedSettingsAsync()
             }
@@ -775,18 +784,25 @@ public final class KeyboardStateModel: ObservableObject {
         let fuzzy = config.enablePinyinFuzzy
         let words = personalWords
         let lexiconDB = lexicon
+        let token = pinyinQueryToken.increment()
+        let counter = pinyinQueryToken
 
         queryQueue.async { [weak self] in
+            guard counter.value == token else { return }
             let (seg, cands) = lexiconDB.queryPinyinCandidates(
                 rawInput: inputSnapshot,
                 fuzzy: fuzzy,
                 personalWords: words,
-                limit: 40
+                limit: 64,
+                isCancelled: { counter.value != token }
             )
+            guard counter.value == token else { return }
             Task { @MainActor [weak self] in
-                guard let self, self.composingPinyin == inputSnapshot else { return }
-                self.displayPinyin = seg.displayPinyin
-                self.pinyinCandidates = cands
+                guard let self,
+                      counter.value == token,
+                      self.composingPinyin == inputSnapshot else { return }
+                if self.displayPinyin != seg.displayPinyin { self.displayPinyin = seg.displayPinyin }
+                if self.pinyinCandidates != cands { self.pinyinCandidates = cands }
             }
         }
     }
@@ -829,9 +845,14 @@ public final class KeyboardStateModel: ObservableObject {
         if pinyinLayoutMode == .t9 && !t9ComposingDigits.isEmpty {
             let pureDigits = t9ComposingDigits.replacingOccurrences(of: "'", with: "")
             let consumedDigits = String(pureDigits.prefix(candidate.consumedChars))
+            let cleanPy = candidate.displayPinyin.lowercased().filter { $0 >= "a" && $0 <= "z" }
+            let fullDigits = LexiconDatabase.pinyinToT9Digits(cleanPy)
+            let recordedDigits = (Self.isPureChineseCharacters(candidate.text) && !fullDigits.isEmpty && (fullDigits.hasPrefix(consumedDigits) || candidate.isFullMatch))
+                ? fullDigits
+                : consumedDigits
             let prevWord = lastCommittedWord
             recordLearnedChineseSelection(
-                digits: consumedDigits,
+                digits: recordedDigits,
                 pinyin: candidate.displayPinyin,
                 word: candidate.text,
                 previousWord: prevWord
@@ -848,6 +869,7 @@ public final class KeyboardStateModel: ObservableObject {
                     clearT9Composing()
                     refreshIdleCandidates()
                 } else {
+                    isCandidateDrawerExpanded = false
                     t9ComposingDigits = remaining
                     selectedT9SyllableFilter = nil
                     updateT9Candidates()
@@ -909,8 +931,9 @@ public final class KeyboardStateModel: ObservableObject {
         }
 
         let lexiconDB = lexicon
+        let storeRef = self.store
         let weightSnapshot = boostWeight
-        queryQueue.async {
+        queryQueue.async { [weak self] in
             lexiconDB.recordT9Selection(
                 digits: cleanDigits,
                 word: word,
@@ -918,6 +941,16 @@ public final class KeyboardStateModel: ObservableObject {
                 previousWord: previousWord,
                 boostWeight: weightSnapshot
             )
+            // Promote repeated multi-char picks or user corrections across sessions into SharedStore PersonalWord
+            let isCorrection = weightSnapshot >= 3 && word.count >= 2
+            let persistedFreq = word.count >= 2 && Self.isPureChineseCharacters(word)
+                ? lexiconDB.fetchUserPhraseFrequency(pinyin: cleanPy, word: word)
+                : 0
+            if (isCorrection || persistedFreq >= 3) && word.count >= 2 && word.count <= 8 {
+                Task { @MainActor [weak self] in
+                    self?.promoteLearnedWordToStore(term: word, pinyinHint: cleanPy, store: storeRef)
+                }
+            }
         }
 
         let token = CommittedChineseToken(word: word, digits: cleanDigits, pinyin: cleanPy, timestamp: now)
@@ -945,40 +978,40 @@ public final class KeyboardStateModel: ObservableObject {
         }
     }
 
+    private func promoteLearnedWordToStore(term: String, pinyinHint: String, store: SharedStore) {
+        statusQueue.async { [weak self] in
+            if store.addOrLearnWord(term: term, pinyinHint: pinyinHint, category: .phrase, autoLearned: true) != nil {
+                let updated = store.loadDictionary()
+                Task { @MainActor [weak self] in
+                    self?.personalWords = updated
+                }
+            }
+        }
+    }
+
     private func learnCombinedPhraseTokensIfValid(_ tokens: [CommittedChineseToken]) {
         guard tokens.count >= 2 else { return }
         let combinedWord = tokens.map(\.word).joined()
         let combinedPy = tokens.map(\.pinyin).joined()
         let combinedDigits = tokens.map(\.digits).joined()
         guard combinedWord.count >= 2,
-              combinedWord.count <= 6,
+              combinedWord.count <= 8,
               !combinedPy.isEmpty,
               !combinedDigits.isEmpty else { return }
 
         let lexiconDB = lexicon
-        queryQueue.async {
+        let storeRef = self.store
+        queryQueue.async { [weak self] in
             lexiconDB.recordT9Selection(
                 digits: combinedDigits,
                 word: combinedWord,
                 pinyin: combinedPy,
                 boostWeight: 1
             )
-        }
-
-        let count = (sequentialPhraseCounts[combinedWord] ?? 0) + 1
-        if sequentialPhraseCounts.count > 64 {
-            sequentialPhraseCounts.removeAll()
-        }
-        sequentialPhraseCounts[combinedWord] = count
-
-        if count >= 2 {
-            let store = self.store
-            statusQueue.async { [weak self] in
-                if store.addOrLearnWord(term: combinedWord, pinyinHint: combinedPy, category: .phrase, autoLearned: true) != nil {
-                    let updated = store.loadDictionary()
-                    Task { @MainActor [weak self] in
-                        self?.personalWords = updated
-                    }
+            // Persist across keyboard restarts using SQLite frequency instead of volatile RAM counters
+            if lexiconDB.fetchUserPhraseFrequency(pinyin: combinedPy, word: combinedWord) >= 2 {
+                Task { @MainActor [weak self] in
+                    self?.promoteLearnedWordToStore(term: combinedWord, pinyinHint: combinedPy, store: storeRef)
                 }
             }
         }
@@ -1096,6 +1129,13 @@ public final class KeyboardStateModel: ObservableObject {
         scheduleContextRefresh()
     }
 
+    public func toggleCandidateDrawer() {
+        isEmoticonDrawerOpen = false
+        isT9PinyinPickerExpanded = false
+        isCandidateDrawerExpanded.toggle()
+        triggerHaptic()
+    }
+
     public func toggleT9PinyinPicker() {
         triggerHaptic()
         guard !t9ComposingDigits.isEmpty else { return }
@@ -1151,7 +1191,7 @@ public final class KeyboardStateModel: ObservableObject {
         let counter = t9QueryToken
         let lexicon = self.lexicon
         let pureCount = digits.filter { $0 != "'" }.count
-        let needsSentencePhase = pureCount >= 3 || digits.contains("'") || (filter?.contains("'") ?? false)
+        let needsSentencePhase = pureCount >= 4 || digits.contains("'") || (filter?.contains("'") ?? false)
 
         let publish: @Sendable ([String], [PinyinCandidate]) -> Void = { [weak self] sylls, cands in
             Task { @MainActor [weak self] in
@@ -1178,7 +1218,7 @@ public final class KeyboardStateModel: ObservableObject {
                 digits: digits,
                 pinyinFilter: filter,
                 personalWords: words,
-                limit: 40,
+                limit: 64,
                 includeSentenceDecoding: false,
                 isCancelled: { counter.value != token }
             )
@@ -1190,7 +1230,7 @@ public final class KeyboardStateModel: ObservableObject {
                 digits: digits,
                 pinyinFilter: filter,
                 personalWords: words,
-                limit: 40,
+                limit: 64,
                 includeSentenceDecoding: true,
                 isCancelled: { counter.value != token }
             )
@@ -1346,26 +1386,38 @@ public final class KeyboardStateModel: ObservableObject {
             let py = bestFull.displayPinyin
                 .replacingOccurrences(of: " ", with: "'")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let matchedCount = py.lowercased().filter { $0 >= "a" && $0 <= "z" }.count
-            if matchedCount >= pureDigits.count {
+            let cleanPy = py.lowercased().filter { $0 >= "a" && $0 <= "z" }
+            let cleanDigits = LexiconDatabase.pinyinToT9Digits(cleanPy)
+            if cleanDigits.hasPrefix(pureDigits) {
+                if cleanPy.count > pureDigits.count {
+                    return PinyinSyllableParser.segment(rawInput: String(cleanPy.prefix(pureDigits.count))).displayPinyin
+                }
                 return py
             }
-            let rem = String(pureDigits.dropFirst(matchedCount))
-            let suffix = formatSuffixDigits(rem, preferSyllables: [])
-            return suffix.isEmpty ? py : (py + "'" + suffix)
+            if cleanPy.count < pureDigits.count, pureDigits.hasPrefix(cleanDigits) {
+                let rem = String(pureDigits.dropFirst(cleanPy.count))
+                let suffix = formatSuffixDigits(rem, preferSyllables: [])
+                return suffix.isEmpty ? py : (py + "'" + suffix)
+            }
         }
 
         if let firstCand = candidates.first(where: { !$0.displayPinyin.isEmpty && $0.displayPinyin.rangeOfCharacter(from: .decimalDigits) == nil }) {
             let py = firstCand.displayPinyin
                 .replacingOccurrences(of: " ", with: "'")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let matchedCount = py.lowercased().filter { $0 >= "a" && $0 <= "z" }.count
-            if matchedCount >= pureDigits.count {
+            let cleanPy = py.lowercased().filter { $0 >= "a" && $0 <= "z" }
+            let cleanDigits = LexiconDatabase.pinyinToT9Digits(cleanPy)
+            if cleanDigits.hasPrefix(pureDigits) {
+                if cleanPy.count > pureDigits.count {
+                    return PinyinSyllableParser.segment(rawInput: String(cleanPy.prefix(pureDigits.count))).displayPinyin
+                }
                 return py
             }
-            let rem = String(pureDigits.dropFirst(matchedCount))
-            let suffix = formatSuffixDigits(rem, preferSyllables: [])
-            return suffix.isEmpty ? py : (py + "'" + suffix)
+            if cleanPy.count < pureDigits.count, pureDigits.hasPrefix(cleanDigits) {
+                let rem = String(pureDigits.dropFirst(cleanPy.count))
+                let suffix = formatSuffixDigits(rem, preferSyllables: [])
+                return suffix.isEmpty ? py : (py + "'" + suffix)
+            }
         }
 
         return formatSuffixDigits(pureDigits, preferSyllables: syllables)

@@ -19,21 +19,30 @@ public struct ManualKeyboardPanel: View {
             if model.isEmoticonDrawerOpen {
                 emoticonDrawerView
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if model.isCandidateDrawerExpanded && !model.pinyinCandidates.isEmpty {
-                expandedCandidateDrawer
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                // Band 2 (43.5pt): Full-width Candidate Words Bar
-                candidateOrAccessoryBar
-                    .frame(height: 43.5)
-                    .padding(.horizontal, 6)
+                // Band 2 (43.5pt): Anchored Candidate Bar (or Expanded Header with same top-right chevron)
+                Group {
+                    if model.isCandidateDrawerExpanded && !model.pinyinCandidates.isEmpty {
+                        expandedCandidateHeaderBar
+                    } else {
+                        candidateOrAccessoryBar
+                    }
+                }
+                .frame(height: 43.5)
+                .padding(.horizontal, 6)
 
-                // Band 3 (7pt top + 205pt keys + 5pt bottom = 217pt -> 293pt total)
-                keyGrid
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(.horizontal, 3)
-                    .padding(.top, 7)
-                    .padding(.bottom, 5)
+                if model.isCandidateDrawerExpanded && !model.pinyinCandidates.isEmpty {
+                    // Downward Candidate Expansion (replaces Band 3 below Band 2 seamlessly)
+                    expandedCandidateDrawer
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    // Band 3 (7pt top + 205pt keys + 5pt bottom = 217pt -> 293pt total)
+                    keyGrid
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(.horizontal, 3)
+                        .padding(.top, 7)
+                        .padding(.bottom, 5)
+                }
             }
         }
     }
@@ -205,19 +214,17 @@ public struct ManualKeyboardPanel: View {
     private var t9CandidateBar: some View {
         HStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 20) {
-                    ForEach(Array(model.pinyinCandidates.prefix(20).enumerated()), id: \.element.id) { idx, cand in
-                        Button {
-                            model.selectPinyinCandidate(cand)
-                        } label: {
-                            Text(cand.text)
-                                .font(.system(size: 20, weight: idx == 0 ? .medium : .regular))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                                .frame(height: 43.5)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
+                HStack(spacing: 20) {
+                    ForEach(Array(model.pinyinCandidates.prefix(24).enumerated()), id: \.element.id) { idx, cand in
+                        Text(cand.text)
+                            .font(.system(size: 20, weight: idx == 0 ? .medium : .regular))
+                            .foregroundStyle(idx == 0 ? Color.blue : Color.primary)
+                            .lineLimit(1)
+                            .frame(height: 43.5)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                model.selectPinyinCandidate(cand)
+                            }
                     }
                 }
                 .padding(.horizontal, 10)
@@ -226,56 +233,41 @@ public struct ManualKeyboardPanel: View {
             Divider().frame(height: 22)
 
             candidateChevronButton(isOpen: model.isCandidateDrawerExpanded) {
-                model.triggerHaptic()
-                model.isEmoticonDrawerOpen = false
-                model.isCandidateDrawerExpanded.toggle()
+                model.toggleCandidateDrawer()
             }
         }
     }
 
     private func candidateChevronButton(isOpen: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: isOpen ? "chevron.up" : "chevron.down")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 38, height: 43.5)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+        InstantChevronToggle(isOpen: isOpen, action: action)
     }
 
     private var qwertyCandidateBar: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 10) {
-                    ForEach(Array(model.pinyinCandidates.prefix(18).enumerated()), id: \.element.id) { idx, cand in
-                        Button {
-                            model.selectPinyinCandidate(cand)
-                        } label: {
-                            Text(idx == 0 ? "\(cand.text)" : "\(idx + 1).\(cand.text)")
-                                .font(.system(size: 18, weight: idx == 0 ? .semibold : .regular))
-                                .foregroundStyle(idx == 0 ? Color.blue : Color.primary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 6)
-                                .background(idx == 0 ? Color.blue.opacity(0.12) : Color.clear)
-                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
+                HStack(spacing: 12) {
+                    ForEach(Array(model.pinyinCandidates.prefix(22).enumerated()), id: \.element.id) { idx, cand in
+                        Text(idx == 0 ? "\(cand.text)" : "\(idx + 1).\(cand.text)")
+                            .font(.system(size: 18, weight: idx == 0 ? .semibold : .regular))
+                            .foregroundStyle(idx == 0 ? Color.blue : Color.primary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(idx == 0 ? Color.blue.opacity(0.12) : Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                model.selectPinyinCandidate(cand)
+                            }
                     }
                 }
                 .padding(.horizontal, 6)
             }
 
-            Button {
-                model.triggerHaptic()
-                model.isCandidateDrawerExpanded.toggle()
-            } label: {
-                Image(systemName: model.isCandidateDrawerExpanded ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 34, height: 43.5)
+            Divider().frame(height: 22)
+
+            candidateChevronButton(isOpen: model.isCandidateDrawerExpanded) {
+                model.toggleCandidateDrawer()
             }
-            .buttonStyle(.plain)
         }
     }
 
@@ -352,109 +344,146 @@ public struct ManualKeyboardPanel: View {
         }
     }
 
-    // MARK: - 2. Expanded Candidate Grid Drawer
+    // MARK: - 2. Downward Expanded Candidate Grid Drawer
+
+    private var expandedCandidateHeaderBar: some View {
+        HStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    Text("向下展开候选（\(model.pinyinCandidates.count)）")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+
+                    if model.pinyinLayoutMode == .t9 && model.selectedT9SyllableFilter != nil {
+                        Text("全部音节")
+                            .font(.system(size: 12, weight: .semibold))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(Color.blue.opacity(0.14))
+                            .foregroundStyle(.blue)
+                            .clipShape(Capsule())
+                            .onTapGesture {
+                                model.selectT9SyllableFilter(nil)
+                            }
+                    }
+
+                    if model.pinyinLayoutMode == .t9 {
+                        Text("分词 '")
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(specialKeyBackgroundColor)
+                            .foregroundStyle(.primary)
+                            .clipShape(Capsule())
+                            .onTapGesture {
+                                model.insertT9SyllableSeparator()
+                            }
+                    }
+                }
+                .padding(.horizontal, 10)
+            }
+
+            Divider().frame(height: 22)
+
+            candidateChevronButton(isOpen: true) {
+                model.toggleCandidateDrawer()
+            }
+        }
+    }
 
     private var expandedCandidateDrawer: some View {
-        VStack(spacing: 6) {
-            // Syllable filter bar (aligns with native iOS 9-key keyboard)
-            if model.pinyinLayoutMode == .t9 && !model.t9SyllableOptions.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        Button {
-                            model.selectT9SyllableFilter(nil)
-                        } label: {
-                            Text("全部")
-                                .font(.system(size: 13, weight: model.selectedT9SyllableFilter == nil ? .semibold : .regular))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(model.selectedT9SyllableFilter == nil ? Color.blue.opacity(0.18) : specialKeyBackgroundColor)
-                                .foregroundStyle(model.selectedT9SyllableFilter == nil ? Color.blue : Color.primary)
-                                .clipShape(Capsule())
-                        }
-                        .buttonStyle(.plain)
+        let candidates = model.pinyinCandidates
+        let hasLongPhrase = candidates.prefix(12).contains { $0.text.count >= 4 }
+        let cols = hasLongPhrase ? 4 : 5
+        let rows: [[(offset: Int, element: PinyinCandidate)]] = stride(from: 0, to: candidates.count, by: cols).map { start in
+            let end = min(start + cols, candidates.count)
+            return (start..<end).map { ($0, candidates[$0]) }
+        }
+        let hairline = colorScheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.10)
 
-                        ForEach(model.t9SyllableOptions, id: \.self) { syll in
-                            let isSelected = model.selectedT9SyllableFilter == syll
-                            Button {
-                                model.selectT9SyllableFilter(syll)
-                            } label: {
-                                Text(syll)
-                                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                                    .background(isSelected ? Color.blue.opacity(0.18) : specialKeyBackgroundColor)
-                                    .foregroundStyle(isSelected ? Color.blue : Color.primary)
-                                    .clipShape(Capsule())
+        return VStack(spacing: 0) {
+            Rectangle()
+                .fill(hairline)
+                .frame(height: 0.5)
+
+            ScrollView(showsIndicators: true) {
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, rowItems in
+                        HStack(spacing: 0) {
+                            ForEach(rowItems, id: \.element.id) { item in
+                                Text(item.element.text)
+                                    .font(.system(size: 18, weight: item.offset == 0 ? .semibold : .regular))
+                                    .foregroundStyle(item.offset == 0 ? Color.blue : Color.primary)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.62)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 43)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        model.selectPinyinCandidate(item.element)
+                                    }
+                                    .overlay(alignment: .trailing) {
+                                        Rectangle()
+                                            .fill(hairline)
+                                            .frame(width: 0.5)
+                                    }
                             }
-                            .buttonStyle(.plain)
+                            if rowItems.count < cols {
+                                ForEach(0..<(cols - rowItems.count), id: \.self) { _ in
+                                    Color.clear
+                                        .frame(maxWidth: .infinity)
+                                        .frame(height: 43)
+                                }
+                            }
                         }
+                        Rectangle()
+                            .fill(hairline)
+                            .frame(height: 0.5)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.top, 4)
                 }
             }
 
-            ScrollView {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 5), spacing: 8) {
-                    ForEach(model.pinyinCandidates) { cand in
-                        Button {
-                            model.selectPinyinCandidate(cand)
-                        } label: {
-                            Text(cand.text)
-                                .font(.system(size: 16))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.75)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 8)
-                                .background(keyBackgroundColor)
-                                .foregroundStyle(.primary)
-                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(8)
-            }
+            Rectangle()
+                .fill(hairline)
+                .frame(height: 0.5)
 
             HStack(spacing: 8) {
-                Button {
-                    model.clearComposing()
-                } label: {
-                    Text("清空拼音")
-                        .font(.system(size: 13, weight: .medium))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 36)
-                        .background(specialKeyBackgroundColor)
-                        .foregroundStyle(.primary)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                }
-                .buttonStyle(.plain)
+                Text("清空拼音")
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 32)
+                    .background(specialKeyBackgroundColor)
+                    .foregroundStyle(.primary)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        model.clearComposing()
+                    }
 
-                Button {
-                    model.handleBackspaceTap()
-                } label: {
-                    Image(systemName: "delete.left")
-                        .frame(width: 64, height: 36)
-                        .background(specialKeyBackgroundColor)
-                        .foregroundStyle(.primary)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                }
-                .buttonStyle(.plain)
+                Image(systemName: "delete.left")
+                    .font(.system(size: 15, weight: .medium))
+                    .frame(width: 68, height: 32)
+                    .background(specialKeyBackgroundColor)
+                    .foregroundStyle(.primary)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        model.handleBackspaceTap()
+                    }
 
-                Button {
-                    model.isCandidateDrawerExpanded = false
-                } label: {
-                    Text("返回键盘")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(width: 88, height: 36)
-                        .background(Color.blue)
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                }
-                .buttonStyle(.plain)
+                Text("收起")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 78, height: 32)
+                    .background(Color.blue)
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        model.isCandidateDrawerExpanded = false
+                    }
             }
             .padding(.horizontal, 8)
-            .padding(.bottom, 8)
+            .padding(.vertical, 5)
         }
     }
 
@@ -1050,5 +1079,37 @@ struct SpacebarTrackpadKey: View {
                     }
                 }
         )
+    }
+}
+
+/// Zero-delay touch-responsive chevron toggle placed next to scrollable candidate strips.
+private struct InstantChevronToggle: View {
+    let isOpen: Bool
+    let action: () -> Void
+
+    @State private var isPressed = false
+
+    var body: some View {
+        Image(systemName: isOpen ? "chevron.up" : "chevron.down")
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(isPressed ? Color.blue : Color.secondary)
+            .frame(width: 38, height: 43.5)
+            .background(isPressed ? Color.blue.opacity(0.10) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        if !isPressed {
+                            isPressed = true
+                        }
+                    }
+                    .onEnded { value in
+                        isPressed = false
+                        if abs(value.translation.width) < 44 && abs(value.translation.height) < 44 {
+                            action()
+                        }
+                    }
+            )
     }
 }

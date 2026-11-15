@@ -439,4 +439,111 @@ final class FlowTypeTests: XCTestCase {
         XCTAssertTrue(decodedWithPiP.autoKeepAlivePiP)
         XCTAssertFalse(decodedWithPiP.enableAudioBackgroundKeepAlive)
     }
+
+    func testT9966RankingEliminatesSyntheticViterbiAndRanksRealWords() throws {
+        let userDBURL = tempDir.appendingPathComponent("t9_966_test.sqlite")
+        let db = LexiconDatabase(
+            bundleDBURL: Bundle(for: LexiconDatabase.self).url(forResource: "lexicon", withExtension: "sqlite"),
+            userDBURL: userDBURL
+        )
+
+        let (_, cands966) = db.queryT9Candidates(digits: "966", includeSentenceDecoding: true)
+        XCTAssertEqual(cands966.first?.text, "我们")
+        XCTAssertFalse(cands966.contains(where: { $0.text == "我哦" || $0.text == "我嗯" || $0.text == "握哦" }))
+        XCTAssertTrue(cands966.contains(where: { $0.text == "我" }))
+
+        let (_, candsSplit966) = db.queryT9Candidates(digits: "96'6", includeSentenceDecoding: true)
+        XCTAssertFalse(candsSplit966.isEmpty)
+
+        let (_, cands94664) = db.queryT9Candidates(digits: "94664", includeSentenceDecoding: true)
+        XCTAssertEqual(cands94664.first?.text, "中")
+    }
+
+    func testImmediateCrossSessionSelfLearningAndPrefixRetention() throws {
+        let userDBURL = tempDir.appendingPathComponent("cross_session_learning.sqlite")
+        let bundleURL = Bundle(for: LexiconDatabase.self).url(forResource: "lexicon", withExtension: "sqlite")
+
+        var db1: LexiconDatabase? = LexiconDatabase(bundleDBURL: bundleURL, userDBURL: userDBURL)
+        // Immediate synchronous visibility on the very next query (no sleep)
+        db1?.recordT9Selection(digits: "64", word: "米", pinyin: "mi")
+        XCTAssertEqual(db1?.queryT9Candidates(digits: "64").candidates.first?.text, "米")
+
+        // Prefix digit selection still stores canonical full pinyin digits & initials
+        db1?.recordT9Selection(digits: "546", word: "林微音", pinyin: "linweiyin")
+        XCTAssertEqual(db1?.fetchUserPhraseFrequency(pinyin: "linweiyin", word: "林微音"), 1)
+        db1 = nil
+
+        // Reopen DB (simulates iOS keyboard extension restart)
+        let db2 = LexiconDatabase(bundleDBURL: bundleURL, userDBURL: userDBURL)
+        db2.recordT9Selection(digits: "546934946", word: "林微音", pinyin: "linweiyin")
+        XCTAssertEqual(db2.fetchUserPhraseFrequency(pinyin: "linweiyin", word: "林微音"), 2)
+
+        XCTAssertEqual(db2.queryT9Candidates(digits: "546934946").candidates.first?.text, "林微音")
+        XCTAssertEqual(db2.queryT9Candidates(digits: "5469").candidates.first?.text, "林微音")
+        XCTAssertTrue(db2.queryT9Candidates(digits: "546").candidates.contains(where: { $0.text == "林微音" }))
+        XCTAssertEqual(db2.queryT9Candidates(digits: "599").candidates.first?.text, "林微音")
+        XCTAssertEqual(db2.queryPinyinCandidates(rawInput: "lwy").candidates.first?.text, "林微音")
+        XCTAssertEqual(db2.queryPinyinCandidates(rawInput: "linwei").candidates.first?.text, "林微音")
+    }
+
+    func testOnlineLexiconParsingChunkedSyncAndPriority() throws {
+        let userDBURL = tempDir.appendingPathComponent("online_lexicon.sqlite")
+        let db = LexiconDatabase(
+            bundleDBURL: Bundle(for: LexiconDatabase.self).url(forResource: "lexicon", withExtension: "sqlite"),
+            userDBURL: userDBURL
+        )
+
+        XCTAssertEqual(
+            OnlineLexiconService.normalizeRawURLString("https://github.com/user/repo/blob/main/dict.txt"),
+            "https://raw.githubusercontent.com/user/repo/main/dict.txt"
+        )
+
+        let rimeSample = """
+        ---
+        name: custom_test
+        version: "1.0"
+        ...
+        # comment line
+        星辰大海\txingchendahai\t800
+        ni hao\t你好
+        全能签
+        FlowTypePro
+        """
+        let parsedText = OnlineLexiconService.parse(text: rimeSample) { term in
+            db.derivePinyin(for: term)
+        }
+        XCTAssertTrue(parsedText.contains(where: { $0.term == "星辰大海" && $0.pinyin == "xingchendahai" && $0.weight == 800 }))
+        XCTAssertTrue(parsedText.contains(where: { $0.term == "全能签" && $0.pinyin == "quannengqian" }))
+        XCTAssertTrue(parsedText.contains(where: { $0.term == "FlowTypePro" }))
+
+        let jsonSample = #"[{"word":"光年之外","pinyin":"guangnianzhiwai","weight":500}]"#
+        let parsedJSON = OnlineLexiconService.parse(text: jsonSample)
+        XCTAssertEqual(parsedJSON.first?.term, "光年之外")
+
+        let store = SharedStore(containerURL: tempDir)
+        var bulk = parsedText + parsedJSON
+        for idx in 0..<1200 {
+            bulk.append(OnlineLexiconEntry(term: "测试词条\(idx)", pinyin: "ceshicitiao", weight: 50))
+        }
+        let snapshot = OnlineLexiconSnapshot(
+            revision: 42,
+            updatedAt: Date(),
+            sourceURL: "https://example.com/dict.txt",
+            entries: bulk
+        )
+        store.saveOnlineLexiconSnapshot(snapshot)
+        XCTAssertGreaterThanOrEqual(store.loadOnlineLexiconRevision(), 42)
+        XCTAssertEqual(store.loadOnlineLexiconSnapshot()?.entries.count, bulk.count)
+
+        db.syncOnlineLexiconIfNeeded(store: store)
+        XCTAssertGreaterThanOrEqual(db.onlineWordsCount(), 1200)
+        XCTAssertEqual(db.queryT9Candidates(digits: "9464243632424").candidates.first?.text, "星辰大海")
+        XCTAssertEqual(db.queryPinyinCandidates(rawInput: "xingchendahai").candidates.first?.text, "星辰大海")
+        XCTAssertEqual(db.queryPinyinCandidates(rawInput: "xcdh").candidates.first?.text, "星辰大海")
+        XCTAssertTrue(db.queryEnglishCompletions(prefix: "Flow").contains("FlowTypePro"))
+
+        store.clearOnlineLexiconSnapshot()
+        db.syncOnlineLexiconIfNeeded(store: store)
+        XCTAssertEqual(db.onlineWordsCount(), 0)
+    }
 }

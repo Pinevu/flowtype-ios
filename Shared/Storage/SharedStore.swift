@@ -266,6 +266,16 @@ public final class SharedStore: @unchecked Sendable {
             autoLearned: autoLearned
         )
         list.insert(entry, at: 0)
+        if isUsingKeychainSync && list.count > 160 {
+            let manual = list.filter { !$0.autoLearned }
+            var auto = list.filter { $0.autoLearned }
+                .sorted { ($0.usageCount, $0.createdAt) > ($1.usageCount, $1.createdAt) }
+            let autoBudget = max(40, 160 - manual.count)
+            if auto.count > autoBudget {
+                auto = Array(auto.prefix(autoBudget))
+            }
+            list = manual + auto
+        }
         saveDictionary(list)
         return entry
     }
@@ -274,6 +284,185 @@ public final class SharedStore: @unchecked Sendable {
         guard !ids.isEmpty else { return }
         let filtered = loadDictionary().filter { !ids.contains($0.id) }
         saveDictionary(filtered)
+    }
+
+    // MARK: - Online Custom Lexicon Storage (App Group + Compressed Chunked Keychain)
+
+    private struct OnlineLexiconMeta: Codable, Sendable {
+        var revision: Int64
+        var updatedAt: Date
+        var sourceURL: String
+        var entryCount: Int
+        var chunkCount: Int
+    }
+
+    private static let onlineMetaFilename = "online_lexicon_meta.json"
+    private static let onlinePayloadFilename = "online_lexicon.tsv.lzfse"
+    private static let onlineMetaKCKey = "online_lexicon_meta"
+    private static let onlineChunkKCKeyPrefix = "online_lexicon_chunk_"
+    private static let onlineChunkSizeBytes = 24 * 1024
+    private static let onlineMaxChunks = 32
+
+    public func loadOnlineLexiconRevision() -> Int64 {
+        readOnlineMeta()?.revision ?? 0
+    }
+
+    public func saveOnlineLexiconSnapshot(_ snapshot: OnlineLexiconSnapshot) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let oldRev = readOnlineMetaUnlocked()?.revision ?? 0
+        let tsRev = Int64(Date().timeIntervalSince1970 * 1000)
+        let rev = max(snapshot.revision, max(oldRev + 1, tsRev))
+
+        var lines: [String] = []
+        lines.reserveCapacity(snapshot.entries.count)
+        for item in snapshot.entries {
+            let cleanTerm = item.term
+                .replacingOccurrences(of: "\t", with: " ")
+                .replacingOccurrences(of: "\r", with: "")
+                .replacingOccurrences(of: "\n", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanTerm.isEmpty else { continue }
+            let cleanPy = item.pinyin.lowercased().filter { $0 >= "a" && $0 <= "z" }
+            lines.append("\(cleanTerm)\t\(cleanPy)\t\(item.weight)")
+        }
+
+        let rawData = Data(lines.joined(separator: "\n").utf8)
+        let compressed = (try? (rawData as NSData).compressed(using: .lzfse) as Data) ?? rawData
+
+        var chunksWritten = 0
+        if isUsingKeychainSync, let kcGroup = activeKeychainAccessGroup {
+            if !lines.isEmpty && !compressed.isEmpty {
+                let chunkSize = Self.onlineChunkSizeBytes
+                var offset = 0
+                while offset < compressed.count && chunksWritten < Self.onlineMaxChunks {
+                    let end = min(compressed.count, offset + chunkSize)
+                    let slice = compressed.subdata(in: offset..<end)
+                    _ = KeychainSyncBridge.write(
+                        data: slice,
+                        key: "\(Self.onlineChunkKCKeyPrefix)\(chunksWritten)",
+                        accessGroup: kcGroup
+                    )
+                    chunksWritten += 1
+                    offset = end
+                }
+            }
+            for idx in chunksWritten..<Self.onlineMaxChunks {
+                _ = KeychainSyncBridge.delete(
+                    key: "\(Self.onlineChunkKCKeyPrefix)\(idx)",
+                    accessGroup: kcGroup
+                )
+            }
+        }
+
+        let meta = OnlineLexiconMeta(
+            revision: rev,
+            updatedAt: snapshot.updatedAt,
+            sourceURL: snapshot.sourceURL,
+            entryCount: lines.count,
+            chunkCount: chunksWritten
+        )
+
+        if let metaData = try? encoder.encode(meta) {
+            try? compressed.write(to: fileURL(Self.onlinePayloadFilename), options: .atomic)
+            try? metaData.write(to: fileURL(Self.onlineMetaFilename), options: .atomic)
+            if isUsingKeychainSync, let kcGroup = activeKeychainAccessGroup {
+                _ = KeychainSyncBridge.write(data: metaData, key: Self.onlineMetaKCKey, accessGroup: kcGroup)
+            }
+        }
+    }
+
+    public func clearOnlineLexiconSnapshot() {
+        let rev = max(Int64(Date().timeIntervalSince1970 * 1000), loadOnlineLexiconRevision() + 1)
+        saveOnlineLexiconSnapshot(
+            OnlineLexiconSnapshot(revision: rev, updatedAt: Date(), sourceURL: "", entries: [])
+        )
+    }
+
+    public func loadOnlineLexiconSnapshot() -> OnlineLexiconSnapshot? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let meta = readOnlineMetaUnlocked() else { return nil }
+        if meta.entryCount == 0 {
+            return OnlineLexiconSnapshot(
+                revision: meta.revision,
+                updatedAt: meta.updatedAt,
+                sourceURL: meta.sourceURL,
+                entries: []
+            )
+        }
+
+        var compressedData: Data?
+        let fileMeta = readFileOnlineMetaUnlocked()
+        if let fileMeta, fileMeta.revision >= meta.revision,
+           let filePayload = try? Data(contentsOf: fileURL(Self.onlinePayloadFilename)) {
+            compressedData = filePayload
+        } else if isUsingKeychainSync, let kcGroup = activeKeychainAccessGroup, meta.chunkCount > 0 {
+            var assembled = Data()
+            var valid = true
+            for idx in 0..<meta.chunkCount {
+                if let chunk = KeychainSyncBridge.read(key: "\(Self.onlineChunkKCKeyPrefix)\(idx)", accessGroup: kcGroup) {
+                    assembled.append(chunk)
+                } else {
+                    valid = false
+                    break
+                }
+            }
+            if valid && !assembled.isEmpty {
+                compressedData = assembled
+            }
+        }
+
+        if compressedData == nil {
+            compressedData = try? Data(contentsOf: fileURL(Self.onlinePayloadFilename))
+        }
+        guard let compressed = compressedData else { return nil }
+
+        let rawData = (try? (compressed as NSData).decompressed(using: .lzfse) as Data) ?? compressed
+        guard let text = String(data: rawData, encoding: .utf8) else { return nil }
+
+        var entries: [OnlineLexiconEntry] = []
+        entries.reserveCapacity(meta.entryCount)
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard !parts.isEmpty else { continue }
+            let term = String(parts[0])
+            let py = parts.count > 1 ? String(parts[1]) : ""
+            let weight = parts.count > 2 ? (Int(parts[2]) ?? 100) : 100
+            entries.append(OnlineLexiconEntry(term: term, pinyin: py, weight: weight))
+        }
+
+        return OnlineLexiconSnapshot(
+            revision: meta.revision,
+            updatedAt: meta.updatedAt,
+            sourceURL: meta.sourceURL,
+            entries: entries
+        )
+    }
+
+    private func readOnlineMeta() -> OnlineLexiconMeta? {
+        lock.lock()
+        defer { lock.unlock() }
+        return readOnlineMetaUnlocked()
+    }
+
+    private func readFileOnlineMetaUnlocked() -> OnlineLexiconMeta? {
+        guard let data = try? Data(contentsOf: fileURL(Self.onlineMetaFilename)) else { return nil }
+        return try? decoder.decode(OnlineLexiconMeta.self, from: data)
+    }
+
+    private func readOnlineMetaUnlocked() -> OnlineLexiconMeta? {
+        let fileMeta = readFileOnlineMetaUnlocked()
+        if isUsingKeychainSync, let kcGroup = activeKeychainAccessGroup,
+           let kcData = KeychainSyncBridge.read(key: Self.onlineMetaKCKey, accessGroup: kcGroup),
+           let kcMeta = try? decoder.decode(OnlineLexiconMeta.self, from: kcData) {
+            if let fm = fileMeta {
+                return fm.revision >= kcMeta.revision ? fm : kcMeta
+            }
+            return kcMeta
+        }
+        return fileMeta
     }
 
     // MARK: - History & Insights

@@ -182,6 +182,13 @@ public struct AIConfiguration: Codable, Equatable, Sendable {
     public var customBackgroundOffsetY: Double
     public var customBackgroundRevision: Int
 
+    // MARK: - Online Custom Lexicon
+    public var onlineLexiconURL: String
+    public var onlineLexiconAutoSync: Bool
+    public var onlineLexiconLastSyncAt: Date?
+    public var onlineLexiconWordCount: Int
+    public var onlineLexiconLastError: String
+
     public init(
         asrProvider: ASRProviderKind = .openAIWhisperCompatible,
         asrBaseURL: String = "https://api.openai.com/v1",
@@ -216,7 +223,12 @@ public struct AIConfiguration: Codable, Equatable, Sendable {
         customBackgroundScale: Double = 1.0,
         customBackgroundOffsetX: Double = 0.0,
         customBackgroundOffsetY: Double = 0.0,
-        customBackgroundRevision: Int = 0
+        customBackgroundRevision: Int = 0,
+        onlineLexiconURL: String = "",
+        onlineLexiconAutoSync: Bool = true,
+        onlineLexiconLastSyncAt: Date? = nil,
+        onlineLexiconWordCount: Int = 0,
+        onlineLexiconLastError: String = ""
     ) {
         self.asrProvider = asrProvider
         self.asrBaseURL = asrBaseURL
@@ -252,6 +264,11 @@ public struct AIConfiguration: Codable, Equatable, Sendable {
         self.customBackgroundOffsetX = customBackgroundOffsetX
         self.customBackgroundOffsetY = customBackgroundOffsetY
         self.customBackgroundRevision = customBackgroundRevision
+        self.onlineLexiconURL = onlineLexiconURL
+        self.onlineLexiconAutoSync = onlineLexiconAutoSync
+        self.onlineLexiconLastSyncAt = onlineLexiconLastSyncAt
+        self.onlineLexiconWordCount = onlineLexiconWordCount
+        self.onlineLexiconLastError = onlineLexiconLastError
     }
 
     public init(from decoder: Decoder) throws {
@@ -291,6 +308,11 @@ public struct AIConfiguration: Codable, Equatable, Sendable {
         self.customBackgroundOffsetX = try container.decodeIfPresent(Double.self, forKey: .customBackgroundOffsetX) ?? 0.0
         self.customBackgroundOffsetY = try container.decodeIfPresent(Double.self, forKey: .customBackgroundOffsetY) ?? 0.0
         self.customBackgroundRevision = try container.decodeIfPresent(Int.self, forKey: .customBackgroundRevision) ?? 0
+        self.onlineLexiconURL = try container.decodeIfPresent(String.self, forKey: .onlineLexiconURL) ?? ""
+        self.onlineLexiconAutoSync = try container.decodeIfPresent(Bool.self, forKey: .onlineLexiconAutoSync) ?? true
+        self.onlineLexiconLastSyncAt = try container.decodeIfPresent(Date.self, forKey: .onlineLexiconLastSyncAt)
+        self.onlineLexiconWordCount = try container.decodeIfPresent(Int.self, forKey: .onlineLexiconWordCount) ?? 0
+        self.onlineLexiconLastError = try container.decodeIfPresent(String.self, forKey: .onlineLexiconLastError) ?? ""
     }
 
     public static let defaultDictationPrompt = """

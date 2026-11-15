@@ -76,3 +76,34 @@ public struct HistoryRecord: Codable, Identifiable, Equatable {
         self.characterCount = characterCount ?? finalOutput.count
     }
 }
+
+public struct OnlineLexiconEntry: Codable, Equatable, Hashable, Sendable {
+    public var term: String
+    public var pinyin: String
+    public var weight: Int
+
+    public init(term: String, pinyin: String = "", weight: Int = 100) {
+        self.term = term
+        self.pinyin = pinyin
+        self.weight = weight
+    }
+}
+
+public struct OnlineLexiconSnapshot: Codable, Equatable, Sendable {
+    public var revision: Int64
+    public var updatedAt: Date
+    public var sourceURL: String
+    public var entries: [OnlineLexiconEntry]
+
+    public init(
+        revision: Int64 = 0,
+        updatedAt: Date = Date(),
+        sourceURL: String = "",
+        entries: [OnlineLexiconEntry] = []
+    ) {
+        self.revision = revision
+        self.updatedAt = updatedAt
+        self.sourceURL = sourceURL
+        self.entries = entries
+    }
+}

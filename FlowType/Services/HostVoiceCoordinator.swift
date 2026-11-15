@@ -11,6 +11,8 @@ public final class HostVoiceCoordinator: ObservableObject {
     @Published public var selectedTab: Int = 0
     @Published public var lastQuickTestResult: String = ""
     @Published public var lastQuickTestRaw: String = ""
+    @Published public var onlineLexiconEntries: [OnlineLexiconEntry] = []
+    @Published public var isSyncingOnlineLexicon: Bool = false
 
     public let pipManager = PiPKeepAliveManager()
     private let audioService = AudioCaptureService()
@@ -32,6 +34,7 @@ public final class HostVoiceCoordinator: ObservableObject {
         self.config = loadedConfig
         self.dictionary = store.loadDictionary()
         self.history = store.loadHistory()
+        self.onlineLexiconEntries = store.loadOnlineLexiconSnapshot()?.entries ?? []
         self.status = HostRuntimeStatus(
             state: .idle,
             isPiPActive: false,
@@ -51,6 +54,25 @@ public final class HostVoiceCoordinator: ObservableObject {
                 self.status.state = .standbyPiP
             }
             publishStatus()
+        }
+
+        let storeRef = self.store
+        Task.detached(priority: .utility) {
+            LexiconDatabase.shared.syncOnlineLexiconIfNeeded(store: storeRef)
+        }
+        if loadedConfig.onlineLexiconAutoSync,
+           !loadedConfig.onlineLexiconURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let needsAutoRefresh: Bool
+            if let lastSync = loadedConfig.onlineLexiconLastSyncAt {
+                needsAutoRefresh = Date().timeIntervalSince(lastSync) > 900
+            } else {
+                needsAutoRefresh = true
+            }
+            if needsAutoRefresh {
+                Task { [weak self] in
+                    await self?.syncOnlineLexicon()
+                }
+            }
         }
     }
 
@@ -151,11 +173,99 @@ public final class HostVoiceCoordinator: ObservableObject {
     public func addWord(term: String, pinyinHint: String, category: WordCategory) {
         _ = store.addOrLearnWord(term: term, pinyinHint: pinyinHint, category: category, autoLearned: false)
         dictionary = store.loadDictionary()
+        notifyBridge.post(name: AppConfig.Notify.configChanged)
     }
 
     public func deleteWords(ids: Set<UUID>) {
         store.deleteDictionaryWords(ids: ids)
         dictionary = store.loadDictionary()
+        notifyBridge.post(name: AppConfig.Notify.configChanged)
+    }
+
+    public func clearAutoLearnedWords() {
+        let autoIDs = Set(dictionary.filter(\.autoLearned).map(\.id))
+        guard !autoIDs.isEmpty else { return }
+        deleteWords(ids: autoIDs)
+    }
+
+    // MARK: - Online Custom Lexicon Sync & Import
+
+    public func syncOnlineLexicon(urlString: String? = nil) async {
+        guard !isSyncingOnlineLexicon else { return }
+        let targetURL = (urlString ?? config.onlineLexiconURL).trimmingCharacters(in: .whitespacesAndNewlines)
+        var updated = config
+        updated.onlineLexiconURL = targetURL
+        guard !targetURL.isEmpty else {
+            updated.onlineLexiconLastError = "请先输入词库链接"
+            saveConfiguration(updated)
+            return
+        }
+
+        isSyncingOnlineLexicon = true
+        defer { isSyncingOnlineLexicon = false }
+
+        do {
+            let entries = try await OnlineLexiconService.fetchAndParse(urlString: targetURL) { term in
+                LexiconDatabase.shared.derivePinyin(for: term)
+            }
+            applyOnlineLexiconEntries(entries, sourceURL: OnlineLexiconService.normalizeRawURLString(targetURL))
+        } catch {
+            var errCfg = config
+            errCfg.onlineLexiconURL = targetURL
+            errCfg.onlineLexiconLastError = error.localizedDescription
+            saveConfiguration(errCfg)
+        }
+    }
+
+    @discardableResult
+    public func importOnlineLexiconText(_ rawText: String, sourceLabel: String = "手动文本导入") -> Int {
+        let entries = OnlineLexiconService.parse(text: rawText) { term in
+            LexiconDatabase.shared.derivePinyin(for: term)
+        }
+        guard !entries.isEmpty else {
+            var errCfg = config
+            errCfg.onlineLexiconLastError = OnlineLexiconError.emptyOrUnsupportedFormat.localizedDescription
+            saveConfiguration(errCfg)
+            return 0
+        }
+        applyOnlineLexiconEntries(entries, sourceURL: sourceLabel)
+        return entries.count
+    }
+
+    public func clearOnlineLexicon() {
+        store.clearOnlineLexiconSnapshot()
+        let rev = store.loadOnlineLexiconRevision()
+        LexiconDatabase.shared.replaceOnlineWords([], revision: rev)
+        onlineLexiconEntries = []
+        var updated = config
+        updated.onlineLexiconWordCount = 0
+        updated.onlineLexiconLastError = ""
+        updated.onlineLexiconLastSyncAt = nil
+        saveConfiguration(updated)
+        notifyBridge.post(name: AppConfig.Notify.onlineLexiconChanged)
+    }
+
+    private func applyOnlineLexiconEntries(_ entries: [OnlineLexiconEntry], sourceURL: String) {
+        let rev = max(store.loadOnlineLexiconRevision() + 1, Int64(Date().timeIntervalSince1970 * 1000))
+        let snapshot = OnlineLexiconSnapshot(
+            revision: rev,
+            updatedAt: Date(),
+            sourceURL: sourceURL,
+            entries: entries
+        )
+        store.saveOnlineLexiconSnapshot(snapshot)
+        LexiconDatabase.shared.replaceOnlineWords(entries, revision: rev)
+        onlineLexiconEntries = entries
+
+        var updated = config
+        if sourceURL.lowercased().hasPrefix("http") {
+            updated.onlineLexiconURL = sourceURL
+        }
+        updated.onlineLexiconLastSyncAt = Date()
+        updated.onlineLexiconWordCount = entries.count
+        updated.onlineLexiconLastError = ""
+        saveConfiguration(updated)
+        notifyBridge.post(name: AppConfig.Notify.onlineLexiconChanged)
     }
 
     public func deleteHistory(ids: Set<UUID>) {
@@ -437,6 +547,25 @@ public final class HostVoiceCoordinator: ObservableObject {
             status.state = .error
             status.errorMessage = error.localizedDescription
             publishStatus()
+        }
+
+        let storeRef = self.store
+        Task.detached(priority: .utility) {
+            LexiconDatabase.shared.syncOnlineLexiconIfNeeded(store: storeRef)
+        }
+        if loadedConfig.onlineLexiconAutoSync,
+           !loadedConfig.onlineLexiconURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let needsAutoRefresh: Bool
+            if let lastSync = loadedConfig.onlineLexiconLastSyncAt {
+                needsAutoRefresh = Date().timeIntervalSince(lastSync) > 900
+            } else {
+                needsAutoRefresh = true
+            }
+            if needsAutoRefresh {
+                Task { [weak self] in
+                    await self?.syncOnlineLexicon()
+                }
+            }
         }
     }
 
